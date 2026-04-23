@@ -1,7 +1,13 @@
 /**
  * One-time setup script to authorize Google Sheets access via OAuth 2.0.
- * Run this ONCE: node setup-sheets-auth.js
- * It will open a browser, you approve, and it saves your refresh token to .env.
+ * Run: node setup-sheets-auth.js
+ * It opens a browser, you approve, and it saves your refresh token to .env.
+ *
+ * Scope: spreadsheets **read/write** (lead/case roster + weekly sentiment log append/update).
+ * Email stays on SMTP + app password in .env — not this token.
+ *
+ * Re-run after scope changes and replace GOOGLE_REFRESH_TOKEN (revoke old access at
+ * https://myaccount.google.com/permissions if Google returns no new refresh_token).
  */
 require('dotenv').config();
 const { google } = require('googleapis');
@@ -13,7 +19,7 @@ const CLIENT_ID     = process.env.GOOGLE_CLIENT_ID;
 const CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 const PORT          = 3000;
 const REDIRECT_URI  = `http://localhost:${PORT}/callback`;
-const SCOPES        = ['https://www.googleapis.com/auth/spreadsheets.readonly'];
+const SCOPES = ['https://www.googleapis.com/auth/spreadsheets'];
 const ENV_FILE      = '.env';
 
 if (!CLIENT_ID || !CLIENT_SECRET) {

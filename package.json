@@ -7,6 +7,7 @@
     "start": "node scheduler.js",
     "fetch": "node fetch_calls.js",
     "report": "node report.js",
+    "report:monthly": "node report.js monthly",
     "schedule": "node scheduler.js"
   },
   "engines": {

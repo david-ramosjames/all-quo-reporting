@@ -1,6 +1,6 @@
 // ============================================================================
-// DAILY CALL REPORT — Full transcripts, coaching, Quo links (no Slack/Sheet)
 // DAILY LEAD REPORT — Call summaries only + Slack + Google Sheets
+// WEEKLY CLIENT SENTIMENT — per-client bundle (summaries + SMS + call metadata) → JSON (see report.js)
 // ============================================================================
 
 const FIRM_CONTEXT = `
@@ -35,100 +35,7 @@ OTHER: VOICEMAIL / NO ANSWER
 `.trim();
 
 /**
- * Daily Call Report — full transcripts, specific good/bad calls with [View in Quo](url).
- */
-const generateDailyCallReportPrompt = ({
-  COMPANY_NAME,
-  dateLabel,
-  dayOfWeek,
-  reportRangeLabel,
-  callData,
-  totalCalls,
-  totalDurationMin,
-  lineBreakdown,
-  contactBreakdown,
-  callBlocksFullTranscript,
-}) => `
-You are a phone-quality coach and senior intake analyst for ${COMPANY_NAME}, a personal injury law firm in Austin, Texas.
-
-This is the **Daily Call Report** — for managers who want **actionable coaching** from **real conversations**. Slack and the lead spreadsheet are NOT included here; focus entirely on **what happened on the phone**.
-
-REPORTING WINDOW:
-${reportRangeLabel}
-
-DAY: ${dayOfWeek}, ${dateLabel}
-
-STATISTICS:
-- Total calls (all lines): ${totalCalls}
-- Calls with transcripts below: ${callData.length}
-- Total talk time (this batch): ${totalDurationMin} minutes
-- By line: ${lineBreakdown}
-- Known contact vs. new/unknown: ${contactBreakdown}
-
-${FIRM_CONTEXT}
-
-${CLASSIFICATION_BLOCK}
-
-─────────────────────────────────────────────────────────
-CALL LOG — FULL TRANSCRIPTS (analyze these in depth)
-─────────────────────────────────────────────────────────
-
-Each block has: line, contact, duration, time, **SUMMARY**, **FULL TRANSCRIPT**, and **LINK** (Quo URL). Use the transcript as primary evidence; summary is secondary.
-
-${callBlocksFullTranscript || '(No calls with transcripts in this period.)'}
-
-─────────────────────────────────────────────────────────
-OUTPUT FORMAT — use EXACTLY these sections
-─────────────────────────────────────────────────────────
-
-## 📞 Daily Call Report — ${dateLabel}
-
-Short intro (2–3 sentences): overall intake quality for the day vs. benchmarks (volume, voicemail share if inferable, tone).
-
-## ✅ Strong calls — specific examples
-
-Pick **3–6** calls that exemplify **good** intake (empathy, value prop, lead source, third-party work-injury probe, referral on decline, follow-up scheduled, bilingual handling, etc.).
-
-For **each** example use this **exact block order** (no skipping lines):
-
-1. **Call [#]** — match the bracket number in the data (e.g. \`CALL [7]\` → **Call [7]**).
-2. **Name:** Caller / contact name from the \`CONTACT:\` field in that block. If unknown or \`(unknown — …)\`, write **Name:** Unknown caller (or best name heard on the call if stated in transcript).
-3. **Phone:** The **full** number from \`PHONE:\` in that block — never mask (no \`***\` or last-four-only).
-4. **Quo:** Markdown link using the **exact** URL from that block's \`LINK:\` line — \`[View in Quo](https://...)\`
-5. **What was strong:** Then 1–3 sentences (optional short transcript quote) explaining why this call is an exemplar.
-
-## ⚠️ Calls that need improvement — specific examples
-
-Pick **3–8** calls with **clear coaching opportunities** (missed referral, no lead-source question, undecided with no next step, weak third-party probe on work injury, rushed screening, no delayed-symptom check, etc.). Skip spam/wrong-number unless there is a real training angle.
-
-For **each** example use the **same block order** as above:
-
-1. **Call [#]**
-2. **Name:** (from \`CONTACT:\` or transcript / Unknown caller)
-3. **Phone:** Full number from \`PHONE:\` — never mask
-4. **Quo:** \`[View in Quo](https://...)\` from that block's \`LINK:\`
-5. **What was wrong or missing:** Ground in the transcript (what was said or not said).
-6. **Concrete fix:** One specific behavior change for next time.
-
-If fewer than 3 coaching-worthy calls exist, say so honestly and cover what you can.
-
-## 📈 Themes & patterns
-
-Short bullets: recurring wins and recurring gaps **across the day** (not repeating the per-call section).
-
-## 🎯 Tomorrow's coaching priority
-
-ONE paragraph — the single highest-leverage focus for the team based on today's transcripts.
-
-RULES:
-- Every **Strong** and **Needs improvement** entry must be a real **Call [n]** and use the **Name → Phone → Quo → detail** block order above (Quo link must be the \`LINK:\` URL for that call).
-- Put **Name**, **Phone**, and **Quo** lines **before** any coaching narrative — readers should see identity + link first, then the good/bad analysis.
-- Prefer line-level or role-level framing in the narrative; do not blame staff by name unless essential.
-- Stay under ~2000 words if possible; prioritize depth on fewer calls over shallow coverage of all.
-`;
-
-/**
- * Daily Lead Report — summaries only for calls; Slack + sheet + cross-source story.
+ * Daily Intake & Lead Report — one merged daily narrative across calls + Slack + sheet.
  */
 function generateDailyLeadReportPrompt({
   COMPANY_NAME,
@@ -151,131 +58,538 @@ function generateDailyLeadReportPrompt({
   return `
 You are a senior operations analyst for ${COMPANY_NAME}, a personal injury law firm in Austin, Texas.
 
-This is the **Daily Lead Report** — it connects **phone (summary only)** + **Slack #lead-calls** + **Google Sheets** into one **lead** story. Do **not** mirror the **Daily Call Report** (coaching, talk time, transcripts). Here you care about **leads**: who called, what Slack surfaced, what the sheet says, and where those three agree or conflict.
+Generate ONE combined daily report called **Daily Intake & Lead Report**. This is not two separate reports and not a paste-up.
 
 REPORTING WINDOW (all three sources use this exact period):
 ${reportRangeLabel}
 
 DAY: ${dayOfWeek}, ${dateLabel}
 
-THREE SOURCES — same window (counts for orientation only; your job is **lead** synthesis, not phone QA metrics):
+SOURCE COUNTS (context only):
+- Quo calls in window: ${totalCalls}
+- Calls with summaries: ${callData.length}
+- Slack #lead-calls messages: ${slackMessageCount}
+- Sheet pipeline rows: ${sheetRowsLabel}
 
-1. **Quo (phone):** **${totalCalls}** calls in the window. **${callData.length}** calls have **summaries** in the block below (use for matching + triage — no transcripts here).
-2. **Slack (#lead-calls):** **${slackMessageCount}** top-level messages in range. Includes bots, Facebook-style posts, and staff chatter — treat as the real-time intake narrative alongside phone.
-3. **Google Sheet (pipeline):** **${sheetRowsLabel}** populated data rows listed in LEAD PIPELINE below (excludes header). System of record for name / phone / status / consultation.
+PRIMARY GOAL:
+- Lead and conversion first.
+- Keep reconciliation between Quo + Slack + Sheet explicit and actionable.
+- Include only the most important call handling/coaching insights tied to conversion.
+- Keep the report polished, skimmable, and decision-ready.
 
-**Do not** lead with talk time, transcript counts, or line-by-line call-volume coaching — that belongs in the **Daily Call Report** only.
+AUTOMATED SHEET LOOKUPS (appears after row list when available):
+- This section is pre-computed in code from Quo/Slack vs sheet columns.
+- If it says a lead is on sheet, treat as on sheet and cite row + status + consultation.
+- If auto-match misses but row evidence is obvious in the pipeline list, still treat as on sheet.
 
-AUTOMATED SHEET LOOKUPS (appears after the row list when present):
-- This section is **pre-computed in code** from Quo phones + Slack text vs. sheet columns (name / phone / status / consultation — see LEAD PIPELINE header). If it says **on sheet** for a call or phone, you **must** treat that lead as on the sheet and cite the given row + status + consultation (Y/N) when shown.
-- If auto-match failed but the LEAD PIPELINE lines clearly show the same person/phone, they are still **on sheet** — the automation is a helper, not the only proof.
-
-SHEET LAYOUT (fixed columns — the LEAD PIPELINE block lists these fields per row; header line gives exact letters, usually **E** = Lead Name, **F** = Phone, **K** = Lead Status, **L** = Consultation scheduled or completed (**Y** / **N** or equivalent). Ignore row-1 header labels if they disagree.
-
-MATCHING RULES — **do not say "not on sheet" unless you are sure**:
-1. **Phone**: Use the phone column letter from the block header; normalize to digits; last **10 digits** matching Quo/Slack = same lead (+1, spaces, punctuation ignored).
-2. **Name**: Use the name column from the block; match first + last in either order, nicknames, minor spelling differences; middle initials may differ.
-3. **Status**: When a row matches, always cite the status column from the block as pipeline stage.
-4. **Consultation (Y/N)**: When a row matches, cite column **L** when discussing whether intake aligned the sheet (e.g. call outcome vs. Y/N).
-5. **Search every line that shows [sheet row N]** before claiming someone is missing.
-6. If you find a match, say **"on sheet"** and cite that **sheet row N** plus status and consultation when relevant.
-7. Only use **"not on sheet"** when no row plausibly matches after phone + name checks.
+MATCHING RULES (avoid false missing-lead claims):
+1. Phone match = same last 10 digits after normalization.
+2. Name match = first/last with minor spelling and nickname tolerance.
+3. If matched, cite status and consultation field.
+4. Only mark missing when no plausible match after phone + name checks.
 
 ─────────────────────────────────────────────────────────
-SLACK #lead-calls (full thread for the window — includes bots)
+SLACK #lead-calls (window)
 ─────────────────────────────────────────────────────────
 ${slackMessages || '(No Slack data available.)'}
 
 ─────────────────────────────────────────────────────────
-LEAD PIPELINE — GOOGLE SHEETS (system of record)
+LEAD PIPELINE — GOOGLE SHEETS
 ─────────────────────────────────────────────────────────
 ${leadPipeline || '(Not available.)'}
 
 ─────────────────────────────────────────────────────────
-PHONE — SUMMARIES ONLY (no full transcripts in this report)
+PHONE — SUMMARIES ONLY
 ─────────────────────────────────────────────────────────
 ${summaryLinesOnly || '(No calls with summaries in this period.)'}
-
-Each row includes **LINK** to Quo — use it for hot leads and flags. For narrative classification, rely on **SUMMARY** + metadata.
-
-─────────────────────────────────────────────────────────
-CONNECTING THE DOTS (mandatory)
-─────────────────────────────────────────────────────────
-
-1. **Sheet = source of truth**: For every high-value or uncertain lead, state whether they are **on sheet** (sheet row + **Lead Status** + **Consultation Y/N** from the block when available) or truly missing — using the matching rules above. Avoid false "not on sheet" claims.
-2. **Slack + phone**: Match people across Slack and calls (names, last names, phone numbers, case details). If Slack says "Facebook lead — Maria" but there's no call, that is still a lead — surface it under digital/non-phone.
-3. **Conflicts**: If Slack says viable but call was declined (or vice versa), or sheet says closed but they called — FLAG it prominently.
-4. **Opportunities**: Surface follow-ups and revenue opportunities across ALL sources (not only phone), including Slack-only and sheet-only (e.g. sheet says "follow up" but no Slack mention today).
-5. **Full phone numbers** in the written report when identifying leads (never mask).
 
 ${FIRM_CONTEXT}
 
 ${CLASSIFICATION_BLOCK}
 
 ─────────────────────────────────────────────────────────
-OUTPUT FORMAT — use EXACTLY these sections (≤ 1200 words; stay concise)
+OUTPUT FORMAT — use EXACTLY these sections in this order
 ─────────────────────────────────────────────────────────
 
-## 📊 Lead Snapshot — ${dateLabel}
+## Executive Summary
+- 3-5 bullets max.
+- Must cover: overall day quality, lead flow quality, biggest opportunity, biggest risk, biggest operational issue.
 
-One tight paragraph: **lead flow** across Quo + Slack + sheet (not call-center stats).
+## Today's Top Opportunities
+- 3-5 items max.
+- For each item use this exact compact template:
+  - **Lead:** <name>
+  - **Matter:** <matter type or likely type>
+  - **Phone:** <full phone or "N/A">
+  - **Coverage:** <Quo/Slack/Sheet presence>
+  - **Status:** <current status>
+  - **Why it matters:** <revenue/conversion reason>
+  - **Next action:** <exact action for tomorrow>
+  - **Owner:** <name or "Unassigned">
+- Prioritize revenue-critical leads.
 
-Then a markdown table — **only** three-source lead framing (no talk time / transcript / by-line volume):
+## Cross-Source Reconciliation
+- Required every day even if short.
+- Use four compact groups in this order:
+  1) **Missing from Sheet**
+  2) **Duplicate Records**
+  3) **Status Mismatches**
+  4) **Follow-Up Gaps**
+- Keep each group as concise bullets.
+- Cite row/status/consultation when known.
 
-| Source | Lead-focused notes |
-|--------|---------------------|
-| Quo (summaries below) | e.g. viable new leads, declines worth tracking, overlap with Slack |
-| Slack (#lead-calls) | e.g. non-phone leads, urgency, threads that imply follow-up |
-| Sheet (pipeline) | e.g. reconciliation snapshot, hot stages, gaps vs. calls/Slack |
-| **Cross-source** | One line: the single most important combined insight |
+## Call Handling Insights
+- Condensed conversion-focused QA only.
+- Include:
+  - 2-3 strongest call handling observations
+  - 2-3 biggest gaps hurting intake quality or conversion
+- If examples are used, keep each to 1-2 lines:
+  - issue, example lead/call, why it matters, concrete fix
+- No long transcript-style writeups.
 
-## 🔗 Cross-Source — Opportunities & Revenue
+## Themes / Patterns
+- Short bullets split into:
+  - **Wins**
+  - **Gaps**
+  - **Recurring patterns**
+- Deduplicate overlap with prior sections.
 
-Bullet list: opportunities that come from **combining** sources (not just phone). Examples: Slack Facebook lead not on sheet; sheet says follow-up + Slack confirms urgency; call summary + Slack thread tell different stories — which action wins?
+## Manager Flags
+- Only high-importance issues (missing high-value sheet rows, duplicate records, stalled/open leads, decline/referral issues, language support gaps, repeated callback failures).
+- Keep sharp and non-redundant.
 
-## 🔥 Hot Leads — Action Required (Tomorrow)
+## Tomorrow's Priority
+- One directive sentence plus up to 3 support bullets:
+  - top conversion action
+  - top process fix
+  - top coaching emphasis
 
-For EACH item, tag the source: **[Phone]** / **[Slack]** / **[Sheet]** / **[Multi]**.
-- Phone leads: full number, name, **[View in Quo](url)** when available (use LINK from the summary block).
-- Slack-only (Facebook, web, etc.): describe the lead, who posted, what to do next, whether sheet needs updating.
+## Appendix (Optional)
+- Only if needed for extra examples or staff notes.
+- Keep short and lower priority.
 
-Priority: undecided high-value, insurance $ on table, third-party callers, attorney-switch, then viable unsigned.
-
-If none: "No hot leads today."
-
-## ⚠️ Flags (Manager Attention)
-
-Cross-source risks only — contradictions, missing sheet rows, stale pipeline, repeat dialers, referral misses, work-injury third-party misses, etc.
-
-If none: "No flags today."
-
-## 👤 Staff Notes
-
-Skip if nothing notable.
-
-## 💡 Tomorrow's Priority
-
-ONE sentence — the single most important action across **calls + Slack + sheet**.
-
-─────────────────────────────────────────────────────────
-ANALYSIS RULES
-─────────────────────────────────────────────────────────
-
-1. BE SPECIFIC. Names, full phone numbers, staff, line names, Slack handles.
-2. PRIORITIZE. This is a briefing, not a dump.
-3. Slack bots may post Meta/Facebook leads — treat as real leads unless clearly spam.
-4. REPEAT CALLERS: same number 3+ times same day — flag with full number + count.
-5. REVENUE RISKS (from summaries + cross-source): work injury / third-party angle, undecided with no follow-up, decline + referral, insurance $ on table, etc.
-6. CONVERSION / pipeline: tie viable vs. signed hints to **summaries + sheet** when you can — not a full call-center scorecard.
-7. Slack-only or sheet-only leads deserve equal weight with phone when they are real opportunities.
-8. Mention voicemail/after-hours **only** if it affects **lead** follow-up (otherwise skip — that is for the Call Report).
-9. BILINGUAL issues — flag when they affect intake quality.
-10. QUIET DAYS OK: short honest brief is fine.
-11. No deep phone coaching here — that is the **Daily Call Report** only.
+STYLE RULES:
+1. Keep total length tight (target 650-950 words).
+2. Avoid walls of text and repeated points.
+3. Use short bullets, clear labels, and scan-friendly wording.
+4. Do not invent data; if unknown, say unknown.
+5. Use full phone numbers when identifying leads.
+6. If two sections overlap, mention details once in the most relevant section and avoid repetition.
+7. Prioritization order:
+   - Revenue/conversion-critical actions
+   - Cross-system reconciliation issues
+   - Call handling issues affecting conversion
+   - Operational patterns
+   - Extra details
 `;
 }
 
+// ============================================================================
+// WEEKLY CLIENT SENTIMENT — per-transcript JSON + aggregated email
+// ============================================================================
+
+/** Tags the LLM should prefer (snake_case in output). */
+const SENTIMENT_REASON_TAGS = [
+  'responsiveness',
+  'empathy',
+  'clarity',
+  'confusion',
+  'case_progress',
+  'frustration',
+  'urgency',
+  'trust',
+  'language_barrier',
+  'expectation_mismatch',
+  'scheduling',
+  'follow_up',
+  /** Review / social blast / AG or bar — also used when code applies mandatory escalation. */
+  'regulatory_or_review_threat',
+];
+
+/**
+ * Single transcript → strict JSON (law firm client call sentiment). Used only if legacy per-call mode is enabled.
+ */
+function buildTranscriptSentimentPrompt({
+  COMPANY_NAME,
+  contact,
+  line,
+  phone,
+  timestamp,
+  summary,
+  transcript,
+  link,
+}) {
+  const tagList = SENTIMENT_REASON_TAGS.join(', ');
+  return `
+You are an expert analyst reviewing **recorded phone calls** for ${COMPANY_NAME}, a personal injury law firm.
+
+This is a **law firm client call**. Your job is to assess **client sentiment** from the **client's perspective** in this conversation.
+
+Base sentiment on the **overall tone** of the interaction, especially:
+- How the **client** seems to feel (worried, relieved, angry, confused, grateful, etc.)
+- Whether **staff** interaction **improved or worsened** that emotional state
+- Whether the call built **confidence, confusion, reassurance, or frustration**
+
+Use the **full transcript** as primary evidence; the summary is secondary if present.
+
+CONTACT (CRM name — includes case number for clients): ${contact || '(unknown)'}
+LINE: ${line || ''}
+PHONE: ${phone || ''}
+TIME: ${timestamp || ''}
+QUO LINK: ${link || ''}
+
+SUMMARY (may be incomplete):
+${summary || '(none)'}
+
+TRANSCRIPT:
+${transcript}
+
+---
+
+Respond with **valid JSON only** — no markdown fences, no commentary before or after. The JSON must match this TypeScript shape exactly:
+
+{
+  "sentiment": "positive" | "neutral" | "negative",
+  "reason_summary": string,
+  "reason_tags": string[],
+  "client_state": string
+}
+
+Rules:
+- **sentiment**: "positive" if the client ends reassured, grateful, or clearly satisfied; "negative" if frustrated, angry, or clearly distressed without adequate resolution; "neutral" if mixed, informational, or emotionally flat.
+- **reason_summary**: 1–2 short sentences explaining **why** you chose that sentiment (staff + client dynamics).
+- **reason_tags**: Use **only** normalized tags from this list when they apply (omit tags that do not apply): ${tagList}
+  Use **snake_case** exactly as listed (e.g. "case_progress", not "Case Progress").
+- **client_state**: One short phrase summarizing what the **client** seemed to be feeling or experiencing (e.g. anxious about the timeline, relieved after explanation).
+
+Return compact JSON on one line or pretty-printed; either is fine as long as it parses.
+`.trim();
+}
+
+/**
+ * Full two-week touchpoint list (voice rows use **AI summaries only** — no full transcripts) → one JSON per client.
+ */
+function buildWeeklyClientBundleSentimentPrompt({
+  COMPANY_NAME,
+  clientName,
+  phone,
+  rangeLabel,
+  touchpointCount,
+  communicationLogMarkdown,
+}) {
+  const tagList = SENTIMENT_REASON_TAGS.join(', ');
+  return `
+You are an expert analyst for ${COMPANY_NAME}, a personal injury law firm.
+
+You are judging **overall client relationship sentiment** for **one active client** using **everything that happened in the reporting window** (about the last two weeks). Evidence may include:
+- **Voice**: completed calls, **missed** / **no-answer** / **abandoned** / **busy** legs, callbacks, voicemails (often reflected in the AI summary even when there was no live conversation), and calls handled by **Sona / AI** (\`aiHandled\` / summaries labeled as such in the log).
+- **SMS**: inbound and outbound text threads.
+
+**Do not** assume you have full transcripts. Treat each voice line’s **Summary** as the primary source; treat SMS quoted text as primary for texts. When a voice row says **(none)** for summary, infer only what you can from **status** (e.g. missed inbound) and SMS context — do not invent dialogue.
+
+Reporting window: **${rangeLabel}**  
+CLIENT (CRM — includes case number): **${clientName}**  
+PHONE: ${phone || '(unknown)'}  
+Touchpoints in log: **${touchpointCount}**
+
+---
+
+CHRONOLOGICAL LOG (oldest → newest):
+
+${communicationLogMarkdown}
+
+---
+
+Respond with **valid JSON only** (no markdown fences). Shape:
+
+{
+  "sentiment": "positive" | "neutral" | "negative",
+  "reason_summary": string,
+  "reason_tags": string[],
+  "client_state": string,
+  "bad_review_risk": "none" | "low" | "moderate" | "high",
+  "bad_review_risk_note": string,
+  "positive_review_candidate": "none" | "possible" | "strong",
+  "positive_review_note": string
+}
+
+Rules:
+- **sentiment**: holistic judgment across **all** touchpoints in the window (not only the last message).
+- **reason_summary**: 2–4 short sentences integrating voice + SMS; cite patterns, not invented quotes.
+- **reason_tags**: only from: ${tagList} (snake_case).
+- **client_state**: current emotional/relationship posture in plain language.
+- **bad_review_risk** / **bad_review_risk_note**: would this client plausibly leave a **public negative** review or blast the firm? **high** = clear anger, betrayal, threats, repeated failures, ghosting after bad news; note must be concrete. Use **none** if no credible risk.
+- **positive_review_candidate** / **positive_review_note**: would they plausibly leave a **glowing** review or referral? **strong** = clear gratitude, delight, trust, enthusiastic praise; **none** if no signal.
+
+**Mandatory classifications — do not soften or downgrade these:**
+- **Explicit bad-review / reputation threats:** If the client or anyone on their side (spouse, family, etc.) **threatens** a **bad, negative, or one-star** review, says they will **post on Google/Yelp/social media**, **trash** the firm online, or otherwise tie dissatisfaction to **going public**, set **sentiment: negative**, **bad_review_risk: high**, include **regulatory_or_review_threat** in **reason_tags**, and explain concretely in **bad_review_risk_note**.
+- **Regulatory / bar escalation:** If the log mentions **filing a complaint with the Attorney General**, **consumer protection** (in a hostile filing sense), a **State Bar** or **Texas State Bar** **grievance** / **bar complaint** / **disciplinary** action against the firm or a lawyer, set **sentiment: negative**, **bad_review_risk: high**, **regulatory_or_review_threat** in **reason_tags**, and spell out the threat in **bad_review_risk_note**. Treat this as a **major** reputational and practice risk even if tone is calm.
+- **Harsh performance / competence criticism:** If a caller **explicitly attacks** how a specific staff member performed (e.g. did not like their handling, calls work **negligent**, **incompetent**, or **unprofessional**) in a serious way—especially from a **family member** echoing the client’s dissatisfaction—default to **sentiment: negative** and **bad_review_risk** at least **moderate** (usually **high** if tied to leaving, switching firms, or public fallout). Do **not** label these neutral or positive.
+- **Writing style for all string fields above** (especially **client_state**, **reason_summary**, **bad_review_risk_note**, **positive_review_note**): use **complete sentences** that end with **.** (or **?** / **!** when appropriate). Do **not** stop mid-thought, mid-clause, or with a dangling **and** / **but** / **because**.
+
+Return JSON only.
+`.trim();
+}
+
+/**
+ * @deprecated Weekly email is table-only in report.js; kept for reference / optional reuse.
+ */
+function buildWeeklySentimentEmailPrompt({
+  COMPANY_NAME,
+  rangeLabel,
+  hardFactsMarkdown,
+  analysesDigest,
+}) {
+  return `
+You are writing a **weekly leadership briefing** for ${COMPANY_NAME} about **client call sentiment** over the past two weeks.
+
+Reporting window: **${rangeLabel}**
+
+The following **facts are authoritative** — use these **exact counts and percentages** in the Snapshot (do not invent or round differently):
+
+${hardFactsMarkdown}
+
+Per-**client** rollups (one block per client; if they called multiple times, counts and notes are combined — **not** one block per transcript):
+
+${analysesDigest}
+
+A precise **Markdown table** listing **every client** (one row per client, all calls rolled up) will be **appended after** your sections. Use your sections for executive themes and priorities; **do not** try to reproduce the full client list in prose.
+
+---
+
+Write the **email body in Markdown** (not HTML). Use **exactly** these top-level sections and headings:
+
+## Snapshot
+- Total client transcripts reviewed: (use the exact number from facts)
+- Positive / Neutral / Negative: counts and **percentages** from facts
+
+## Overall Sentiment
+Short paragraph: how clients **generally** seem to be feeling based on these calls.
+
+## Main Reasons Why
+Top themes driving sentiment. Use **bold** for theme names where helpful. Include tag or theme **counts** where it adds clarity (e.g. "mentioned in 6 calls").
+
+## What Clients Are Feeling
+Short synthesis of emotional state / mindset (e.g. reassured, confused, frustrated, urgent, grateful, uncertain). Ground this in the analyses.
+
+## Opportunities
+Specific, actionable areas where **communication or process** could improve (bullets OK).
+
+## What's Working
+Positive patterns worth **reinforcing** (bullets OK).
+
+Tone: **concise**, **insight-driven**, **human** (not robotic), suitable for firm leadership. Do **not** be overly verbose. Do **not** include a subject line in the body.
+
+Do **not** quote entire transcripts. You may paraphrase briefly. Do **not** name staff unless necessary for a key insight (prefer roles, e.g. "intake").
+`.trim();
+}
+
+// ============================================================================
+// MONTHLY CLIENT NEWSLETTER — per-call extraction (summary-first, anonymized) + pooled editorial brief
+// ============================================================================
+
+const MONTHLY_EXTRACTION_FIELDS = [
+  'common_questions',
+  'misconceptions',
+  'client_feelings',
+  'insurance_situations',
+  'timeline_confusions',
+  'triggers',
+  'hesitations',
+];
+
+/**
+ * Single call → newsletter-relevant themes (JSON). Uses **AI call summary** as primary evidence; transcript optional.
+ */
+function buildMonthlyTranscriptExtractionPrompt({
+  COMPANY_NAME,
+  callSegment,
+  line,
+  timestamp,
+  summary,
+  transcript,
+  link,
+}) {
+  const segmentNote =
+    callSegment === 'client'
+      ? 'This interaction is labeled **client** (signed matter — CRM name matched the client pattern).'
+      : 'This interaction is labeled **lead_or_other** (intake, undecided, or non-client). Pay extra attention to **hesitations** and **triggers** for this type.';
+
+  const summaryText = String(summary || '').trim() || '(none)';
+  const tr = String(transcript || '').trim();
+  const transcriptBlock = tr
+    ? `TRANSCRIPT (optional extra detail — use only if it adds facts not in the summary):\n${tr}`
+    : `TRANSCRIPT: _(none — use SUMMARY only; do not invent dialogue.)_`;
+
+  return `
+You extract **newsletter and educational content themes** from a **personal injury law firm** phone interaction for ${COMPANY_NAME}.
+
+${segmentNote}
+
+Goal: surface what callers are **confused about**, **worried about**, or **getting wrong** — in **short, reusable phrases** for a **client-facing monthly newsletter** (FAQs, myth-busting, plain-English explainers). Do **not** score overall sentiment. Do **not** refer to any named person — this is anonymized source material.
+
+**Primary evidence** is the **AI call summary** below. A full transcript may be absent or trimmed — that is normal.
+
+SOURCE_TYPE: **${callSegment}**
+LINE: ${line || ''}
+TIME: ${timestamp || ''}
+INTERNAL_LINK (for staff only — do not echo in JSON strings): ${link || ''}
+
+SUMMARY (primary):
+${summaryText}
+
+${transcriptBlock}
+
+---
+
+Return **only valid JSON** (no markdown fences, no commentary) with this exact shape:
+
+{
+  "common_questions": string[],
+  "misconceptions": string[],
+  "client_feelings": string[],
+  "insurance_situations": string[],
+  "timeline_confusions": string[],
+  "triggers": string[],
+  "hesitations": string[]
+}
+
+Rules:
+- Include **only** items **clearly supported** by the **summary** and/or transcript when present. If a category has nothing, use [].
+- Each string: **short**, **normalized**, **reusable** (e.g. a newsletter bullet or heading idea) — not long paragraphs. **Never** include caller names, phone numbers, or case numbers in any string.
+- **common_questions**: questions the caller asks or clearly implies (wording close to how people ask).
+- **misconceptions**: wrong beliefs or risky assumptions (factually or strategically wrong from a PI perspective).
+- **client_feelings**: emotional signals / mindset (e.g. anxiety about timeline, shame about not seeing a doctor) — useful for **tone** of newsletter copy, not for identifying anyone.
+- **insurance_situations**: insurer behavior, pressure, early offers, recorded statements, adjuster contact, etc.
+- **timeline_confusions**: misunderstandings about how long things take or why things feel slow.
+- **triggers**: why they reached out **now** (insurance called, pain worse, referral, paperwork, etc.).
+- **hesitations**: reluctance or why they might **not** move forward (think about it, distrust, DIY, already took offer) — especially important for **lead_or_other**.
+
+Use concise American English. Omit empty arrays' items — do not invent filler.
+`.trim();
+}
+
+/**
+ * Several anonymized calls in one prompt → one JSON object with **extractions** array (same order as items).
+ */
+function buildMonthlyBatchExtractionPrompt({ COMPANY_NAME, items }) {
+  const blocks = items
+    .map((it, i) => {
+      const summaryText = String(it.summary || '').trim() || '(none)';
+      let tr = String(it.transcript || '').trim();
+      if (it.transcriptMaxChars > 0 && tr.length > it.transcriptMaxChars) {
+        tr = `${tr.slice(0, it.transcriptMaxChars)}…`;
+      }
+      const transcriptBlock = tr
+        ? `TRANSCRIPT (optional — facts not in summary only):\n${tr}`
+        : `TRANSCRIPT: _(none)_`;
+      return `### Item ${i + 1} of ${items.length}
+SOURCE_TYPE: **${it.callSegment}**
+LINE: ${it.line || ''}
+TIME: ${it.timestamp || ''}
+INTERNAL_LINK (do not echo): ${it.link || ''}
+
+SUMMARY:
+${summaryText}
+
+${transcriptBlock}`;
+    })
+    .join('\n\n---\n\n');
+
+  return `
+You extract **newsletter and educational content themes** from **multiple** personal injury firm phone interactions for ${COMPANY_NAME}.
+
+Each **Item** is one interaction. Evidence is the **AI summary** (primary) and optional **transcript** snippet. Do **not** invent dialogue. Do **not** name people, phone numbers, or case numbers in any string.
+
+${blocks}
+
+---
+
+Return **only valid JSON** (no markdown fences, no commentary). The root value must be a single JSON **object** with one key, **extractions**, whose value is an **array of exactly ${items.length} objects** (not ${items.length - 1}, not ${items.length + 1} — one extraction object per Item, same order).
+
+Each element of **extractions** corresponds to **Item 1, Item 2, …** in order and must contain **only** these keys, each a JSON array of strings (use [] if empty):
+**common_questions**, **misconceptions**, **client_feelings**, **insurance_situations**, **timeline_confusions**, **triggers**, **hesitations**.
+
+Rules (apply per element to that Item only):
+- Include only points clearly supported by that Item’s summary/transcript.
+- Short, reusable newsletter/FAQ phrases — not long paragraphs.
+- **hesitations** matters most for SOURCE_TYPE **lead_or_other**.
+
+Use concise American English.
+`.trim();
+}
+
+/**
+ * Turn pooled per-call JSON extractions (summary-first) into a **client newsletter** content plan — not organized by caller.
+ */
+function buildMonthlyNewsletterAggregationPrompt({
+  COMPANY_NAME,
+  rangeLabel,
+  transcriptCount,
+  clientTranscriptCount,
+  leadOrOtherTranscriptCount,
+  rawExtractionsMarkdown,
+}) {
+  return `
+You are a **content strategist** for ${COMPANY_NAME}, a personal injury firm. Your output helps the team build a **monthly client newsletter** (and related FAQs, blog posts, or social posts): practical, plain-English, educational — **not** a recap of who called.
+
+Reporting window: **${rangeLabel}**
+
+Source: **${transcriptCount}** voice interactions with usable summaries were mined (**${clientTranscriptCount}** client-side, **${leadOrOtherTranscriptCount}** lead/intake/other). The raw material below is **pooled by theme** (no caller names or phone numbers). Items may repeat — your job is to **merge**, **dedupe**, and **prioritize** what would resonate with **clients and former leads** reading a newsletter.
+
+POOLED EXTRACTS (anonymized):
+
+${rawExtractionsMarkdown}
+
+---
+
+Write the **email body in Markdown** (not HTML) for **internal editors**. Use **exactly** this structure:
+
+## Snapshot for the newsletter team
+
+3–5 bullets: what this month suggests readers care about (themes only — no individuals).
+
+## FAQ seeds (merge duplicates)
+
+Bullet list of the strongest recurring **questions** people are actually asking — phrased the way you’d use them as FAQ headings or short “Ask Ramos James” blocks. Note approximate frequency only when reasonable (“recurring”, “several calls”, etc.) — do not invent counts.
+
+## Myths & mistakes to correct
+
+Bullet list: misconceptions worth a short **myth vs. fact** or explainer piece.
+
+## Insurance & claims desk topics
+
+Bullet list: adjuster pressure, recorded statements, low offers, delays, etc. — newsletter-safe angles only.
+
+## Timeline & process (“what happens next?”)
+
+Bullet list: confusion about how long things take, next steps, medical treatment, etc.
+
+## Timely or “news you can use” hooks
+
+Only if the pooled notes clearly support it (e.g. seasonal risks, recurring current events callers mention). If nothing fits, write: **None surfaced clearly this month.**
+
+## Tone & empathy (for writers, not for naming anyone)
+
+Short paragraph + optional bullets: emotional undercurrents from **client_feelings** / **hesitations** that should shape **warm, reassuring** copy — still no individuals.
+
+## Newsletter building blocks
+
+- **Section ideas:** 6–10 concrete working titles for newsletter **sections** or short articles (educational, non-legalese).
+- **Subject line ideas:** 4–6 **client-facing** email subject lines (curiosity + clarity, not clickbait).
+
+Rules: **Do not** name private individuals, callers, or staff from the notes. **Do not** organize by person or by call. This is a **single editorial brief** for the month.
+`.trim();
+}
+
 module.exports = {
-  generateDailyCallReportPrompt,
   generateDailyLeadReportPrompt,
+  buildTranscriptSentimentPrompt,
+  buildWeeklyClientBundleSentimentPrompt,
+  buildWeeklySentimentEmailPrompt,
+  SENTIMENT_REASON_TAGS,
+  MONTHLY_EXTRACTION_FIELDS,
+  buildMonthlyTranscriptExtractionPrompt,
+  buildMonthlyBatchExtractionPrompt,
+  buildMonthlyNewsletterAggregationPrompt,
 };

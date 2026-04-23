@@ -60,6 +60,145 @@ async function fetchSheetData(spreadsheetId, rangeInput) {
   return res.data.values || [];
 }
 
+/**
+ * Appends rows after the table on the tab implied by `rangeA1` (e.g. `'Weekly'!A1` or `'Weekly'!A:Q`).
+ * @param {string} spreadsheetId
+ * @param {string} rangeA1 Must include a tab name (resolved via {@link resolveValuesRange} if you pass a partial range).
+ * @param {string[][]} values
+ */
+async function appendSheetValues(spreadsheetId, rangeA1, values) {
+  if (!values?.length) return null;
+  const auth = makeAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const range = await resolveValuesRange(spreadsheetId, rangeA1, sheets);
+  const res = await sheets.spreadsheets.values.append({
+    spreadsheetId,
+    range,
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values },
+  });
+  return res.data;
+}
+
+/**
+ * Overwrites a rectangular range (one shot).
+ * @param {string[][]} values Rows to write (each row is an array of cell values).
+ */
+async function updateSheetValues(spreadsheetId, rangeA1, values) {
+  if (!values?.length) return null;
+  const auth = makeAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const range = await resolveValuesRange(spreadsheetId, rangeA1, sheets);
+  const res = await sheets.spreadsheets.values.update({
+    spreadsheetId,
+    range,
+    valueInputOption: 'USER_ENTERED',
+    requestBody: { values },
+  });
+  return res.data;
+}
+
+/** Clears cell values in range (leaves formatting). */
+async function clearSheetValuesRange(spreadsheetId, rangeA1) {
+  const auth = makeAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const range = await resolveValuesRange(spreadsheetId, rangeA1, sheets);
+  await sheets.spreadsheets.values.clear({ spreadsheetId, range });
+}
+
+/**
+ * @param {{ range: string, values: string[][] }[]} data
+ */
+async function batchUpdateSheetValues(spreadsheetId, data) {
+  if (!data?.length) return null;
+  const auth = makeAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const resolved = [];
+  for (const d of data) {
+    resolved.push({
+      range: await resolveValuesRange(spreadsheetId, d.range, sheets),
+      values: d.values,
+    });
+  }
+  const chunkSize = 50;
+  let last = null;
+  for (let i = 0; i < resolved.length; i += chunkSize) {
+    const chunk = resolved.slice(i, i + chunkSize);
+    last = await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId,
+      requestBody: {
+        valueInputOption: 'USER_ENTERED',
+        data: chunk,
+      },
+    });
+  }
+  return last?.data;
+}
+
+/** @returns {number} numeric sheetId for batchUpdate */
+async function getSheetIdByTitle(spreadsheetId, title) {
+  const auth = makeAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets(properties(sheetId,title))',
+  });
+  for (const sh of meta.data.sheets || []) {
+    const t = sh.properties?.title;
+    if (t === title) return sh.properties.sheetId;
+  }
+  throw new Error(`Worksheet not found: "${title}"`);
+}
+
+/** 0-based row indices on `sheetId`; deletes from bottom to top so indices stay valid. */
+async function deleteSheetRowsByIndex(spreadsheetId, sheetId, rowIndexes0Based) {
+  const uniq = [...new Set(rowIndexes0Based)].filter((n) => Number.isFinite(n) && n >= 0).sort((a, b) => b - a);
+  if (!uniq.length) return null;
+  const auth = makeAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const requests = uniq.map((startIndex) => ({
+    deleteDimension: {
+      range: {
+        sheetId,
+        dimension: 'ROWS',
+        startIndex,
+        endIndex: startIndex + 1,
+      },
+    },
+  }));
+  const res = await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests },
+  });
+  return res.data;
+}
+
+/** Tab title from A1 notation `'My Tab'!A1` or tab-only `'My Tab'` → `My Tab` (handles quoted titles). */
+function sheetTabFromRangeA1(rangeA1) {
+  const s = String(rangeA1 || '').trim();
+  const i = s.lastIndexOf('!');
+  let tab = (i > 0 ? s.slice(0, i) : s).trim();
+  if (tab.startsWith("'")) tab = tab.slice(1, -1).replace(/''/g, "'");
+  return tab;
+}
+
+/**
+ * Range for `values.append` — same tab as `rangeInput`, column anchor `A1` (Google extends after last used row).
+ * @param {string} spreadsheetId
+ * @param {string} [rangeInput] Same rules as {@link fetchSheetData} (empty = first worksheet).
+ */
+async function resolveAppendAnchorA1(spreadsheetId, rangeInput) {
+  const full = await resolveValuesRange(spreadsheetId, (rangeInput ?? '').trim());
+  const i = full.lastIndexOf('!');
+  if (i > 0) {
+    return `${full.slice(0, i)}!A1`;
+  }
+  // Empty `rangeInput` resolves to a tab reference only (e.g. `'Sheet1'`) — no `!` yet.
+  if (!full.trim()) throw new Error(`Could not resolve sheet tab from range: ${full}`);
+  return `${full}!A1`;
+}
+
 /** "E" → 4, "F" → 5, "K" → 10, "AA" → 26 */
 function columnLettersToIndex(letters) {
   const up = String(letters || 'A').toUpperCase().replace(/[^A-Z]/g, '') || 'A';
@@ -77,6 +216,50 @@ function sheetMatchColumnsFromEnv() {
     status:  columnLettersToIndex(process.env.GOOGLE_SHEETS_STATUS_COL || 'K'),
     consult: columnLettersToIndex(process.env.GOOGLE_SHEETS_CONSULT_COL || 'L'),
   };
+}
+
+/** Weekly case roster: matter id + staff (defaults A / C / E). */
+function caseRosterColumnsFromEnv() {
+  return {
+    caseNum: columnLettersToIndex(process.env.GOOGLE_SHEETS_CASE_ROSTER_CASE_COL || 'A'),
+    attorney: columnLettersToIndex(process.env.GOOGLE_SHEETS_CASE_ROSTER_ATTORNEY_COL || 'C'),
+    paralegal: columnLettersToIndex(process.env.GOOGLE_SHEETS_CASE_ROSTER_PARALEGAL_COL || 'E'),
+  };
+}
+
+function looksLikeNumericCaseCell(v) {
+  const s = String(v ?? '').trim();
+  return s.length > 0 && /^\d+$/.test(s);
+}
+
+/**
+ * Builds Map(caseNumberString → { leadAttorney, paralegal }) from raw Sheets rows.
+ * Skips a leading header row when row 0’s case column is not numeric but row 1’s is.
+ */
+function rawRowsToCaseRosterMap(rows) {
+  const map = new Map();
+  if (!rows?.length) return map;
+
+  const { caseNum: iC, attorney: iA, paralegal: iP } = caseRosterColumnsFromEnv();
+  let start = 0;
+  if (
+    rows.length >= 2 &&
+    !looksLikeNumericCaseCell(rows[0]?.[iC]) &&
+    looksLikeNumericCaseCell(rows[1]?.[iC])
+  ) {
+    start = 1;
+  }
+
+  for (let i = start; i < rows.length; i++) {
+    const row = rows[i];
+    if (!row) continue;
+    const caseKey = String(row[iC] ?? '').trim();
+    if (!looksLikeNumericCaseCell(caseKey)) continue;
+    const leadAttorney = String(row[iA] ?? '').trim();
+    const paralegal = String(row[iP] ?? '').trim();
+    map.set(caseKey, { leadAttorney, paralegal });
+  }
+  return map;
 }
 
 /** 0-based column index → Excel column letter(s) (A, B, … Z, AA, …) */
@@ -296,6 +479,14 @@ async function getLeadPipelineText(spreadsheetId, rangeInput, maxRowsOverride, r
 
 module.exports = {
   fetchSheetData,
+  appendSheetValues,
+  updateSheetValues,
+  clearSheetValuesRange,
+  batchUpdateSheetValues,
+  getSheetIdByTitle,
+  deleteSheetRowsByIndex,
+  sheetTabFromRangeA1,
+  resolveAppendAnchorA1,
   rowsToObjects,
   formatSheetForPrompt,
   formatSheetFixedColumns,
@@ -304,4 +495,6 @@ module.exports = {
   resolveValuesRange,
   columnLettersToIndex,
   sheetMatchColumnsFromEnv,
+  caseRosterColumnsFromEnv,
+  rawRowsToCaseRosterMap,
 };

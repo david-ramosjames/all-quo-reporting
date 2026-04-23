@@ -1,5 +1,5 @@
 # https://docs.railway.com/reference/config-as-code
-# Deploy as a long-running worker (no HTTP port). Set env vars in the Railway dashboard.
+# Long-running worker: scheduler + optional HTTP on PORT (manual triggers + /health).
 
 [build]
 builder = "nixpacks"
