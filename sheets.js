@@ -478,6 +478,7 @@ async function getLeadPipelineText(spreadsheetId, rangeInput, maxRowsOverride, r
 }
 
 module.exports = {
+  makeAuthClient,
   fetchSheetData,
   appendSheetValues,
   updateSheetValues,

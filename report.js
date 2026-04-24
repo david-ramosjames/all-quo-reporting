@@ -2,7 +2,8 @@ require('dotenv').config();
 const fs = require('fs');
 const path = require('path');
 const { DateTime } = require('luxon');
-const nodemailer = require('nodemailer');
+const MailComposer = require('nodemailer/lib/mail-composer');
+const { google } = require('googleapis');
 const OpenAI = require('openai');
 const { runExport } = require('./fetch_calls');
 const {
@@ -27,6 +28,7 @@ const {
   deleteSheetRowsByIndex,
   sheetTabFromRangeA1,
   resolveAppendAnchorA1,
+  makeAuthClient,
 } = require('./sheets');
 
 // ── Config ────────────────────────────────────────────────────────────────────
@@ -105,10 +107,12 @@ const GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_RANGE = (process.env.GOOGLE_WEEKLY_NEGATI
 
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const EMAIL_TO   = process.env.EMAIL_TO?.split(',').map((e) => e.trim()).filter(Boolean) || [];
-const SMTP_HOST  = process.env.SMTP_HOST;
-const SMTP_PORT  = parseInt(process.env.SMTP_PORT || '587', 10);
-const SMTP_USER  = process.env.SMTP_USER;
-const SMTP_PASS  = process.env.SMTP_PASS;
+const EMAIL_CONFIGURED = Boolean(
+  EMAIL_FROM &&
+  process.env.GOOGLE_CLIENT_ID &&
+  process.env.GOOGLE_CLIENT_SECRET &&
+  process.env.GOOGLE_REFRESH_TOKEN,
+);
 
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
@@ -1762,13 +1766,6 @@ function buildEmailHtml(analysis, stats, dateLabel) {
 }
 
 async function sendEmail({ htmlBody, plainText, subject, attachments = [] }) {
-  const transporter = nodemailer.createTransport({
-    host: SMTP_HOST,
-    port: SMTP_PORT,
-    secure: SMTP_PORT === 465,
-    auth: { user: SMTP_USER, pass: SMTP_PASS },
-  });
-
   const mail = {
     from: EMAIL_FROM,
     to: EMAIL_TO.join(', '),
@@ -1778,7 +1775,21 @@ async function sendEmail({ htmlBody, plainText, subject, attachments = [] }) {
   };
   if (attachments.length) mail.attachments = attachments;
 
-  await transporter.sendMail(mail);
+  const raw = await new Promise((resolve, reject) => {
+    new MailComposer(mail).compile().build((err, buf) => (err ? reject(err) : resolve(buf)));
+  });
+
+  const encodedMessage = raw
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '');
+
+  const gmail = google.gmail({ version: 'v1', auth: makeAuthClient() });
+  await gmail.users.messages.send({
+    userId: 'me',
+    requestBody: { raw: encodedMessage },
+  });
 }
 
 // ── Monthly client newsletter content (30-day window, batched JSON → pooled brief) ─
@@ -1913,7 +1924,7 @@ async function runMonthlyNewsletterInsightsReport() {
   const subject = 'Monthly client newsletter content ideas (from call themes)';
   const html = buildMonthlyInsightsEmailHtml(bodyMd, rangeLabel);
 
-  if (!EMAIL_TO.length || !SMTP_HOST) {
+  if (!EMAIL_TO.length || !EMAIL_CONFIGURED) {
     console.log('\n  Email not configured — printing monthly insights body:\n');
     console.log(bodyMd);
   } else {
@@ -2420,7 +2431,7 @@ async function runWeeklyClientSentimentReport() {
   const subject = `Weekly Client Negative Sentiment - ${rangeLabel}`;
   const html = buildWeeklyNegativeSentimentEmailHtml(rangeLabel, emailRollups);
 
-  if (!EMAIL_TO.length || !SMTP_HOST) {
+  if (!EMAIL_TO.length || !EMAIL_CONFIGURED) {
     console.log('\n  Email not configured — printing weekly sentiment body:\n');
     console.log(bodyMd);
   } else {
@@ -2543,7 +2554,7 @@ async function runDailyReport() {
 
   // 6. Email — Daily Intake & Lead Report + Quo CSV (yesterday)
   console.log('\n[6/6] Sending Daily Intake & Lead Report email (with Quo CSV)...');
-  if (!EMAIL_TO.length || !SMTP_HOST) {
+  if (!EMAIL_TO.length || !EMAIL_CONFIGURED) {
     console.log('  Email not configured — printing report:\n');
     console.log('\n--- Daily Intake & Lead Report ---\n');
     console.log(leadAnalysis);

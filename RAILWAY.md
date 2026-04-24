@@ -17,7 +17,7 @@ Ensure `.env` is **not** committed (it is listed in `.gitignore`).
 
 In the service → **Variables**, add every key from your local `.env` (copy from `.env.example` as a checklist):
 
-- Quo, OpenAI, email SMTP, Slack, Google Sheets OAuth, `GOOGLE_SHEETS_ID`, range/columns, etc.
+- Quo, OpenAI, `EMAIL_FROM` / `EMAIL_TO`, Slack, Google OAuth (`GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` / `GOOGLE_REFRESH_TOKEN` — used for **both** Sheets and Gmail send), `GOOGLE_SHEETS_ID`, range/columns, etc.
 - Optional: `QUO_PHONE_NUMBERS` restricts which OpenPhone lines are fetched for **daily** CSV. **Weekly and monthly** automatically merge **RJL Outbound** and **RJL Transfers** (`+15125005266`, `+15126300907`) into that list when a restriction is set, unless `QUO_PHONE_NUMBERS_WEEKLY_MONTHLY_EXTRA=` is set empty to disable (or override with your own comma list).
 
 **Scheduler:**
@@ -69,4 +69,4 @@ node report.js monthly
 
 ## 8. Google OAuth refresh token
 
-`GOOGLE_REFRESH_TOKEN` must be generated once (e.g. `node setup-sheets-auth.js` on your machine) and pasted into Railway variables. It does not need to be regenerated on each deploy if unchanged.
+`GOOGLE_REFRESH_TOKEN` must be generated once (`node setup-sheets-auth.js` on your machine) and pasted into Railway variables. It carries **both** the Sheets and `gmail.send` scopes. Report emails are sent via the Gmail API over HTTPS (Railway blocks outbound SMTP on ports 25/587 on most projects, so SMTP is not used). Regenerate the token if you add/remove scopes.
