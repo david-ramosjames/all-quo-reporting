@@ -105,6 +105,10 @@ const GOOGLE_WEEKLY_SENTIMENT_DEDUPE = process.env.GOOGLE_WEEKLY_SENTIMENT_DEDUP
 const GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_SHEET_ID = (process.env.GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_SHEET_ID ?? '').trim();
 const GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_RANGE = (process.env.GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_RANGE ?? '').trim();
 
+/** Append-only "All Latest Sentiment" tab — every weekly run appends rollups (one row per client per run). */
+const GOOGLE_LATEST_SENTIMENT_SHEET_ID = (process.env.GOOGLE_LATEST_SENTIMENT_SHEET_ID ?? '').trim();
+const GOOGLE_LATEST_SENTIMENT_RANGE = (process.env.GOOGLE_LATEST_SENTIMENT_RANGE ?? '').trim();
+
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const EMAIL_TO   = process.env.EMAIL_TO?.split(',').map((e) => e.trim()).filter(Boolean) || [];
 const EMAIL_CONFIGURED = Boolean(
@@ -134,6 +138,17 @@ function getYesterdayRange() {
 function getTrailing7DaysRange() {
   const now   = DateTime.now().setZone(TIMEZONE);
   const start = now.minus({ days: 7 }).startOf('day');
+  return {
+    createdAfter:  start.toUTC().toISO(),
+    createdBefore: now.toUTC().toISO(),
+  };
+}
+
+/** Trailing N days for ad-hoc sentiment runs (manual admin trigger). */
+function getTrailingDaysRange(days) {
+  const n = Math.max(1, Math.floor(Number(days) || 7));
+  const now   = DateTime.now().setZone(TIMEZONE);
+  const start = now.minus({ days: n }).startOf('day');
   return {
     createdAfter:  start.toUTC().toISO(),
     createdBefore: now.toUTC().toISO(),
@@ -190,6 +205,13 @@ function buildSentiment7DayRangeLabel(createdAfter, createdBefore) {
   const a = DateTime.fromISO(createdAfter, { zone: 'utc' }).setZone(TIMEZONE);
   const b = DateTime.fromISO(createdBefore, { zone: 'utc' }).setZone(TIMEZONE);
   return `${a.toFormat('LLL d')} – ${b.toFormat('LLL d, yyyy')} (${TIMEZONE}, trailing 7 days)`;
+}
+
+/** Human-readable trailing N-day window label for ad-hoc sentiment runs. */
+function buildSentimentTrailingDaysRangeLabel(createdAfter, createdBefore, days) {
+  const a = DateTime.fromISO(createdAfter, { zone: 'utc' }).setZone(TIMEZONE);
+  const b = DateTime.fromISO(createdBefore, { zone: 'utc' }).setZone(TIMEZONE);
+  return `${a.toFormat('LLL d')} – ${b.toFormat('LLL d, yyyy')} (${TIMEZONE}, trailing ${days} day${days === 1 ? '' : 's'})`;
 }
 
 function buildMonthly30DayRangeLabel(createdAfter, createdBefore) {
@@ -1894,6 +1916,53 @@ function rollupToNegativeSnapshotSheetRow(r, cohortKey, runCreatedAfter, runCrea
   return [cohortCell, ...base];
 }
 
+function latestSentimentSpreadsheetId() {
+  return GOOGLE_LATEST_SENTIMENT_SHEET_ID || GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_SHEET_ID || GOOGLE_WEEKLY_SENTIMENT_SHEET_ID;
+}
+
+function latestSentimentRangeInput() {
+  return GOOGLE_LATEST_SENTIMENT_RANGE || 'All Latest Sentiment';
+}
+
+/**
+ * Append-only sink: every sentiment run appends one row per analyzed client
+ * to the "All Latest Sentiment" tab. Existing rows are never touched.
+ * Header is written automatically the first time the tab is empty.
+ */
+async function appendLatestSentimentRows(rollups, createdAfter, createdBefore, rangeLabel) {
+  const spreadsheetId = latestSentimentSpreadsheetId();
+  if (!spreadsheetId) return;
+  const hasOAuth =
+    process.env.GOOGLE_CLIENT_ID &&
+    process.env.GOOGLE_CLIENT_SECRET &&
+    process.env.GOOGLE_REFRESH_TOKEN;
+  if (!hasOAuth) return;
+  if (!rollups?.length) {
+    console.log('  All Latest Sentiment sheet: no rollups to append.');
+    return;
+  }
+
+  const rangeInput = latestSentimentRangeInput();
+  const normalized = normalizeWeeklySentimentSheetRange(rangeInput);
+  const appendAnchor = await resolveAppendAnchorA1(spreadsheetId, normalized);
+  const prefix = appendAnchor.slice(0, Math.max(0, appendAnchor.lastIndexOf('!')));
+  const publishedAtLocal = DateTime.now().setZone(TIMEZONE).toFormat('yyyy-LL-dd HH:mm');
+
+  const top = await fetchSheetData(spreadsheetId, `${prefix}!A1:A1`);
+  if (!top?.length || !top[0]?.[0]) {
+    await updateSheetValues(spreadsheetId, `${prefix}!A1`, [WEEKLY_SENTIMENT_SHEET_HEADER]);
+  }
+
+  const rows = rollups.map((r) =>
+    rollupToWeeklySheetRow(r, createdAfter, createdBefore, rangeLabel, publishedAtLocal)
+  );
+
+  await appendSheetValues(spreadsheetId, `${prefix}!A1`, rows);
+  console.log(
+    `  All Latest Sentiment sheet: appended ${rows.length} row(s) to "${sheetTabFromRangeA1(appendAnchor) || 'tab'}".`
+  );
+}
+
 async function replaceWeeklyNegativeSentimentSnapshot(emailRollups, createdAfter, createdBefore, rangeLabel) {
   const spreadsheetId = weeklyNegativeSnapshotSpreadsheetId();
   if (!spreadsheetId) return;
@@ -2162,16 +2231,22 @@ async function loadWeeklyNegativeCarryoverRollups({
   return [...carryByClient.values()];
 }
 
-async function runWeeklyClientSentimentReport() {
-  const { createdAfter, createdBefore } = getTrailing7DaysRange();
-  const rangeLabel = buildSentiment7DayRangeLabel(createdAfter, createdBefore);
+async function runWeeklyClientSentimentReport(opts = {}) {
+  const requestedDays = opts.days != null ? Math.max(1, Math.floor(Number(opts.days) || 0)) : null;
+  const days = requestedDays || 7;
+  const { createdAfter, createdBefore } = requestedDays
+    ? getTrailingDaysRange(days)
+    : getTrailing7DaysRange();
+  const rangeLabel = requestedDays
+    ? buildSentimentTrailingDaysRangeLabel(createdAfter, createdBefore, days)
+    : buildSentiment7DayRangeLabel(createdAfter, createdBefore);
 
   console.log(`\n${'═'.repeat(52)}`);
-  console.log('  Weekly client sentiment (trailing 7 days · summaries + SMS + all call statuses)');
+  console.log(`  Weekly client sentiment (trailing ${days} day${days === 1 ? '' : 's'} · summaries + SMS + all call statuses)`);
   console.log(`  Window: ${rangeLabel}`);
   console.log('═'.repeat(52));
 
-  console.log('\n[1/4] Fetching Quo calls + SMS (7-day window)...\n');
+  console.log(`\n[1/4] Fetching Quo calls + SMS (${days}-day window)...\n`);
   const { callData, totalFetched, totalSaved } = await runExport({
     createdAfter,
     createdBefore,
@@ -2293,6 +2368,12 @@ async function runWeeklyClientSentimentReport() {
     await replaceWeeklyNegativeSentimentSnapshot(emailRollups, createdAfter, createdBefore, rangeLabel);
   } catch (err) {
     console.warn(`  Negative snapshot sheet failed: ${err.message}`);
+  }
+
+  try {
+    await appendLatestSentimentRows(rollups, createdAfter, createdBefore, rangeLabel);
+  } catch (err) {
+    console.warn(`  All Latest Sentiment sheet append failed: ${err.message}`);
   }
 
   const subject = `Weekly Client Negative Sentiment - ${rangeLabel}`;

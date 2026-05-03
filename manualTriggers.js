@@ -70,7 +70,10 @@ function buildIndexHtml(message) {
     h1 { font-size: 1.25rem; font-weight: 600; }
     .card { background: #1a2332; border-radius: 10px; padding: 1.25rem; margin-top: 1rem; }
     label { display: block; font-size: 0.85rem; color: #9aa8bc; margin-bottom: 0.35rem; }
-    input[type="password"] { width: 100%; box-sizing: border-box; padding: 0.5rem 0.65rem; border-radius: 6px; border: 1px solid #334155; background: #0f1419; color: inherit; }
+    input[type="password"], input[type="number"], select { width: 100%; box-sizing: border-box; padding: 0.5rem 0.65rem; border-radius: 6px; border: 1px solid #334155; background: #0f1419; color: inherit; }
+    .field { margin-top: 0.85rem; }
+    .row { display: flex; gap: 0.6rem; }
+    .row > div { flex: 1; }
     .jobs { display: flex; flex-direction: column; gap: 0.6rem; margin-top: 1rem; }
     button { padding: 0.55rem 1rem; border-radius: 6px; border: none; font-size: 0.95rem; cursor: pointer; text-align: left; background: #2563eb; color: #fff; }
     button:hover { background: #1d4ed8; }
@@ -89,9 +92,27 @@ function buildIndexHtml(message) {
   <div class="card">
     <label for="token">Trigger token (<code>ADMIN_TRIGGER_TOKEN</code>)</label>
     <input type="password" id="token" autocomplete="current-password" placeholder="Paste token from Railway / .env"/>
+    <div class="field">
+      <label for="weekly-days">Sentiment time frame (trailing days)</label>
+      <div class="row">
+        <div>
+          <select id="weekly-days">
+            <option value="1">1 day</option>
+            <option value="3">3 days</option>
+            <option value="7" selected>7 days (default)</option>
+            <option value="14">14 days</option>
+            <option value="30">30 days</option>
+            <option value="custom">Custom…</option>
+          </select>
+        </div>
+        <div>
+          <input type="number" id="weekly-days-custom" min="1" max="180" placeholder="Custom days (1–180)" style="display:none"/>
+        </div>
+      </div>
+    </div>
     <div class="jobs">
       <button type="button" data-job="daily">Run daily lead report + CSV</button>
-      <button type="button" data-job="weekly">Run weekly client sentiment (7 days · summaries + SMS)</button>
+      <button type="button" data-job="weekly">Run client sentiment (uses selected time frame · summaries + SMS)</button>
       <button type="button" data-job="monthly">Run monthly client newsletter ideas (30 days · summaries)</button>
     </div>
     <p class="hint">Jobs run in the background so the browser does not time out. Only one job at a time.</p>
@@ -132,16 +153,37 @@ function buildIndexHtml(message) {
     }
   }
 
+  var daysSel = document.getElementById('weekly-days');
+  var daysCustom = document.getElementById('weekly-days-custom');
+  daysSel.addEventListener('change', function () {
+    daysCustom.style.display = daysSel.value === 'custom' ? '' : 'none';
+  });
+
+  function selectedDays() {
+    if (daysSel.value === 'custom') {
+      var n = parseInt(daysCustom.value, 10);
+      if (!isFinite(n) || n < 1) return null;
+      return Math.min(180, n);
+    }
+    return parseInt(daysSel.value, 10);
+  }
+
   async function runJob(job) {
     var token = (tokenEl.value || '').trim();
     if (!token) { setStatus('Enter the trigger token first.'); return; }
+    var options = {};
+    if (job === 'weekly') {
+      var days = selectedDays();
+      if (!days) { setStatus('Enter a custom day count (1–180).'); return; }
+      options.days = days;
+    }
     clearPoll();
     setStatus('Starting…');
     try {
       var r = await fetch('/api/trigger', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job: job, token: token }),
+        body: JSON.stringify({ job: job, token: token, options: options }),
       });
       var j = await r.json().catch(function () { return {}; });
       if (r.status === 409) { setStatus(j.error || 'A job is already running.'); return; }
@@ -169,7 +211,7 @@ function buildIndexHtml(message) {
  * @param {object} opts
  * @param {number} opts.port
  * @param {string} [opts.adminToken]
- * @param {{ daily: () => Promise<unknown>, weekly: () => Promise<unknown>, monthly: () => Promise<unknown> }} opts.runners
+ * @param {{ daily: (options?: object) => Promise<unknown>, weekly: (options?: { days?: number }) => Promise<unknown>, monthly: (options?: object) => Promise<unknown> }} opts.runners
  */
 function startManualTriggerServer(opts) {
   const { port, adminToken, runners } = opts;
@@ -186,7 +228,7 @@ function startManualTriggerServer(opts) {
     finishedAt: null,
   };
 
-  async function runInBackground(job) {
+  async function runInBackground(job, options) {
     state.running = job;
     state.lastError = '';
     state.lastMessage = '';
@@ -194,7 +236,7 @@ function startManualTriggerServer(opts) {
     state.startedAt = new Date().toISOString();
     const fn = runners[job];
     try {
-      const result = await fn();
+      const result = await fn(options || {});
       state.lastFinished = job;
       state.finishedAt = new Date().toISOString();
       if (result && typeof result === 'object' && result.csvFilename) {
@@ -262,6 +304,7 @@ function startManualTriggerServer(opts) {
         }
         const job = body.job;
         const token = body.token;
+        const rawOptions = body.options && typeof body.options === 'object' ? body.options : {};
         if (!['daily', 'weekly', 'monthly'].includes(job)) {
           sendJson(res, 400, { error: 'job must be daily, weekly, or monthly' });
           return;
@@ -274,10 +317,19 @@ function startManualTriggerServer(opts) {
           sendJson(res, 409, { error: `Already running: ${state.running}` });
           return;
         }
+        const options = {};
+        if (job === 'weekly') {
+          const days = parseInt(rawOptions.days, 10);
+          if (!Number.isFinite(days) || days < 1 || days > 180) {
+            sendJson(res, 400, { error: 'options.days must be an integer between 1 and 180' });
+            return;
+          }
+          options.days = days;
+        }
         setImmediate(() => {
-          runInBackground(job).catch((e) => console.error('[manual trigger] unhandled', e));
+          runInBackground(job, options).catch((e) => console.error('[manual trigger] unhandled', e));
         });
-        sendJson(res, 202, { accepted: true, job });
+        sendJson(res, 202, { accepted: true, job, options });
         return;
       }
 
