@@ -2234,6 +2234,7 @@ async function loadWeeklyNegativeCarryoverRollups({
 async function runWeeklyClientSentimentReport(opts = {}) {
   const requestedDays = opts.days != null ? Math.max(1, Math.floor(Number(opts.days) || 0)) : null;
   const days = requestedDays || 7;
+  const onlyLatest = Boolean(opts.onlyLatest);
   const { createdAfter, createdBefore } = requestedDays
     ? getTrailingDaysRange(days)
     : getTrailing7DaysRange();
@@ -2242,7 +2243,7 @@ async function runWeeklyClientSentimentReport(opts = {}) {
     : buildSentiment7DayRangeLabel(createdAfter, createdBefore);
 
   console.log(`\n${'═'.repeat(52)}`);
-  console.log(`  Weekly client sentiment (trailing ${days} day${days === 1 ? '' : 's'} · summaries + SMS + all call statuses)`);
+  console.log(`  Weekly client sentiment (trailing ${days} day${days === 1 ? '' : 's'} · summaries + SMS + all call statuses)${onlyLatest ? ' [latest-only mode: skipping email + Negative Sentiment + weekly upsert]' : ''}`);
   console.log(`  Window: ${rangeLabel}`);
   console.log('═'.repeat(52));
 
@@ -2319,7 +2320,7 @@ async function runWeeklyClientSentimentReport(opts = {}) {
     }
   }
 
-  if (GOOGLE_WEEKLY_SENTIMENT_SHEET_ID) {
+  if (!onlyLatest && GOOGLE_WEEKLY_SENTIMENT_SHEET_ID) {
     try {
       await syncWeeklySentimentToGoogleSheets({
         spreadsheetId: GOOGLE_WEEKLY_SENTIMENT_SHEET_ID,
@@ -2335,7 +2336,7 @@ async function runWeeklyClientSentimentReport(opts = {}) {
   }
 
   let carryoverNegatives = [];
-  if (GOOGLE_WEEKLY_SENTIMENT_SHEET_ID && OPENAI_API_KEY) {
+  if (!onlyLatest && GOOGLE_WEEKLY_SENTIMENT_SHEET_ID && OPENAI_API_KEY) {
     try {
       carryoverNegatives = await loadWeeklyNegativeCarryoverRollups({
         createdAfter,
@@ -2364,10 +2365,12 @@ async function runWeeklyClientSentimentReport(opts = {}) {
   }
   console.log('  Done.');
 
-  try {
-    await replaceWeeklyNegativeSentimentSnapshot(emailRollups, createdAfter, createdBefore, rangeLabel);
-  } catch (err) {
-    console.warn(`  Negative snapshot sheet failed: ${err.message}`);
+  if (!onlyLatest) {
+    try {
+      await replaceWeeklyNegativeSentimentSnapshot(emailRollups, createdAfter, createdBefore, rangeLabel);
+    } catch (err) {
+      console.warn(`  Negative snapshot sheet failed: ${err.message}`);
+    }
   }
 
   try {
@@ -2376,20 +2379,24 @@ async function runWeeklyClientSentimentReport(opts = {}) {
     console.warn(`  All Latest Sentiment sheet append failed: ${err.message}`);
   }
 
-  const subject = `Weekly Client Negative Sentiment - ${rangeLabel}`;
-  const html = buildWeeklyNegativeSentimentEmailHtml(rangeLabel, emailRollups);
-
-  if (!EMAIL_TO.length || !EMAIL_CONFIGURED) {
-    console.log('\n  Email not configured — printing weekly sentiment body:\n');
-    console.log(bodyMd);
+  if (onlyLatest) {
+    console.log('\n  Latest-only mode: skipping email send.');
   } else {
-    await sendEmail({
-      htmlBody: html,
-      plainText: bodyMd,
-      subject,
-      attachments: [],
-    });
-    console.log(`\n  Sent weekly sentiment report to: ${EMAIL_TO.join(', ')}`);
+    const subject = `Weekly Client Negative Sentiment - ${rangeLabel}`;
+    const html = buildWeeklyNegativeSentimentEmailHtml(rangeLabel, emailRollups);
+
+    if (!EMAIL_TO.length || !EMAIL_CONFIGURED) {
+      console.log('\n  Email not configured — printing weekly sentiment body:\n');
+      console.log(bodyMd);
+    } else {
+      await sendEmail({
+        htmlBody: html,
+        plainText: bodyMd,
+        subject,
+        attachments: [],
+      });
+      console.log(`\n  Sent weekly sentiment report to: ${EMAIL_TO.join(', ')}`);
+    }
   }
 
   console.log(`\n${'═'.repeat(52)}`);
