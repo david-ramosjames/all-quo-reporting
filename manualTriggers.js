@@ -110,6 +110,9 @@ function buildIndexHtml(message) {
         </div>
       </div>
     </div>
+    <div class="field">
+      <label><input type="checkbox" id="weekly-only-latest"/> Only update <code>All Latest Sentiment</code> (skip email + Negative Sentiment + weekly upsert)</label>
+    </div>
     <div class="jobs">
       <button type="button" data-job="daily">Run daily lead report + CSV</button>
       <button type="button" data-job="weekly">Run client sentiment (uses selected time frame · summaries + SMS)</button>
@@ -176,6 +179,7 @@ function buildIndexHtml(message) {
       var days = selectedDays();
       if (!days) { setStatus('Enter a custom day count (1–180).'); return; }
       options.days = days;
+      options.onlyLatest = document.getElementById('weekly-only-latest').checked;
     }
     clearPoll();
     setStatus('Starting…');
@@ -211,7 +215,7 @@ function buildIndexHtml(message) {
  * @param {object} opts
  * @param {number} opts.port
  * @param {string} [opts.adminToken]
- * @param {{ daily: (options?: object) => Promise<unknown>, weekly: (options?: { days?: number }) => Promise<unknown>, monthly: (options?: object) => Promise<unknown> }} opts.runners
+ * @param {{ daily: (options?: object) => Promise<unknown>, weekly: (options?: { days?: number, onlyLatest?: boolean }) => Promise<unknown>, monthly: (options?: object) => Promise<unknown> }} opts.runners
  */
 function startManualTriggerServer(opts) {
   const { port, adminToken, runners } = opts;
@@ -325,6 +329,7 @@ function startManualTriggerServer(opts) {
             return;
           }
           options.days = days;
+          options.onlyLatest = Boolean(rawOptions.onlyLatest);
         }
         setImmediate(() => {
           runInBackground(job, options).catch((e) => console.error('[manual trigger] unhandled', e));
