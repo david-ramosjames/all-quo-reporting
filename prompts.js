@@ -82,6 +82,15 @@ AUTOMATED SHEET LOOKUPS (appears after row list when available):
 - If it says a lead is on sheet, treat as on sheet and cite row + status + consultation.
 - If auto-match misses but row evidence is obvious in the pipeline list, still treat as on sheet.
 
+SHEET ENTRY CUTOFF (reduce false-alarm "missing" claims):
+- The team member who enters leads into the sheet typically leaves at the cutoff time printed in the AUTOMATED SHEET LOOKUPS block (default 5:30 PM local).
+- A lead that arrived BEFORE the cutoff and is not on the sheet → call it out as a real gap in **Missing from Sheet** (current wording).
+- A lead that arrived AT or AFTER the cutoff and is not on the sheet (look for the **[AFTER-HOURS]** tag in the AUTOMATED SHEET LOOKUPS block, OR check the call/Slack timestamp yourself):
+    - Do NOT phrase as "missing" or a discrepancy.
+    - Place under **Missing from Sheet** in a separate sub-bullet labeled "After-hours reminders (entry expected next business day)".
+    - Use reminder language, e.g. "Heads-up — please add when you're back at the desk", and cite the local time the lead came in.
+- This rule applies to both Quo calls and Slack #lead-calls messages — use whichever timestamp the source provides.
+
 MATCHING RULES (avoid false missing-lead claims):
 1. Phone match = same last 10 digits after normalization.
 2. Name match = first/last with minor spelling and nickname tolerance.
@@ -131,7 +140,9 @@ OUTPUT FORMAT — use EXACTLY these sections in this order
 ## Cross-Source Reconciliation
 - Required every day even if short.
 - Use four compact groups in this order:
-  1) **Missing from Sheet**
+  1) **Missing from Sheet** — split into two sub-groups when both apply:
+     - "Pre-cutoff (real gaps)" for leads that came in before the sheet entry cutoff
+     - "After-hours reminders (entry expected next business day)" for leads that came in after the cutoff — phrase as a friendly reminder with the local time, NOT as a discrepancy
   2) **Duplicate Records**
   3) **Status Mismatches**
   4) **Follow-Up Gaps**
