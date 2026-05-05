@@ -5,6 +5,48 @@
  * Column letters match sheets.js / .env (defaults E, F, K, L) — duplicated here to avoid circular requires.
  */
 
+const { DateTime } = require('luxon');
+
+const TIMEZONE = process.env.TIMEZONE || 'America/Chicago';
+
+/**
+ * After this local time, the person responsible for entering leads into the sheet
+ * has typically left for the day, so post-cutoff leads should be framed as a
+ * reminder ("expected to be entered next business day") rather than a true gap.
+ * Override via SHEET_ENTRY_CUTOFF_LOCAL=HH:mm (24h, local time).
+ */
+const SHEET_ENTRY_CUTOFF_LOCAL = (process.env.SHEET_ENTRY_CUTOFF_LOCAL || '17:30').trim();
+
+function parseCutoffLocal(s) {
+  const m = String(s || '').match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return { hour: 17, minute: 30 };
+  const hour = Math.min(23, Math.max(0, parseInt(m[1], 10)));
+  const minute = Math.min(59, Math.max(0, parseInt(m[2], 10)));
+  return { hour, minute };
+}
+
+const CUTOFF = parseCutoffLocal(SHEET_ENTRY_CUTOFF_LOCAL);
+
+/**
+ * Returns { afterHours: boolean, localTimeLabel: string } for a call timestamp.
+ * Returns { afterHours: false, localTimeLabel: '' } if the timestamp is missing/invalid.
+ */
+function classifyEntryCutoff(iso) {
+  if (!iso) return { afterHours: false, localTimeLabel: '' };
+  const dt = DateTime.fromISO(String(iso), { zone: 'utc' }).setZone(TIMEZONE);
+  if (!dt.isValid) return { afterHours: false, localTimeLabel: '' };
+  const cutoffMinutes = CUTOFF.hour * 60 + CUTOFF.minute;
+  const callMinutes = dt.hour * 60 + dt.minute;
+  const afterHours = callMinutes >= cutoffMinutes;
+  const localTimeLabel = dt.toFormat('h:mm a');
+  return { afterHours, localTimeLabel };
+}
+
+function cutoffLabel() {
+  const dt = DateTime.fromObject({ hour: CUTOFF.hour, minute: CUTOFF.minute }, { zone: TIMEZONE });
+  return dt.toFormat('h:mm a');
+}
+
 function columnLettersToIndex(letters) {
   const up = String(letters || 'A').toUpperCase().replace(/[^A-Z]/g, '') || 'A';
   let n = 0;
@@ -136,31 +178,40 @@ function buildAutomatedSheetMatches(callData, slackText, rows) {
   }
 
   const phoneIndex = buildPhoneIndex(entries);
+  const cutoffStr = cutoffLabel();
   const lines = [
     'AUTOMATED SHEET LOOKUPS (code-verified — trust these; do NOT say "not on sheet" for a lead listed here):',
     'Phone matches use the last 10 digits. Name matches require at least two overlapping name tokens (first/last).',
+    `SHEET ENTRY CUTOFF: ${cutoffStr} ${TIMEZONE}. Leads marked **[AFTER-HOURS]** below arrived after this time, when the sheet-data-entry person has typically left. For those, frame any "not on sheet" finding as a gentle reminder ("expected to be entered next business day"), NOT as a missed lead or discrepancy.`,
     '',
   ];
 
   const seen = new Set();
 
-  const pushMatch = (label, d10, entry, via) => {
+  const afterHoursTag = (cutoff) =>
+    cutoff.afterHours
+      ? ` **[AFTER-HOURS @ ${cutoff.localTimeLabel} local — entry expected next business day; treat as reminder, not a gap]**`
+      : '';
+
+  const pushMatch = (label, d10, entry, via, cutoff) => {
     const key = `${label}|${d10}|${entry.sheetRow}|${via}`;
     if (seen.has(key)) return;
     seen.add(key);
     lines.push(
-      `- ${label} → **on sheet** [sheet row ${entry.sheetRow}] status:"${entry.status || '?'}" consult:"${entry.consultation || '?'}" name:"${entry.name || '?'}" phone:"${entry.phoneStr || '?'}" (${via})`
+      `- ${label} → **on sheet** [sheet row ${entry.sheetRow}] status:"${entry.status || '?'}" consult:"${entry.consultation || '?'}" name:"${entry.name || '?'}" phone:"${entry.phoneStr || '?'}" (${via})${afterHoursTag(cutoff || { afterHours: false })}`
     );
   };
 
   // --- Quo calls ---
   (callData || []).forEach((c, idx) => {
     const label = `Quo call [${idx + 1}]`;
+    const cutoff = classifyEntryCutoff(c.timestamp);
+    const tag = afterHoursTag(cutoff);
     const d10 = last10Digits(c.phone) || last10Digits(c.contact);
     if (d10) {
       const hits = phoneIndex.get(d10);
       if (hits?.length) {
-        for (const h of hits) pushMatch(label, d10, h, 'phone=sheet');
+        for (const h of hits) pushMatch(label, d10, h, 'phone=sheet', cutoff);
       } else {
         const contact = (c.contact || '').trim();
         const badContact = !contact || /unknown/i.test(contact);
@@ -175,21 +226,21 @@ function buildAutomatedSheetMatches(callData, slackText, rows) {
             }
           }
           if (best) {
-            pushMatch(label, d10, best, `name overlap (${bestScore} tokens; sheet F did not match this 10-digit)`);
+            pushMatch(label, d10, best, `name overlap (${bestScore} tokens; sheet F did not match this 10-digit)`, cutoff);
           } else {
             lines.push(
-              `- ${label} caller digits ${d10}: **no auto row** (column F had no same 10-digit). Search the LEAD PIPELINE lines for this number or "${contact || 'caller name'}" before saying "not on sheet" (sheet may use different formatting or tab).`
+              `- ${label} caller digits ${d10}: **no auto row** (column F had no same 10-digit). Search the LEAD PIPELINE lines for this number or "${contact || 'caller name'}" before saying "not on sheet" (sheet may use different formatting or tab).${tag}`
             );
           }
         } else {
           lines.push(
-            `- ${label} caller digits ${d10}: **no auto row** by phone in column F. Search LEAD PIPELINE manually — contact name was unclear for auto name-match.`
+            `- ${label} caller digits ${d10}: **no auto row** by phone in column F. Search LEAD PIPELINE manually — contact name was unclear for auto name-match.${tag}`
           );
         }
       }
     } else {
       lines.push(
-        `- ${label}: could not derive 10-digit phone — use LEAD PIPELINE + summaries only; do not guess "not on sheet".`
+        `- ${label}: could not derive 10-digit phone — use LEAD PIPELINE + summaries only; do not guess "not on sheet".${tag}`
       );
     }
   });
