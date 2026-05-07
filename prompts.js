@@ -82,13 +82,27 @@ AUTOMATED SHEET LOOKUPS (appears after row list when available):
 - If it says a lead is on sheet, treat as on sheet and cite row + status + consultation.
 - If auto-match misses but row evidence is obvious in the pipeline list, still treat as on sheet.
 
+WHO BELONGS ON THE LEAD SHEET (apply BEFORE flagging anything as missing):
+- The Google Sheet tracks **prospective new-client leads only**. Do NOT flag a call as "missing from sheet" unless the caller is a NEW CALLER seeking representation (CLASSIFICATION buckets: NEW LEAD — SIGNED | VIABLE | UNDECIDED | DECLINED — *or* an unclassified caller who is plausibly a new prospect).
+- The following caller types are NEVER expected to be on the sheet — exclude them from **Missing from Sheet** entirely (do not list them as gaps OR as after-hours reminders):
+    - Insurance adjusters / carriers (GEICO, USAA, State Farm, Progressive, Allstate, Liberty Mutual, etc.)
+    - Medical providers / clinics / hospitals / PT / chiropractors / imaging
+    - Process servers, court runners, couriers
+    - Opposing counsel and other attorneys / law firms
+    - Vendors, marketing, IT, banks, billing, collections
+    - Existing clients calling for updates, settlement/demand, scheduling
+    - Spam, robocalls, wrong numbers
+- If the call summary or transcript makes the caller's role clear (e.g. "process server", "claims adjuster", "from the medical center"), treat that as authoritative — do not list under Missing from Sheet even if there is no row.
+- When the caller's role is genuinely ambiguous, you may include them under Missing from Sheet but label them "(role unclear — confirm before adding)".
+
 SHEET ENTRY CUTOFF (reduce false-alarm "missing" claims):
 - The team member who enters leads into the sheet typically leaves at the cutoff time printed in the AUTOMATED SHEET LOOKUPS block (default 5:30 PM local).
-- A lead that arrived BEFORE the cutoff and is not on the sheet → call it out as a real gap in **Missing from Sheet** (current wording).
-- A lead that arrived AT or AFTER the cutoff and is not on the sheet (look for the **[AFTER-HOURS]** tag in the AUTOMATED SHEET LOOKUPS block, OR check the call/Slack timestamp yourself):
+- A NEW-LEAD caller that arrived BEFORE the cutoff and is not on the sheet → call it out as a real gap in **Missing from Sheet** (current wording).
+- A NEW-LEAD caller that arrived AT or AFTER the cutoff and is not on the sheet (look for the **[AFTER-HOURS]** tag in the AUTOMATED SHEET LOOKUPS block, OR check the call/Slack timestamp yourself):
     - Do NOT phrase as "missing" or a discrepancy.
     - Place under **Missing from Sheet** in a separate sub-bullet labeled "After-hours reminders (entry expected next business day)".
     - Use reminder language, e.g. "Heads-up — please add when you're back at the desk", and cite the local time the lead came in.
+- The cutoff rule only applies to callers who *would* belong on the sheet (i.e. after passing the WHO BELONGS check above). Providers/insurers/etc. are excluded regardless of timing.
 - This rule applies to both Quo calls and Slack #lead-calls messages — use whichever timestamp the source provides.
 
 MATCHING RULES (avoid false missing-lead claims):
@@ -140,9 +154,10 @@ OUTPUT FORMAT — use EXACTLY these sections in this order
 ## Cross-Source Reconciliation
 - Required every day even if short.
 - Use four compact groups in this order:
-  1) **Missing from Sheet** — split into two sub-groups when both apply:
-     - "Pre-cutoff (real gaps)" for leads that came in before the sheet entry cutoff
-     - "After-hours reminders (entry expected next business day)" for leads that came in after the cutoff — phrase as a friendly reminder with the local time, NOT as a discrepancy
+  1) **Missing from Sheet** — NEW-LEAD callers only. Apply the "WHO BELONGS ON THE LEAD SHEET" filter first; do NOT list providers, insurers, medical, process servers, opposing counsel, vendors, existing clients, or spam here. Split into two sub-groups when both apply:
+     - "Pre-cutoff (real gaps)" for new-lead callers that came in before the sheet entry cutoff
+     - "After-hours reminders (entry expected next business day)" for new-lead callers that came in after the cutoff — phrase as a friendly reminder with the local time, NOT as a discrepancy
+     - If neither sub-group has any items, write "- None." under this header.
   2) **Duplicate Records**
   3) **Status Mismatches**
   4) **Follow-Up Gaps**
