@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const { URL } = require('url');
 
 /**
- * @typedef {'daily' | 'weekly' | 'monthly'} JobId
+ * @typedef {'daily' | 'weekly' | 'monthly' | 'missed'} JobId
  */
 
 function timingSafeEqualString(a, b) {
@@ -117,6 +117,7 @@ function buildIndexHtml(message) {
       <button type="button" data-job="daily">Run daily lead report + CSV</button>
       <button type="button" data-job="weekly">Run client sentiment (uses selected time frame · summaries + SMS)</button>
       <button type="button" data-job="monthly">Run monthly client newsletter ideas (30 days · summaries)</button>
+      <button type="button" data-job="missed">Run missed client call report (trailing 24h · clients only)</button>
     </div>
     <p class="hint">Jobs run in the background so the browser does not time out. Only one job at a time.</p>
     <div id="status"></div>
@@ -215,7 +216,7 @@ function buildIndexHtml(message) {
  * @param {object} opts
  * @param {number} opts.port
  * @param {string} [opts.adminToken]
- * @param {{ daily: (options?: object) => Promise<unknown>, weekly: (options?: { days?: number, onlyLatest?: boolean }) => Promise<unknown>, monthly: (options?: object) => Promise<unknown> }} opts.runners
+ * @param {{ daily: (options?: object) => Promise<unknown>, weekly: (options?: { days?: number, onlyLatest?: boolean }) => Promise<unknown>, monthly: (options?: object) => Promise<unknown>, missed: (options?: object) => Promise<unknown> }} opts.runners
  */
 function startManualTriggerServer(opts) {
   const { port, adminToken, runners } = opts;
@@ -309,8 +310,8 @@ function startManualTriggerServer(opts) {
         const job = body.job;
         const token = body.token;
         const rawOptions = body.options && typeof body.options === 'object' ? body.options : {};
-        if (!['daily', 'weekly', 'monthly'].includes(job)) {
-          sendJson(res, 400, { error: 'job must be daily, weekly, or monthly' });
+        if (!['daily', 'weekly', 'monthly', 'missed'].includes(job)) {
+          sendJson(res, 400, { error: 'job must be daily, weekly, monthly, or missed' });
           return;
         }
         if (!timingSafeEqualString(token, adminToken)) {

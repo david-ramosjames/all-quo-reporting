@@ -4,6 +4,7 @@ const {
   runDailyReport,
   runWeeklyClientSentimentReport,
   runMonthlyNewsletterInsightsReport,
+  runMissedClientCallReport,
 } = require('./report');
 
 // Daily: previous calendar day — Daily Intake & Lead Report + Quo CSV (Slack + sheet).
@@ -13,6 +14,8 @@ const SCHEDULE = process.env.CRON_SCHEDULE || '0 7 * * *';
 const WEEKLY_SENTIMENT_CRON = process.env.WEEKLY_SENTIMENT_CRON || '0 20 * * 5';
 // Monthly: trailing 30 days — pooled FAQ / newsletter content brief (default: 01:00 on the 1st).
 const MONTHLY_INSIGHTS_CRON = process.env.MONTHLY_INSIGHTS_CRON || '0 1 1 * *';
+// Missed Client Call Report: trailing 24h — clients who haven't been called back yet (default: 7:00 AM local).
+const MISSED_CLIENT_CALLS_CRON = process.env.MISSED_CLIENT_CALLS_CRON || '0 7 * * *';
 const TIMEZONE = process.env.TIMEZONE || 'America/Chicago';
 
 console.log('══════════════════════════════════════════════');
@@ -21,6 +24,7 @@ console.log('══════════════════════�
 console.log(`  Daily lead + CSV : ${SCHEDULE}`);
 console.log(`  Weekly sentiment : ${WEEKLY_SENTIMENT_CRON}`);
 console.log(`  Monthly newsletter : ${MONTHLY_INSIGHTS_CRON}`);
+console.log(`  Missed client calls : ${MISSED_CLIENT_CALLS_CRON}`);
 console.log(`  Timezone         : ${TIMEZONE}`);
 console.log(`  Started          : ${new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' })}`);
 console.log('══════════════════════════════════════════════\n');
@@ -37,6 +41,11 @@ if (!cron.validate(WEEKLY_SENTIMENT_CRON)) {
 
 if (!cron.validate(MONTHLY_INSIGHTS_CRON)) {
   console.error(`Invalid MONTHLY_INSIGHTS_CRON: "${MONTHLY_INSIGHTS_CRON}"`);
+  process.exit(1);
+}
+
+if (!cron.validate(MISSED_CLIENT_CALLS_CRON)) {
+  console.error(`Invalid MISSED_CLIENT_CALLS_CRON: "${MISSED_CLIENT_CALLS_CRON}"`);
   process.exit(1);
 }
 
@@ -82,6 +91,20 @@ cron.schedule(
   { timezone: TIMEZONE }
 );
 
+cron.schedule(
+  MISSED_CLIENT_CALLS_CRON,
+  async () => {
+    const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
+    console.log(`\n[${ts}] Cron triggered — missed client call report (trailing 24h)...`);
+    try {
+      await runMissedClientCallReport();
+    } catch (err) {
+      console.error(`[${ts}] Missed client call report failed:`, err.message);
+    }
+  },
+  { timezone: TIMEZONE }
+);
+
 console.log('Scheduler running. Waiting for next trigger...');
 console.log('(Press Ctrl+C to stop)\n');
 
@@ -105,6 +128,7 @@ if (process.env.DISABLE_MANUAL_TRIGGER_UI === 'true' || process.env.DISABLE_MANU
       daily: runDailyReport,
       weekly: runWeeklyClientSentimentReport,
       monthly: runMonthlyNewsletterInsightsReport,
+      missed: runMissedClientCallReport,
     },
   });
 }
