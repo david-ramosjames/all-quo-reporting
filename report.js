@@ -2443,12 +2443,22 @@ function isOutgoingDirection(d) {
 
 function isMissedInboundCall(c) {
   if (!isIncomingDirection(c.direction)) return false;
+  // Sona/AI-handled inbound calls count as missed by staff — they still need a callback.
+  if (c.aiHandled) return true;
   const status = String(c.status || '').toLowerCase();
   if (MISSED_INBOUND_STATUSES.has(status)) return true;
   // Fallback: incoming with zero duration is treated as missed.
   const dur = Number(c.duration || 0);
   if (status && status !== 'completed' && (!Number.isFinite(dur) || dur <= 0)) return true;
   return false;
+}
+
+function classifyMissedReason(c) {
+  if (c.aiHandled) return 'Sona/AI handled';
+  const status = String(c.status || '').toLowerCase();
+  if (status === 'voicemail') return 'Voicemail';
+  if (MISSED_INBOUND_STATUSES.has(status)) return 'Missed (no answer)';
+  return 'Missed';
 }
 
 function formatMissedCallTime(iso) {
@@ -2459,7 +2469,7 @@ function formatMissedCallTime(iso) {
 }
 
 function buildMissedClientCallTable(rows) {
-  const header = ['Client', 'Phone', 'Missed at', 'Quo line', 'Link'];
+  const header = ['Client', 'Phone', 'Missed at', 'Reason', 'Quo line', 'Link'];
   const lines = [header.join(' | '), header.map(() => '---').join(' | ')];
   for (const r of rows) {
     lines.push(
@@ -2467,6 +2477,7 @@ function buildMissedClientCallTable(rows) {
         r.contact || '(unknown)',
         r.phone || '',
         r.missedAtLocal || '',
+        r.reason || '',
         r.line || '',
         r.link ? `[open](${r.link})` : '',
       ].join(' | ')
@@ -2484,13 +2495,14 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
     .empty { color: #57606a; font-style: italic; padding: 16px 0; }
   `.trim();
   const headerRow =
-    '<tr><th>Client</th><th>Phone</th><th>Missed at</th><th>Quo line</th><th>Link</th></tr>';
+    '<tr><th>Client</th><th>Phone</th><th>Missed at</th><th>Reason</th><th>Quo line</th><th>Link</th></tr>';
   const bodyRows = rows
     .map(
       (r) =>
         `<tr><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
         `<td>${escapeHtml(r.phone || '')}</td>` +
         `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
+        `<td>${escapeHtml(r.reason || '')}</td>` +
         `<td>${escapeHtml(r.line || '')}</td>` +
         `<td>${r.link ? `<a href="${escapeHtml(r.link)}">open</a>` : ''}</td></tr>`
     )
@@ -2501,7 +2513,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
     <h2>Missed Client Call Report</h2>
     <p><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
-    <p>Clients whose inbound call in the last 24 hours has not yet been returned. Please call them back today.</p>
+    <p>Clients whose inbound call in the last 24 hours has not yet been returned by a staff member. Includes true missed calls, voicemails, and Sona/AI-handled calls. Please call them back today.</p>
     ${table}
   </body></html>`;
 }
@@ -2562,6 +2574,7 @@ async function runMissedClientCallReport() {
       phone: lastMissed.phone || '',
       missedAtLocal: formatMissedCallTime(lastMissed.timestamp),
       missedAtIso: lastMissed.timestamp || '',
+      reason: classifyMissedReason(lastMissed),
       line: lastMissed.line || '',
       link: lastMissed.link || '',
     });
@@ -2571,7 +2584,7 @@ async function runMissedClientCallReport() {
 
   console.log(`\n[3/3] Outstanding (unreturned) missed client calls: ${outstanding.length}`);
   for (const r of outstanding) {
-    console.log(`  - ${r.contact} (${r.phone}) — missed ${r.missedAtLocal}`);
+    console.log(`  - ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}`);
   }
 
   const subject = outstanding.length
