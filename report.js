@@ -30,6 +30,7 @@ const {
   resolveAppendAnchorA1,
   makeAuthClient,
 } = require('./sheets');
+const { last10Digits } = require('./sheet_reconcile');
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -111,6 +112,8 @@ const GOOGLE_LATEST_SENTIMENT_RANGE = (process.env.GOOGLE_LATEST_SENTIMENT_RANGE
 
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const EMAIL_TO   = process.env.EMAIL_TO?.split(',').map((e) => e.trim()).filter(Boolean) || [];
+const MISSED_CLIENT_CALLS_EMAIL_TO =
+  process.env.MISSED_CLIENT_CALLS_EMAIL_TO?.split(',').map((e) => e.trim()).filter(Boolean) || [];
 const EMAIL_CONFIGURED = Boolean(
   EMAIL_FROM &&
   process.env.GOOGLE_CLIENT_ID &&
@@ -138,6 +141,16 @@ function getYesterdayRange() {
 function getTrailing7DaysRange() {
   const now   = DateTime.now().setZone(TIMEZONE);
   const start = now.minus({ days: 7 }).startOf('day');
+  return {
+    createdAfter:  start.toUTC().toISO(),
+    createdBefore: now.toUTC().toISO(),
+  };
+}
+
+/** Trailing 24 hours from "now" — used by the missed-client-call report. */
+function getTrailing24HoursRange() {
+  const now = DateTime.now().setZone(TIMEZONE);
+  const start = now.minus({ hours: 24 });
   return {
     createdAfter:  start.toUTC().toISO(),
     createdBefore: now.toUTC().toISO(),
@@ -1654,10 +1667,11 @@ function buildEmailHtml(analysis, stats, dateLabel) {
 </html>`;
 }
 
-async function sendEmail({ htmlBody, plainText, subject, attachments = [] }) {
+async function sendEmail({ htmlBody, plainText, subject, attachments = [], to }) {
+  const recipients = (Array.isArray(to) && to.length ? to : EMAIL_TO).join(', ');
   const mail = {
     from: EMAIL_FROM,
-    to: EMAIL_TO.join(', '),
+    to: recipients,
     subject,
     text: plainText,
     html: htmlBody,
@@ -2404,6 +2418,184 @@ async function runWeeklyClientSentimentReport(opts = {}) {
   return { rangeLabel, clientsAnalyzed: clientCount, aggregate: agg, clientRollups: rollups, bodyMd };
 }
 
+// ── Missed Client Call Report (trailing 24h, client contacts only) ───────────
+
+const MISSED_INBOUND_STATUSES = new Set([
+  'missed',
+  'no-answer',
+  'noanswer',
+  'voicemail',
+  'unanswered',
+  'rejected',
+  'busy',
+  'declined',
+]);
+
+function isIncomingDirection(d) {
+  const v = String(d || '').toLowerCase();
+  return v === 'incoming' || v === 'inbound';
+}
+
+function isOutgoingDirection(d) {
+  const v = String(d || '').toLowerCase();
+  return v === 'outgoing' || v === 'outbound';
+}
+
+function isMissedInboundCall(c) {
+  if (!isIncomingDirection(c.direction)) return false;
+  const status = String(c.status || '').toLowerCase();
+  if (MISSED_INBOUND_STATUSES.has(status)) return true;
+  // Fallback: incoming with zero duration is treated as missed.
+  const dur = Number(c.duration || 0);
+  if (status && status !== 'completed' && (!Number.isFinite(dur) || dur <= 0)) return true;
+  return false;
+}
+
+function formatMissedCallTime(iso) {
+  if (!iso) return '';
+  const dt = DateTime.fromISO(String(iso), { zone: 'utc' }).setZone(TIMEZONE);
+  if (!dt.isValid) return '';
+  return dt.toFormat("ccc, LLL d 'at' h:mm a") + ` ${TIMEZONE}`;
+}
+
+function buildMissedClientCallTable(rows) {
+  const header = ['Client', 'Phone', 'Missed at', 'Quo line', 'Link'];
+  const lines = [header.join(' | '), header.map(() => '---').join(' | ')];
+  for (const r of rows) {
+    lines.push(
+      [
+        r.contact || '(unknown)',
+        r.phone || '',
+        r.missedAtLocal || '',
+        r.line || '',
+        r.link ? `[open](${r.link})` : '',
+      ].join(' | ')
+    );
+  }
+  return lines.join('\n');
+}
+
+function buildMissedClientCallEmailHtml(rangeLabel, rows) {
+  const css = `
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border: 1px solid #d0d7de; padding: 8px 10px; text-align: left; vertical-align: top; font-size: 14px; }
+    th { background: #f6f8fa; }
+    .empty { color: #57606a; font-style: italic; padding: 16px 0; }
+  `.trim();
+  const headerRow =
+    '<tr><th>Client</th><th>Phone</th><th>Missed at</th><th>Quo line</th><th>Link</th></tr>';
+  const bodyRows = rows
+    .map(
+      (r) =>
+        `<tr><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
+        `<td>${escapeHtml(r.phone || '')}</td>` +
+        `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
+        `<td>${escapeHtml(r.line || '')}</td>` +
+        `<td>${r.link ? `<a href="${escapeHtml(r.link)}">open</a>` : ''}</td></tr>`
+    )
+    .join('');
+  const table = rows.length
+    ? `<table>${headerRow}${bodyRows}</table>`
+    : '<p class="empty">No outstanding missed client calls in the last 24 hours. Nice work!</p>';
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
+    <h2>Missed Client Call Report</h2>
+    <p><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
+    <p>Clients whose inbound call in the last 24 hours has not yet been returned. Please call them back today.</p>
+    ${table}
+  </body></html>`;
+}
+
+/**
+ * Trailing 24h. Pulls all calls (including missed) from Quo, filters to
+ * client contacts (CRM name ends in a case number), groups by phone, and
+ * surfaces clients whose latest activity is an unreturned missed inbound.
+ */
+async function runMissedClientCallReport() {
+  const { createdAfter, createdBefore } = getTrailing24HoursRange();
+  const a = DateTime.fromISO(createdAfter, { zone: 'utc' }).setZone(TIMEZONE);
+  const b = DateTime.fromISO(createdBefore, { zone: 'utc' }).setZone(TIMEZONE);
+  const rangeLabel = `${a.toFormat("LLL d, h:mm a")} – ${b.toFormat("LLL d, h:mm a")} ${TIMEZONE}`;
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('  Missed Client Call Report (trailing 24h)');
+  console.log(`  Window: ${rangeLabel}`);
+  console.log('═'.repeat(52));
+
+  console.log('\n[1/3] Fetching Quo calls (all statuses, trailing 24h)...');
+  const { callData } = await runExport({
+    createdAfter,
+    createdBefore,
+    weeklyCommunications: true,
+    includeMessages: false,
+    fetchTranscriptForWeekly: false,
+  });
+
+  const calls = (callData || []).filter(
+    (r) => r.recordType === 'call' && isClientContactName(r.contact)
+  );
+  console.log(`\n[2/3] ${calls.length} client call(s) in window.`);
+
+  /** @type {Map<string, object[]>} */
+  const byPhone = new Map();
+  for (const c of calls) {
+    const key = last10Digits(c.phone) || last10Digits(c.contact) || (c.phone || '').trim();
+    if (!key) continue;
+    if (!byPhone.has(key)) byPhone.set(key, []);
+    byPhone.get(key).push(c);
+  }
+
+  /** @type {{ contact: string, phone: string, missedAtLocal: string, missedAtIso: string, line: string, link: string }[]} */
+  const outstanding = [];
+  for (const [, group] of byPhone) {
+    group.sort((x, y) => String(x.timestamp || '').localeCompare(String(y.timestamp || '')));
+    const lastMissed = [...group].reverse().find(isMissedInboundCall);
+    if (!lastMissed) continue;
+    const returnedAfter = group.some(
+      (c) =>
+        isOutgoingDirection(c.direction) &&
+        String(c.timestamp || '') > String(lastMissed.timestamp || '')
+    );
+    if (returnedAfter) continue;
+    outstanding.push({
+      contact: lastMissed.contact || '',
+      phone: lastMissed.phone || '',
+      missedAtLocal: formatMissedCallTime(lastMissed.timestamp),
+      missedAtIso: lastMissed.timestamp || '',
+      line: lastMissed.line || '',
+      link: lastMissed.link || '',
+    });
+  }
+
+  outstanding.sort((x, y) => String(x.missedAtIso).localeCompare(String(y.missedAtIso)));
+
+  console.log(`\n[3/3] Outstanding (unreturned) missed client calls: ${outstanding.length}`);
+  for (const r of outstanding) {
+    console.log(`  - ${r.contact} (${r.phone}) — missed ${r.missedAtLocal}`);
+  }
+
+  const subject = outstanding.length
+    ? `Missed Client Call Report — ${outstanding.length} to call back`
+    : 'Missed Client Call Report — all clear';
+  const html = buildMissedClientCallEmailHtml(rangeLabel, outstanding);
+  const plainText = outstanding.length
+    ? `Missed Client Call Report\nWindow: ${rangeLabel}\n\n${buildMissedClientCallTable(outstanding)}\n`
+    : `Missed Client Call Report\nWindow: ${rangeLabel}\n\nNo outstanding missed client calls in the last 24 hours.\n`;
+
+  const recipients = MISSED_CLIENT_CALLS_EMAIL_TO.length ? MISSED_CLIENT_CALLS_EMAIL_TO : EMAIL_TO;
+  if (!recipients.length || !EMAIL_CONFIGURED) {
+    console.log('\n  Email not configured (set MISSED_CLIENT_CALLS_EMAIL_TO or EMAIL_TO + Gmail OAuth) — printing report:\n');
+    console.log(plainText);
+  } else {
+    await sendEmail({ htmlBody: html, plainText, subject, to: recipients });
+    console.log(`\n  Sent missed-client-call report to: ${recipients.join(', ')}`);
+  }
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('Missed Client Call Report complete.');
+  return { rangeLabel, outstandingCount: outstanding.length, outstanding };
+}
+
 // ── Main report runner ────────────────────────────────────────────────────────
 
 async function runDailyReport() {
@@ -2545,4 +2737,5 @@ module.exports = {
   runDailyReport,
   runWeeklyClientSentimentReport,
   runMonthlyNewsletterInsightsReport,
+  runMissedClientCallReport,
 };
