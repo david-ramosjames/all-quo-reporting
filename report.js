@@ -2469,7 +2469,7 @@ function formatMissedCallTime(iso) {
 }
 
 function buildMissedClientCallTable(rows) {
-  const header = ['Client', 'Phone', 'Missed at', 'Reason', 'Quo line', 'Link'];
+  const header = ['Client', 'Phone', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Link'];
   const lines = [header.join(' | '), header.map(() => '---').join(' | ')];
   for (const r of rows) {
     lines.push(
@@ -2478,6 +2478,8 @@ function buildMissedClientCallTable(rows) {
         r.phone || '',
         r.missedAtLocal || '',
         r.reason || '',
+        r.attorney || '',
+        r.paralegal || '',
         r.line || '',
         r.link ? `[open](${r.link})` : '',
       ].join(' | ')
@@ -2495,7 +2497,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
     .empty { color: #57606a; font-style: italic; padding: 16px 0; }
   `.trim();
   const headerRow =
-    '<tr><th>Client</th><th>Phone</th><th>Missed at</th><th>Reason</th><th>Quo line</th><th>Link</th></tr>';
+    '<tr><th>Client</th><th>Phone</th><th>Missed at</th><th>Reason</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Link</th></tr>';
   const bodyRows = rows
     .map(
       (r) =>
@@ -2503,6 +2505,8 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
         `<td>${escapeHtml(r.phone || '')}</td>` +
         `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
         `<td>${escapeHtml(r.reason || '')}</td>` +
+        `<td>${escapeHtml(r.attorney || '')}</td>` +
+        `<td>${escapeHtml(r.paralegal || '')}</td>` +
         `<td>${escapeHtml(r.line || '')}</td>` +
         `<td>${r.link ? `<a href="${escapeHtml(r.link)}">open</a>` : ''}</td></tr>`
     )
@@ -2548,6 +2552,31 @@ async function runMissedClientCallReport() {
   );
   console.log(`\n[2/3] ${calls.length} client call(s) in window.`);
 
+  /** @type {Map<string, { leadAttorney?: string, paralegal?: string }>} */
+  let rosterMap = new Map();
+  if (GOOGLE_SHEETS_CASE_ROSTER_ID && calls.length) {
+    const hasOAuth =
+      process.env.GOOGLE_CLIENT_ID &&
+      process.env.GOOGLE_CLIENT_SECRET &&
+      process.env.GOOGLE_REFRESH_TOKEN;
+    if (hasOAuth) {
+      try {
+        const rosterRows = await fetchSheetData(
+          GOOGLE_SHEETS_CASE_ROSTER_ID,
+          GOOGLE_SHEETS_CASE_ROSTER_RANGE
+        );
+        rosterMap = rawRowsToCaseRosterMap(rosterRows);
+        console.log(`  Case roster sheet: ${rosterMap.size} row(s) indexed for attorney/paralegal.`);
+      } catch (err) {
+        console.warn(`  Case roster fetch failed (report still sends without attorney/paralegal): ${err.message}`);
+      }
+    } else {
+      console.warn(
+        '  GOOGLE_SHEETS_CASE_ROSTER_ID is set but Google OAuth env vars are incomplete — attorney/paralegal columns omitted.'
+      );
+    }
+  }
+
   /** @type {Map<string, object[]>} */
   const byPhone = new Map();
   for (const c of calls) {
@@ -2569,12 +2598,16 @@ async function runMissedClientCallReport() {
         String(c.timestamp || '') > String(lastMissed.timestamp || '')
     );
     if (returnedAfter) continue;
+    const caseId = extractTrailingCaseDigitsFromClientKey(lastMissed.contact);
+    const rosterHit = caseId ? rosterMap.get(caseId) : null;
     outstanding.push({
       contact: lastMissed.contact || '',
       phone: lastMissed.phone || '',
       missedAtLocal: formatMissedCallTime(lastMissed.timestamp),
       missedAtIso: lastMissed.timestamp || '',
       reason: classifyMissedReason(lastMissed),
+      attorney: rosterHit?.leadAttorney || '',
+      paralegal: rosterHit?.paralegal || '',
       line: lastMissed.line || '',
       link: lastMissed.link || '',
     });
