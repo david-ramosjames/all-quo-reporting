@@ -2453,6 +2453,14 @@ function isMissedInboundCall(c) {
   return false;
 }
 
+function isResolvingCall(c) {
+  // Outbound attempt from us — staff is engaging (preserves prior behavior).
+  if (isOutgoingDirection(c.direction)) return true;
+  // Successful inbound where staff actually connected (not Sona/voicemail/no-answer).
+  if (isIncomingDirection(c.direction) && !isMissedInboundCall(c)) return true;
+  return false;
+}
+
 function classifyMissedReason(c) {
   if (c.aiHandled) return 'Sona/AI handled';
   const status = String(c.status || '').toLowerCase();
@@ -2517,7 +2525,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
     <h2>Missed Client Call Report</h2>
     <p><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
-    <p>Clients whose inbound call in the last 24 hours has not yet been returned by a staff member. Includes true missed calls, voicemails, and Sona/AI-handled calls. Please call them back today.</p>
+    <p>Clients whose inbound call in the last 24 hours hasn't been resolved yet. Includes true missed calls, voicemails, and Sona/AI-handled calls. A row clears when staff makes any later outbound call to that number, OR the client calls again and gets through to a staff member. Please call back the clients still listed.</p>
     ${table}
   </body></html>`;
 }
@@ -2592,12 +2600,12 @@ async function runMissedClientCallReport() {
     group.sort((x, y) => String(x.timestamp || '').localeCompare(String(y.timestamp || '')));
     const lastMissed = [...group].reverse().find(isMissedInboundCall);
     if (!lastMissed) continue;
-    const returnedAfter = group.some(
+    const resolvedAfter = group.some(
       (c) =>
-        isOutgoingDirection(c.direction) &&
+        isResolvingCall(c) &&
         String(c.timestamp || '') > String(lastMissed.timestamp || '')
     );
-    if (returnedAfter) continue;
+    if (resolvedAfter) continue;
     const caseId = extractTrailingCaseDigitsFromClientKey(lastMissed.contact);
     const rosterHit = caseId ? rosterMap.get(caseId) : null;
     outstanding.push({
