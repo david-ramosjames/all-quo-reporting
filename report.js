@@ -2533,9 +2533,9 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
     : '<p class="empty">No outstanding missed client calls in the last 24 hours. Nice work!</p>';
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
     <h2>Missed Client Call Report</h2>
-    <p><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
-    <p>Clients whose inbound call in the last 24 hours hasn't been resolved yet. "Missed" includes true no-answers, voicemails, and Sona/AI-handled calls. A row clears when, after the miss, the same phone connects to any Quo line — either we call out, or the client calls again and gets through (even via Sona → human handoff). Please call back the clients still listed.</p>
     ${table}
+    <p style="margin-top: 16px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
+    <p>Clients whose inbound call in the last 24 hours hasn't been resolved yet. Includes true missed calls, voicemails, and Sona/AI-handled calls. A row clears when staff makes any later outbound call to that number, OR the client calls again and gets through to a staff member. Please call back the clients still listed.</p>
   </body></html>`;
 }
 
