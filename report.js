@@ -2456,8 +2456,17 @@ function isMissedInboundCall(c) {
 function isResolvingCall(c) {
   // Outbound attempt from us — staff is engaging (preserves prior behavior).
   if (isOutgoingDirection(c.direction)) return true;
-  // Successful inbound where staff actually connected (not Sona/voicemail/no-answer).
-  if (isIncomingDirection(c.direction) && !isMissedInboundCall(c)) return true;
+  // Successful inbound connection. We intentionally do NOT exclude Sona-routed
+  // calls here: if the client ultimately reached a Quo line (even via Sona →
+  // human handoff), there's no outstanding callback to make.
+  if (isIncomingDirection(c.direction)) {
+    const status = String(c.status || '').toLowerCase();
+    if (status === 'completed') return true;
+    // Fallback for missing/non-standard status fields: a non-zero-duration
+    // inbound that isn't in the missed bucket counts as a real connection.
+    const dur = Number(c.duration || 0);
+    if (Number.isFinite(dur) && dur > 0 && !MISSED_INBOUND_STATUSES.has(status)) return true;
+  }
   return false;
 }
 
@@ -2525,7 +2534,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
     <h2>Missed Client Call Report</h2>
     <p><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
-    <p>Clients whose inbound call in the last 24 hours hasn't been resolved yet. Includes true missed calls, voicemails, and Sona/AI-handled calls. A row clears when staff makes any later outbound call to that number, OR the client calls again and gets through to a staff member. Please call back the clients still listed.</p>
+    <p>Clients whose inbound call in the last 24 hours hasn't been resolved yet. "Missed" includes true no-answers, voicemails, and Sona/AI-handled calls. A row clears when, after the miss, the same phone connects to any Quo line — either we call out, or the client calls again and gets through (even via Sona → human handoff). Please call back the clients still listed.</p>
     ${table}
   </body></html>`;
 }
@@ -2546,13 +2555,18 @@ async function runMissedClientCallReport() {
   console.log(`  Window: ${rangeLabel}`);
   console.log('═'.repeat(52));
 
-  console.log('\n[1/3] Fetching Quo calls (all statuses, trailing 24h)...');
+  console.log('\n[1/3] Fetching Quo calls (all lines, all statuses, trailing 24h)...');
   const { callData } = await runExport({
     createdAfter,
     createdBefore,
     weeklyCommunications: true,
     includeMessages: false,
     fetchTranscriptForWeekly: false,
+    // Pull every line in the workspace — resolving calls often happen on a
+    // different line (e.g. miss on RJL Outbound, callback via RJL Main Line,
+    // client retry into RJL Transfers). Filtering to QUO_PHONE_NUMBERS here
+    // would drop those and produce false-positive flags.
+    phoneNumbersFilter: [],
   });
 
   const calls = (callData || []).filter(
