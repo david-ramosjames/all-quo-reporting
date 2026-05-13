@@ -2443,13 +2443,17 @@ function isOutgoingDirection(d) {
 
 function isMissedInboundCall(c) {
   if (!isIncomingDirection(c.direction)) return false;
-  // Sona/AI-handled inbound calls count as missed by staff — they still need a callback.
-  if (c.aiHandled) return true;
   const status = String(c.status || '').toLowerCase();
+  // A completed inbound is never a miss — even if Sona routed it, the client
+  // reached someone (either Sona resolved it or it was handed off to a human).
+  if (status === 'completed') return false;
+  // Sona/AI-handled inbound that did NOT complete (voicemail, hang-up
+  // mid-Sona, etc.) — staff still need to call back.
+  if (c.aiHandled) return true;
   if (MISSED_INBOUND_STATUSES.has(status)) return true;
-  // Fallback: incoming with zero duration is treated as missed.
+  // Fallback: incoming with zero duration treated as missed.
   const dur = Number(c.duration || 0);
-  if (status && status !== 'completed' && (!Number.isFinite(dur) || dur <= 0)) return true;
+  if (status && (!Number.isFinite(dur) || dur <= 0)) return true;
   return false;
 }
 
@@ -2535,7 +2539,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
     <h2>Missed Client Call Report</h2>
     ${table}
     <p style="margin-top: 16px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
-    <p>Clients whose inbound call in the last 24 hours hasn't been resolved yet. Includes true missed calls, voicemails, and Sona/AI-handled calls. A row clears when staff makes any later outbound call to that number, OR the client calls again and gets through to a staff member. Please call back the clients still listed.</p>
+    <p>Clients whose inbound call in the last 24 hours hasn't been resolved yet. Includes true missed calls, voicemails, and Sona/AI-handled calls that didn't complete. A row clears when, after the miss, the same phone connects to any Quo line — either staff makes an outbound call, or the client calls again and the call completes (even via Sona → human handoff). Please call back the clients still listed.</p>
   </body></html>`;
 }
 
