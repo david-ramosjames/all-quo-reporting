@@ -2606,19 +2606,28 @@ async function runMissedClientCallReport() {
     }
   }
 
+  // Group every call by OpenPhone Contact ID when available, falling back to
+  // phone last-10 when the call wasn't matched to a known contact. Using the
+  // contact ID lets us trace a client's full activity across multiple phone
+  // numbers (a miss on number A is cleared by a callback on number B if both
+  // belong to the same contact).
   /** @type {Map<string, object[]>} */
-  const byPhone = new Map();
+  const byContact = new Map();
   for (const c of allCalls) {
-    const key = last10Digits(c.phone) || last10Digits(c.contact);
+    const key = c.contactId ? `id:${c.contactId}` : (() => {
+      const ph = last10Digits(c.phone) || last10Digits(c.contact);
+      return ph ? `ph:${ph}` : null;
+    })();
     if (!key) continue;
-    if (!byPhone.has(key)) byPhone.set(key, []);
-    byPhone.get(key).push(c);
+    if (!byContact.has(key)) byContact.set(key, []);
+    byContact.get(key).push(c);
   }
 
   /** @type {{ contact: string, phone: string, missedAtLocal: string, missedAtIso: string, line: string, link: string }[]} */
   const outstanding = [];
-  for (const [, group] of byPhone) {
-    // Skip phones where no call in the group looks like a client contact.
+  for (const [, group] of byContact) {
+    // Skip groups where no call in the group looks like a client contact
+    // (CRM contact name must end in a case number — e.g. "David Eagan 3432").
     const clientAnchor = group.find((c) => isClientContactName(c.contact));
     if (!clientAnchor) continue;
 
@@ -2647,6 +2656,8 @@ async function runMissedClientCallReport() {
       paralegal: rosterHit?.paralegal || '',
       line: lastMissed.line || '',
       link: lastMissed.link || '',
+      _groupKey: group[0]?.contactId ? `id:${group[0].contactId}` :
+        (last10Digits(lastMissed.phone) || last10Digits(lastMissed.contact) || ''),
     });
   }
 
@@ -2655,18 +2666,22 @@ async function runMissedClientCallReport() {
   console.log(`\n[3/3] Outstanding (unreturned) missed client calls: ${outstanding.length}`);
   for (const r of outstanding) {
     console.log(`  - ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}`);
-    // Dump the full call sequence for this phone so false-positives are
-    // diagnosable from the Railway logs without re-running.
-    const phoneKey = last10Digits(r.phone) || last10Digits(r.contact);
-    const group = phoneKey ? byPhone.get(phoneKey) || [] : [];
+    // Dump the full call sequence for this contact/phone so false-positives
+    // are diagnosable from the Railway logs without re-running.
+    const lookupKey = r._groupKey
+      ? (r._groupKey.startsWith('id:') || r._groupKey.startsWith('ph:') ? r._groupKey : `ph:${r._groupKey}`)
+      : null;
+    const group = lookupKey ? byContact.get(lookupKey) || [] : [];
     for (const c of group) {
       const t = formatMissedCallTime(c.timestamp);
       const dir = String(c.direction || '?').toLowerCase();
       const status = c.status || '?';
       const dur = c.duration != null ? c.duration : '?';
       const ai = c.aiHandled ? ' aiHandled' : '';
-      console.log(`      • ${t} ${dir} status=${status} dur=${dur}${ai} line="${c.line || ''}"`);
+      const cid = c.contactId ? ` cid=${c.contactId}` : '';
+      console.log(`      • ${t} ${dir} status=${status} dur=${dur}${ai}${cid} phone="${c.phone || ''}" line="${c.line || ''}"`);
     }
+    delete r._groupKey;
   }
 
   const subject = outstanding.length

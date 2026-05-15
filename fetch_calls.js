@@ -133,9 +133,22 @@ function phoneLookupKeys(raw) {
 
 function lookupContactName(contactMap, phone) {
   if (!phone) return '';
+  // Support both legacy shape (phoneKey → name string) and new shape
+  // ({ nameByPhone, idByPhone, ... }).
+  const nameMap = contactMap && contactMap.nameByPhone ? contactMap.nameByPhone : contactMap;
+  if (!nameMap) return '';
   for (const k of phoneLookupKeys(phone)) {
-    const n = contactMap[k];
+    const n = nameMap[k];
     if (n) return n;
+  }
+  return '';
+}
+
+function lookupContactId(contactMap, phone) {
+  if (!phone || !contactMap?.idByPhone) return '';
+  for (const k of phoneLookupKeys(phone)) {
+    const id = contactMap.idByPhone[k];
+    if (id) return id;
   }
   return '';
 }
@@ -280,7 +293,13 @@ async function fetchSummary(client, callId) {
 }
 
 async function buildContactMap(client) {
-  const map = {};
+  /** Legacy convenience: phoneKey → name string. */
+  const nameByPhone = {};
+  /** phoneKey → contactId so callers can group all numbers for one client. */
+  const idByPhone = {};
+  /** contactId → { name, phones: Set<phoneKey>, phoneLast10s: Set<10digit> }. */
+  const byId = {};
+
   let pageToken = null;
   let total = 0;
   let contactsWithPhone = 0;
@@ -300,12 +319,24 @@ async function buildContactMap(client) {
       const phs = df.phoneNumbers || [];
       if (!phs.some((p) => p.value)) continue;
       contactsWithPhone++;
+      const contactId = c.id || '';
+      const phones = new Set();
+      const phoneLast10s = new Set();
       for (const ph of phs) {
         if (!ph.value) continue;
         for (const k of phoneLookupKeys(ph.value)) {
-          map[k] = name;
+          nameByPhone[k] = name;
+          if (contactId) idByPhone[k] = contactId;
+          phones.add(k);
+        }
+        const digits = String(ph.value).replace(/\D/g, '');
+        if (digits.length >= 10) {
+          phoneLast10s.add(
+            digits.length >= 11 && digits.startsWith('1') ? digits.slice(1, 11) : digits.slice(-10)
+          );
         }
       }
+      if (contactId) byId[contactId] = { name, phones, phoneLast10s };
     }
 
     pageToken = res.data.nextPageToken || null;
@@ -313,7 +344,12 @@ async function buildContactMap(client) {
   } while (pageToken);
 
   console.log(`Loaded ${total} contacts (${contactsWithPhone} with phone numbers).`);
-  return map;
+  // Map still supports legacy `map[phoneKey] = name` access via Proxy-free
+  // backward-compat: callers that index directly will still work because we
+  // attach those keys on the returned object itself, plus the structured
+  // fields used by lookupContactId / contact-id grouping.
+  const out = { ...nameByPhone, nameByPhone, idByPhone, byId };
+  return out;
 }
 
 function extractInlineTranscript(call) {
@@ -474,6 +510,7 @@ async function runExport(options = {}) {
       const timestamp = call.answeredAt || call.createdAt || '';
       const phone     = getExternalPhone(call, ownNumber);
       const contact   = lookupContactName(contactMap, phone);
+      const contactId = lookupContactId(contactMap, phone);
       const duration  = call.duration ?? '';
       const link      = `https://my.openphone.com/inbox/${conv.phoneNumberId}/c/${conv.id}?at=${call.id}`;
 
@@ -483,6 +520,7 @@ async function runExport(options = {}) {
         line: lineName,
         phone,
         contact,
+        contactId,
         duration,
         summary,
         transcript,
@@ -544,6 +582,7 @@ async function runExport(options = {}) {
       await sleep(REQUEST_DELAY_MS);
       const phone = participant;
       const contact = lookupContactName(contactMap, phone);
+      const contactId = lookupContactId(contactMap, phone);
       const convLink = `https://my.openphone.com/inbox/${conv.phoneNumberId}/c/${conv.id}`;
       for (const msg of msgs) {
         const body =
@@ -559,6 +598,7 @@ async function runExport(options = {}) {
           line: lineName,
           phone,
           contact,
+          contactId,
           duration: '',
           summary: '',
           transcript: '',
