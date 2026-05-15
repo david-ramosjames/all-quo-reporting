@@ -2573,14 +2573,17 @@ async function runMissedClientCallReport() {
     phoneNumbersFilter: [],
   });
 
-  const calls = (callData || []).filter(
-    (r) => r.recordType === 'call' && isClientContactName(r.contact)
-  );
-  console.log(`\n[2/3] ${calls.length} client call(s) in window.`);
+  // Group EVERY call in the window by phone last-10 first, so resolving calls
+  // (callbacks, transfers, etc.) that may have a different/missing contact
+  // label are still grouped with their corresponding miss. Then qualify the
+  // group as "client" only if at least one call in it has a client-shaped
+  // contact name (CRM name ending in a case number).
+  const allCalls = (callData || []).filter((r) => r.recordType === 'call');
+  console.log(`\n[2/3] ${allCalls.length} call(s) in window (will filter to clients next).`);
 
   /** @type {Map<string, { leadAttorney?: string, paralegal?: string }>} */
   let rosterMap = new Map();
-  if (GOOGLE_SHEETS_CASE_ROSTER_ID && calls.length) {
+  if (GOOGLE_SHEETS_CASE_ROSTER_ID && allCalls.length) {
     const hasOAuth =
       process.env.GOOGLE_CLIENT_ID &&
       process.env.GOOGLE_CLIENT_SECRET &&
@@ -2605,8 +2608,8 @@ async function runMissedClientCallReport() {
 
   /** @type {Map<string, object[]>} */
   const byPhone = new Map();
-  for (const c of calls) {
-    const key = last10Digits(c.phone) || last10Digits(c.contact) || (c.phone || '').trim();
+  for (const c of allCalls) {
+    const key = last10Digits(c.phone) || last10Digits(c.contact);
     if (!key) continue;
     if (!byPhone.has(key)) byPhone.set(key, []);
     byPhone.get(key).push(c);
@@ -2615,6 +2618,10 @@ async function runMissedClientCallReport() {
   /** @type {{ contact: string, phone: string, missedAtLocal: string, missedAtIso: string, line: string, link: string }[]} */
   const outstanding = [];
   for (const [, group] of byPhone) {
+    // Skip phones where no call in the group looks like a client contact.
+    const clientAnchor = group.find((c) => isClientContactName(c.contact));
+    if (!clientAnchor) continue;
+
     group.sort((x, y) => String(x.timestamp || '').localeCompare(String(y.timestamp || '')));
     const lastMissed = [...group].reverse().find(isMissedInboundCall);
     if (!lastMissed) continue;
@@ -2624,11 +2631,15 @@ async function runMissedClientCallReport() {
         String(c.timestamp || '') > String(lastMissed.timestamp || '')
     );
     if (resolvedAfter) continue;
-    const caseId = extractTrailingCaseDigitsFromClientKey(lastMissed.contact);
+
+    // Prefer the client-formatted contact name (most likely to have the case
+    // number) even if lastMissed itself was on a transfer leg without it.
+    const displayContact = clientAnchor.contact || lastMissed.contact || '';
+    const caseId = extractTrailingCaseDigitsFromClientKey(displayContact);
     const rosterHit = caseId ? rosterMap.get(caseId) : null;
     outstanding.push({
-      contact: lastMissed.contact || '',
-      phone: lastMissed.phone || '',
+      contact: displayContact,
+      phone: lastMissed.phone || clientAnchor.phone || '',
       missedAtLocal: formatMissedCallTime(lastMissed.timestamp),
       missedAtIso: lastMissed.timestamp || '',
       reason: classifyMissedReason(lastMissed),
@@ -2644,6 +2655,18 @@ async function runMissedClientCallReport() {
   console.log(`\n[3/3] Outstanding (unreturned) missed client calls: ${outstanding.length}`);
   for (const r of outstanding) {
     console.log(`  - ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}`);
+    // Dump the full call sequence for this phone so false-positives are
+    // diagnosable from the Railway logs without re-running.
+    const phoneKey = last10Digits(r.phone) || last10Digits(r.contact);
+    const group = phoneKey ? byPhone.get(phoneKey) || [] : [];
+    for (const c of group) {
+      const t = formatMissedCallTime(c.timestamp);
+      const dir = String(c.direction || '?').toLowerCase();
+      const status = c.status || '?';
+      const dur = c.duration != null ? c.duration : '?';
+      const ai = c.aiHandled ? ' aiHandled' : '';
+      console.log(`      • ${t} ${dir} status=${status} dur=${dur}${ai} line="${c.line || ''}"`);
+    }
   }
 
   const subject = outstanding.length
