@@ -2436,11 +2436,6 @@ function isIncomingDirection(d) {
   return v === 'incoming' || v === 'inbound';
 }
 
-function isOutgoingDirection(d) {
-  const v = String(d || '').toLowerCase();
-  return v === 'outgoing' || v === 'outbound';
-}
-
 function isMissedInboundCall(c) {
   if (!isIncomingDirection(c.direction)) return false;
   const status = String(c.status || '').toLowerCase();
@@ -2454,23 +2449,6 @@ function isMissedInboundCall(c) {
   // Fallback: incoming with zero duration treated as missed.
   const dur = Number(c.duration || 0);
   if (status && (!Number.isFinite(dur) || dur <= 0)) return true;
-  return false;
-}
-
-function isResolvingCall(c) {
-  // Outbound attempt from us — staff is engaging (preserves prior behavior).
-  if (isOutgoingDirection(c.direction)) return true;
-  // Successful inbound connection. We intentionally do NOT exclude Sona-routed
-  // calls here: if the client ultimately reached a Quo line (even via Sona →
-  // human handoff), there's no outstanding callback to make.
-  if (isIncomingDirection(c.direction)) {
-    const status = String(c.status || '').toLowerCase();
-    if (status === 'completed') return true;
-    // Fallback for missing/non-standard status fields: a non-zero-duration
-    // inbound that isn't in the missed bucket counts as a real connection.
-    const dur = Number(c.duration || 0);
-    if (Number.isFinite(dur) && dur > 0 && !MISSED_INBOUND_STATUSES.has(status)) return true;
-  }
   return false;
 }
 
@@ -2539,7 +2517,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
     <h2>Missed Client Call Report</h2>
     ${table}
     <p style="margin-top: 16px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
-    <p>Clients whose inbound call in the last 24 hours hasn't been resolved yet. Includes true missed calls, voicemails, and Sona/AI-handled calls that didn't complete. A row clears when, after the miss, the same phone connects to any Quo line — either staff makes an outbound call, or the client calls again and the call completes (even via Sona → human handoff). Please call back the clients still listed.</p>
+    <p>Client numbers whose most recent call in the last 24 hours was a missed or Sona/AI-handled call that didn't connect to a person — regardless of which internal line handled it. A number drops off as soon as its latest call is answered (client calls back and gets through) or we dial out to them from any line. Please call back the clients still listed.</p>
   </body></html>`;
 }
 
@@ -2606,58 +2584,52 @@ async function runMissedClientCallReport() {
     }
   }
 
-  // Group every call by OpenPhone Contact ID when available, falling back to
-  // phone last-10 when the call wasn't matched to a known contact. Using the
-  // contact ID lets us trace a client's full activity across multiple phone
-  // numbers (a miss on number A is cleared by a callback on number B if both
-  // belong to the same contact).
+  // Group every call by the external DIAL-IN number (caller's phone, last 10
+  // digits) — regardless of which internal Quo line handled it. We fetch all
+  // lines (phoneNumbersFilter: []), so a number's complete activity (misses,
+  // callbacks, our outbound from any line) lands in one bucket.
   /** @type {Map<string, object[]>} */
-  const byContact = new Map();
+  const byPhone = new Map();
   for (const c of allCalls) {
-    const key = c.contactId ? `id:${c.contactId}` : (() => {
-      const ph = last10Digits(c.phone) || last10Digits(c.contact);
-      return ph ? `ph:${ph}` : null;
-    })();
+    const key = last10Digits(c.phone) || last10Digits(c.contact);
     if (!key) continue;
-    if (!byContact.has(key)) byContact.set(key, []);
-    byContact.get(key).push(c);
+    if (!byPhone.has(key)) byPhone.set(key, []);
+    byPhone.get(key).push(c);
   }
 
   /** @type {{ contact: string, phone: string, missedAtLocal: string, missedAtIso: string, line: string, link: string }[]} */
   const outstanding = [];
-  for (const [, group] of byContact) {
-    // Skip groups where no call in the group looks like a client contact
+  for (const [, group] of byPhone) {
+    // Skip numbers where no call in the group is from a client contact
     // (CRM contact name must end in a case number — e.g. "David Eagan 3432").
     const clientAnchor = group.find((c) => isClientContactName(c.contact));
     if (!clientAnchor) continue;
 
     group.sort((x, y) => String(x.timestamp || '').localeCompare(String(y.timestamp || '')));
-    const lastMissed = [...group].reverse().find(isMissedInboundCall);
-    if (!lastMissed) continue;
-    const resolvedAfter = group.some(
-      (c) =>
-        isResolvingCall(c) &&
-        String(c.timestamp || '') > String(lastMissed.timestamp || '')
-    );
-    if (resolvedAfter) continue;
 
-    // Prefer the client-formatted contact name (most likely to have the case
-    // number) even if lastMissed itself was on a transfer leg without it.
-    const displayContact = clientAnchor.contact || lastMissed.contact || '';
+    // Flag ONLY when the dial-in number's most recent call is itself a missed
+    // or Sona-handled (not completed) inbound. If the last call was completed
+    // (client got through) or outbound (we dialed back from any line), there's
+    // nothing outstanding — regardless of earlier misses.
+    const lastCall = group[group.length - 1];
+    if (!lastCall || !isMissedInboundCall(lastCall)) continue;
+
+    // Prefer the client-formatted contact name (most likely to carry the case
+    // number) even if lastCall itself was on a transfer leg without it.
+    const displayContact = clientAnchor.contact || lastCall.contact || '';
     const caseId = extractTrailingCaseDigitsFromClientKey(displayContact);
     const rosterHit = caseId ? rosterMap.get(caseId) : null;
     outstanding.push({
       contact: displayContact,
-      phone: lastMissed.phone || clientAnchor.phone || '',
-      missedAtLocal: formatMissedCallTime(lastMissed.timestamp),
-      missedAtIso: lastMissed.timestamp || '',
-      reason: classifyMissedReason(lastMissed),
+      phone: lastCall.phone || clientAnchor.phone || '',
+      missedAtLocal: formatMissedCallTime(lastCall.timestamp),
+      missedAtIso: lastCall.timestamp || '',
+      reason: classifyMissedReason(lastCall),
       attorney: rosterHit?.leadAttorney || '',
       paralegal: rosterHit?.paralegal || '',
-      line: lastMissed.line || '',
-      link: lastMissed.link || '',
-      _groupKey: group[0]?.contactId ? `id:${group[0].contactId}` :
-        (last10Digits(lastMissed.phone) || last10Digits(lastMissed.contact) || ''),
+      line: lastCall.line || '',
+      link: lastCall.link || '',
+      _groupKey: last10Digits(lastCall.phone) || last10Digits(lastCall.contact) || '',
     });
   }
 
@@ -2666,12 +2638,9 @@ async function runMissedClientCallReport() {
   console.log(`\n[3/3] Outstanding (unreturned) missed client calls: ${outstanding.length}`);
   for (const r of outstanding) {
     console.log(`  - ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}`);
-    // Dump the full call sequence for this contact/phone so false-positives
+    // Dump the full call sequence for this dial-in number so false-positives
     // are diagnosable from the Railway logs without re-running.
-    const lookupKey = r._groupKey
-      ? (r._groupKey.startsWith('id:') || r._groupKey.startsWith('ph:') ? r._groupKey : `ph:${r._groupKey}`)
-      : null;
-    const group = lookupKey ? byContact.get(lookupKey) || [] : [];
+    const group = r._groupKey ? byPhone.get(r._groupKey) || [] : [];
     for (const c of group) {
       const t = formatMissedCallTime(c.timestamp);
       const dir = String(c.direction || '?').toLowerCase();
