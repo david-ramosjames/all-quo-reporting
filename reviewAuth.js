@@ -20,12 +20,16 @@ const { google } = require('googleapis');
  *   REVIEW_ADMIN_EMAILS   comma-separated allowed emails (case-insensitive)
  *   REVIEW_ADMIN_DOMAIN   optional Workspace domain, e.g. ramosjames.com
  *   REVIEW_AUTH_BASE_URL  optional; else derived from request headers
- *   REVIEW_SESSION_SECRET optional; else ADMIN_TRIGGER_TOKEN
+ *   REVIEW_SESSION_SECRET optional; else a random per-process secret
  *   REVIEW_SESSION_TTL_HOURS  optional session lifetime (default 12)
  */
 
 const SESSION_COOKIE = 'rj_admin';
 const STATE_COOKIE = 'rj_oauth_state';
+const NEXT_COOKIE = 'rj_oauth_next';
+
+/** Stable per-process fallback secret if REVIEW_SESSION_SECRET isn't set. */
+const GENERATED_SECRET = crypto.randomBytes(32).toString('hex');
 
 function clientId() {
   return (process.env.GOOGLE_OAUTH_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '').trim();
@@ -45,26 +49,32 @@ function allowedDomain() {
   return (process.env.REVIEW_ADMIN_DOMAIN || '').trim().toLowerCase();
 }
 function sessionSecret() {
-  return (process.env.REVIEW_SESSION_SECRET || process.env.ADMIN_TRIGGER_TOKEN || '').trim();
+  return (process.env.REVIEW_SESSION_SECRET || '').trim() || GENERATED_SECRET;
 }
 function sessionTtlMs() {
   const h = parseFloat(process.env.REVIEW_SESSION_TTL_HOURS || '12');
   return (Number.isFinite(h) && h > 0 ? h : 12) * 3600 * 1000;
 }
 
-/** Google gating is active only when a Web client, a secret, and an allowlist all exist. */
+/** Google gating is active when a Web client and an allowlist both exist. */
 function isAuthEnabled() {
   const hasAllowlist = allowedEmails().size > 0 || Boolean(allowedDomain());
-  return Boolean(clientId() && clientSecret() && sessionSecret() && hasAllowlist);
+  return Boolean(clientId() && clientSecret() && hasAllowlist);
 }
 
 /** Human-readable reason auth can't turn on (for admin diagnostics). */
 function authDisabledReason() {
   if (!clientId() || !clientSecret()) return 'Google Web OAuth client not set (GOOGLE_OAUTH_CLIENT_ID / _SECRET).';
-  if (!sessionSecret()) return 'No session secret (set REVIEW_SESSION_SECRET or ADMIN_TRIGGER_TOKEN).';
   if (allowedEmails().size === 0 && !allowedDomain())
     return 'No allowlist (set REVIEW_ADMIN_EMAILS and/or REVIEW_ADMIN_DOMAIN).';
   return '';
+}
+
+/** Local-path guard for the post-login redirect (blocks open redirects). */
+function safeNext(next) {
+  const s = String(next || '').trim();
+  if (/^\/[^/\\]/.test(s) || s === '/') return s.replace(/[\r\n]/g, '');
+  return '/review/edit';
 }
 
 function baseUrl(req) {
@@ -102,7 +112,7 @@ function parseCookies(req) {
   return out;
 }
 
-function setCookie(res, name, value, { maxAgeMs, secure, path = '/review' }) {
+function setCookie(res, name, value, { maxAgeMs, secure, path = '/' }) {
   const parts = [
     `${name}=${encodeURIComponent(value)}`,
     `Path=${path}`,
@@ -179,9 +189,10 @@ function redirect(res, location) {
   res.end();
 }
 
-function startLogin(req, res) {
+function startLogin(req, res, next) {
   const state = b64url(crypto.randomBytes(16));
   setCookie(res, STATE_COOKIE, state, { maxAgeMs: 10 * 60 * 1000, secure: isSecure(req) });
+  setCookie(res, NEXT_COOKIE, safeNext(next), { maxAgeMs: 10 * 60 * 1000, secure: isSecure(req) });
   const params = {
     access_type: 'online',
     prompt: 'select_account',
@@ -195,9 +206,12 @@ function startLogin(req, res) {
 async function handleCallback(req, res, url, renderGate) {
   const code = url.searchParams.get('code');
   const state = url.searchParams.get('state');
-  const cookieState = parseCookies(req)[STATE_COOKIE];
-  // Clear the state cookie regardless of outcome.
+  const cookies = parseCookies(req);
+  const cookieState = cookies[STATE_COOKIE];
+  const next = safeNext(cookies[NEXT_COOKIE]);
+  // Clear the one-time cookies regardless of outcome.
   setCookie(res, STATE_COOKIE, '', { maxAgeMs: 0, secure: isSecure(req) });
+  setCookie(res, NEXT_COOKIE, '', { maxAgeMs: 0, secure: isSecure(req) });
 
   if (url.searchParams.get('error')) {
     return sendGate(res, renderGate, req, 403, `Sign-in was cancelled (${url.searchParams.get('error')}).`);
@@ -221,7 +235,7 @@ async function handleCallback(req, res, url, renderGate) {
       maxAgeMs: sessionTtlMs(),
       secure: isSecure(req),
     });
-    return redirect(res, '/review/edit');
+    return redirect(res, next);
   } catch (err) {
     return sendGate(res, renderGate, req, 502, `Sign-in failed: ${err.message}`);
   }
@@ -232,13 +246,16 @@ function handleLogout(req, res) {
   redirect(res, '/review/edit');
 }
 
-function sendGate(res, renderGate, req, status, message) {
+function sendGate(res, renderGate, req, status, message, next) {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-  res.end(renderGate(message));
+  res.end(renderGate(message, next));
 }
 
 /** Minimal "Sign in with Google" gate page. */
-function renderAuthGate(message) {
+function renderAuthGate(message, next) {
+  const loginHref = next && next !== '/review/edit'
+    ? `/review/auth/login?next=${encodeURIComponent(next)}`
+    : '/review/auth/login';
   const msg = message
     ? `<p style="color:#f87171;background:#2a1414;padding:.6rem .8rem;border-radius:8px;font-size:.9rem">${String(message)
         .replace(/&/g, '&amp;')
@@ -263,7 +280,7 @@ function renderAuthGate(message) {
   <h1>Review page admin</h1>
   <p class="sub">Sign in with an authorized Ramos James Google account to edit the review page.</p>
   ${msg}
-  <a class="btn" href="/review/auth/login">
+  <a class="btn" href="${loginHref}">
     <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#4285F4" d="M45.12 24.5c0-1.56-.14-3.06-.4-4.5H24v8.51h11.84c-.51 2.75-2.06 5.08-4.39 6.64v5.52h7.11c4.16-3.83 6.56-9.47 6.56-16.17z"/><path fill="#34A853" d="M24 46c5.94 0 10.92-1.97 14.56-5.33l-7.11-5.52c-1.97 1.32-4.49 2.1-7.45 2.1-5.73 0-10.58-3.87-12.31-9.07H4.34v5.7C7.96 41.07 15.4 46 24 46z"/><path fill="#FBBC05" d="M11.69 28.18C11.25 26.86 11 25.45 11 24s.25-2.86.69-4.18v-5.7H4.34C2.85 17.09 2 20.45 2 24s.85 6.91 2.34 9.88l7.35-5.7z"/><path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"/></svg>
     Sign in with Google
   </a>

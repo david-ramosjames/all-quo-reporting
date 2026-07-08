@@ -138,7 +138,8 @@ setInterval(() => {
   console.log(`[${ts}] Heartbeat — scheduler alive.`);
 }, 60 * 60 * 1000);
 
-// HTTP: health + token-gated manual job triggers (Railway: enable public URL, set ADMIN_TRIGGER_TOKEN).
+// HTTP: health + public review page + Google-gated manual job triggers / editor
+// (Railway: enable a public URL; gate with GOOGLE_OAUTH_CLIENT_ID/_SECRET + REVIEW_ADMIN_EMAILS).
 if (process.env.DISABLE_MANUAL_TRIGGER_UI === 'true' || process.env.DISABLE_MANUAL_TRIGGER_UI === '1') {
   console.log('Manual trigger UI disabled (DISABLE_MANUAL_TRIGGER_UI).');
 } else {
@@ -146,7 +147,6 @@ if (process.env.DISABLE_MANUAL_TRIGGER_UI === 'true' || process.env.DISABLE_MANU
   const port = parseInt(process.env.PORT || '8787', 10);
   startManualTriggerServer({
     port,
-    adminToken: process.env.ADMIN_TRIGGER_TOKEN,
     runners: {
       daily: runDailyReport,
       weekly: runWeeklyClientSentimentReport,

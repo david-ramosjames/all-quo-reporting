@@ -1,5 +1,4 @@
 const http = require('http');
-const crypto = require('crypto');
 const { URL } = require('url');
 const {
   renderReviewLandingPage,
@@ -13,18 +12,6 @@ const reviewAuth = require('./reviewAuth');
  */
 
 const JOB_IDS = ['daily', 'weekly', 'monthly', 'missed', 'review'];
-
-function timingSafeEqualString(a, b) {
-  const ba = Buffer.from(String(a || ''), 'utf8');
-  const bb = Buffer.from(String(b || ''), 'utf8');
-  if (ba.length !== bb.length) {
-    return crypto.timingSafeEqual(
-      crypto.createHash('sha256').update(ba).digest(),
-      crypto.createHash('sha256').update(bb).digest()
-    ) && false;
-  }
-  return crypto.timingSafeEqual(ba, bb);
-}
 
 function parseJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -89,8 +76,9 @@ function escapeHtml(s) {
     .replace(/"/g, '&quot;');
 }
 
-function buildIndexHtml(message) {
+function buildIndexHtml(message, email) {
   const msg = message ? `<p class="msg">${escapeHtml(message)}</p>` : '';
+  const signedInLabel = email ? `Signed in as ${escapeHtml(email)}` : 'Signed in';
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -123,8 +111,12 @@ function buildIndexHtml(message) {
   <h1>Quo reports — manual trigger</h1>
   ${msg}
   <div class="card">
-    <label for="token">Trigger token (<code>ADMIN_TRIGGER_TOKEN</code>)</label>
-    <input type="password" id="token" autocomplete="current-password" placeholder="Paste token from Railway / .env"/>
+    <div class="field">
+      <div class="row" style="align-items:center">
+        <div style="font-size:.85rem;color:#9aa8bc">${signedInLabel}</div>
+        <div style="flex:0 0 auto"><a href="/review/auth/logout" style="color:#60a5fa;font-size:.85rem">Log out</a></div>
+      </div>
+    </div>
     <div class="field">
       <label for="weekly-days">Sentiment time frame (trailing days)</label>
       <div class="row">
@@ -159,7 +151,6 @@ function buildIndexHtml(message) {
   </div>
   <script>
 (function () {
-  var tokenEl = document.getElementById('token');
   var statusEl = document.getElementById('status');
   var pollTimer = null;
 
@@ -208,8 +199,6 @@ function buildIndexHtml(message) {
   }
 
   async function runJob(job) {
-    var token = (tokenEl.value || '').trim();
-    if (!token) { setStatus('Enter the trigger token first.'); return; }
     var options = {};
     if (job === 'weekly') {
       var days = selectedDays();
@@ -223,8 +212,10 @@ function buildIndexHtml(message) {
       var r = await fetch('/api/trigger', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ job: job, token: token, options: options }),
+        credentials: 'same-origin',
+        body: JSON.stringify({ job: job, options: options }),
       });
+      if (r.status === 401) { setStatus('Your session expired — reload and sign in again.'); return; }
       var j = await r.json().catch(function () { return {}; });
       if (r.status === 409) { setStatus(j.error || 'A job is already running.'); return; }
       if (r.status === 401) { setStatus(j.error || 'Invalid token.'); return; }
@@ -247,15 +238,23 @@ function buildIndexHtml(message) {
 </html>`;
 }
 
+/** Simple locked page shown when Google sign-in isn't configured yet. */
+function buildLockedHtml(what) {
+  return `<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/><meta name="robots" content="noindex"/>
+<title>Locked</title><style>:root{font-family:system-ui,sans-serif}body{background:#0f1419;color:#e7ecf3;display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;padding:1rem}.card{background:#1a2332;border-radius:12px;padding:1.6rem;max-width:26rem}code{background:#0f1419;padding:.1em .35em;border-radius:4px;font-size:.85em}</style></head>
+<body><div class="card"><h2 style="margin-top:0">${escapeHtml(what)} is locked</h2>
+<p>Google sign-in isn’t configured yet. Set <code>GOOGLE_OAUTH_CLIENT_ID</code>, <code>GOOGLE_OAUTH_CLIENT_SECRET</code>, and <code>REVIEW_ADMIN_EMAILS</code> (and/or <code>REVIEW_ADMIN_DOMAIN</code>) to enable access.</p>
+<p style="color:#7d8da3;font-size:.85rem">The public review page at <a href="/review" style="color:#60a5fa">/review</a> and <code>/health</code> stay open. Scheduled jobs keep running regardless.</p></div></body></html>`;
+}
+
 /**
  * @param {object} opts
  * @param {number} opts.port
- * @param {string} [opts.adminToken]
  * @param {{ daily: (options?: object) => Promise<unknown>, weekly: (options?: { days?: number, onlyLatest?: boolean }) => Promise<unknown>, monthly: (options?: object) => Promise<unknown>, missed: (options?: object) => Promise<unknown>, review: (options?: object) => Promise<unknown> }} opts.runners
  */
 function startManualTriggerServer(opts) {
-  const { port, adminToken, runners } = opts;
-  const tokenConfigured = Boolean(adminToken && String(adminToken).trim());
+  const { port, runners } = opts;
 
   const state = {
     /** @type {JobId | null} */
@@ -323,7 +322,7 @@ function startManualTriggerServer(opts) {
 
       if (req.method === 'GET' && path === '/review/auth/login') {
         if (!authOn) return redirectTo(res, '/review/edit');
-        reviewAuth.startLogin(req, res);
+        reviewAuth.startLogin(req, res, url.searchParams.get('next'));
         return;
       }
       if (req.method === 'GET' && path === '/review/auth/callback') {
@@ -336,96 +335,72 @@ function startManualTriggerServer(opts) {
         return;
       }
 
-      // Editor to change the landing-page copy without code.
-      // Gated by Google sign-in when configured; otherwise by ADMIN_TRIGGER_TOKEN.
+      // Editor to change the landing-page copy without code — gated by Google sign-in.
       if (req.method === 'GET' && path === '/review/edit') {
-        if (authOn) {
-          const session = reviewAuth.getSession(req);
-          if (!session) {
-            reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '');
-            return;
-          }
-          sendHtml(res, 200, renderReviewLandingEditor('', { authMode: 'google', email: session.email }));
+        if (!authOn) {
+          sendHtml(res, 200, buildLockedHtml('The review editor'));
           return;
         }
-        sendHtml(
-          res,
-          200,
-          renderReviewLandingEditor(
-            tokenConfigured ? '' : 'Set ADMIN_TRIGGER_TOKEN (or enable Google sign-in) to save changes.'
-          )
-        );
+        const session = reviewAuth.getSession(req);
+        if (!session) {
+          reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '', '/review/edit');
+          return;
+        }
+        sendHtml(res, 200, renderReviewLandingEditor('', { authMode: 'google', email: session.email }));
         return;
       }
 
       if (req.method === 'POST' && path === '/review/edit') {
-        // Google-session path (no token needed).
-        if (authOn) {
-          const session = reviewAuth.getSession(req);
-          if (!session) {
-            reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 401, 'Your session expired — sign in again.');
-            return;
-          }
-          let form;
-          try {
-            form = await parseFormBody(req);
-          } catch {
-            sendHtml(res, 400, renderReviewLandingEditor('Could not read form.', { authMode: 'google', email: session.email }));
-            return;
-          }
-          const { token, ...patch } = form;
-          const result = saveReviewLandingConfig(patch);
-          sendHtml(
-            res,
-            result.ok ? 200 : 500,
-            renderReviewLandingEditor(
-              result.ok ? 'Saved. View it at /review.' : `Save failed: ${result.error}`,
-              { authMode: 'google', email: session.email }
-            )
-          );
+        if (!authOn) {
+          sendHtml(res, 503, buildLockedHtml('Saving'));
           return;
         }
-
-        // Token path (fallback when Google sign-in isn't configured).
-        if (!tokenConfigured) {
-          sendHtml(res, 503, renderReviewLandingEditor('ADMIN_TRIGGER_TOKEN is not set; saving is disabled.'));
+        const session = reviewAuth.getSession(req);
+        if (!session) {
+          reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 401, 'Your session expired — sign in again.', '/review/edit');
           return;
         }
         let form;
         try {
           form = await parseFormBody(req);
         } catch {
-          sendHtml(res, 400, renderReviewLandingEditor('Could not read form.'));
+          sendHtml(res, 400, renderReviewLandingEditor('Could not read form.', { authMode: 'google', email: session.email }));
           return;
         }
-        if (!timingSafeEqualString(form.token, adminToken)) {
-          sendHtml(res, 401, renderReviewLandingEditor('Invalid token — changes not saved.'));
-          return;
-        }
-        const { token, ...patch } = form; // saveReviewLandingConfig ignores unknown keys
+        const { token: _t, ...patch } = form; // saveReviewLandingConfig ignores unknown keys
         const result = saveReviewLandingConfig(patch);
         sendHtml(
           res,
           result.ok ? 200 : 500,
           renderReviewLandingEditor(
-            result.ok ? 'Saved. View it at /review.' : `Save failed: ${result.error}`
+            result.ok ? 'Saved. View it at /review.' : `Save failed: ${result.error}`,
+            { authMode: 'google', email: session.email }
           )
         );
         return;
       }
 
+      // Manual-trigger dashboard — gated by the same Google sign-in.
       if (req.method === 'GET' && path === '/') {
-        const html = buildIndexHtml(
-          tokenConfigured
-            ? ''
-            : 'Set ADMIN_TRIGGER_TOKEN in Railway to enable triggers (health still works at /health).'
-        );
+        if (!authOn) {
+          sendHtml(res, 200, buildLockedHtml('The manual-trigger dashboard'));
+          return;
+        }
+        const session = reviewAuth.getSession(req);
+        if (!session) {
+          reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '', '/');
+          return;
+        }
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
-        res.end(html);
+        res.end(buildIndexHtml('', session.email));
         return;
       }
 
       if (req.method === 'GET' && path === '/api/status') {
+        if (!authOn || !reviewAuth.getSession(req)) {
+          sendJson(res, authOn ? 401 : 503, { error: authOn ? 'Sign in required.' : 'Google sign-in not configured.' });
+          return;
+        }
         sendJson(res, 200, {
           running: state.running,
           lastFinished: state.lastFinished,
@@ -433,16 +408,17 @@ function startManualTriggerServer(opts) {
           lastError: state.lastError,
           startedAt: state.startedAt,
           finishedAt: state.finishedAt,
-          tokenConfigured,
         });
         return;
       }
 
       if (req.method === 'POST' && path === '/api/trigger') {
-        if (!tokenConfigured) {
-          sendJson(res, 503, {
-            error: 'ADMIN_TRIGGER_TOKEN is not set; manual triggers are disabled.',
-          });
+        if (!authOn) {
+          sendJson(res, 503, { error: 'Google sign-in not configured; manual triggers are disabled.' });
+          return;
+        }
+        if (!reviewAuth.getSession(req)) {
+          sendJson(res, 401, { error: 'Sign in required.' });
           return;
         }
         let body;
@@ -453,14 +429,9 @@ function startManualTriggerServer(opts) {
           return;
         }
         const job = body.job;
-        const token = body.token;
         const rawOptions = body.options && typeof body.options === 'object' ? body.options : {};
         if (!JOB_IDS.includes(job)) {
           sendJson(res, 400, { error: `job must be one of: ${JOB_IDS.join(', ')}` });
-          return;
-        }
-        if (!timingSafeEqualString(token, adminToken)) {
-          sendJson(res, 401, { error: 'Invalid token' });
           return;
         }
         if (state.running) {
@@ -496,11 +467,13 @@ function startManualTriggerServer(opts) {
   });
 
   server.listen(port, () => {
+    const authOn = reviewAuth.isAuthEnabled();
     console.log(
-      `\nManual trigger UI: http://127.0.0.1:${port}/  (same as localhost — use this in the browser; token: ${
-        tokenConfigured ? 'required' : 'not configured'
+      `\nManual trigger UI: http://127.0.0.1:${port}/  (auth: ${
+        authOn ? 'Google sign-in' : `LOCKED — ${reviewAuth.authDisabledReason()}`
       })`
     );
+    console.log(`Review page: http://127.0.0.1:${port}/review  (public)`);
     console.log(`Health check: http://127.0.0.1:${port}/health\n`);
   });
 
