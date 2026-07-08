@@ -1,0 +1,10 @@
+{
+  "stars": "⭐⭐⭐⭐⭐",
+  "headline": "Thank you for choosing Ramos James.",
+  "body": "Your review helps other people who have been injured find an attorney they can trust.",
+  "buttonText": "Leave a Google Review",
+  "buttonSubtext": "(about 60 seconds)",
+  "googleReviewUrl": "https://search.google.com/local/writereview?placeid=REPLACE_WITH_PLACE_ID",
+  "footer": "Need help with anything else?\nText us anytime.",
+  "accentColor": "#1a3d7c"
+}

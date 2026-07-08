@@ -8,6 +8,8 @@
     "fetch": "node fetch_calls.js",
     "report": "node report.js",
     "report:monthly": "node report.js monthly",
+    "report:missed": "node report.js missed",
+    "report:review": "node report.js review",
     "schedule": "node scheduler.js"
   },
   "engines": {

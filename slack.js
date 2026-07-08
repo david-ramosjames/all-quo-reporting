@@ -170,4 +170,52 @@ function formatSlackForPrompt(messages, timezone, rangeLabel) {
   return lines.join('\n');
 }
 
-module.exports = { fetchSlackMessages, formatSlackForPrompt };
+/**
+ * Resolves a channel **name** (with or without leading #) to its Slack ID.
+ * Paginates public + private channels the bot is a member of.
+ */
+async function resolveChannelId(client, channelName) {
+  const name = String(channelName || '').replace(/^#/, '');
+  let cursor;
+  do {
+    const res = await client.conversations.list({
+      types: 'public_channel,private_channel',
+      exclude_archived: true,
+      limit: 200,
+      cursor,
+    });
+    const match = res.channels.find((c) => c.name === name);
+    if (match) return match.id;
+    cursor = res.response_metadata?.next_cursor;
+  } while (cursor);
+  throw new Error(`Slack channel #${name} not found. Check the channel name and bot membership.`);
+}
+
+/**
+ * Posts a message to a Slack channel by name.
+ *
+ * @param {object} opts
+ * @param {string} opts.token   Slack bot token (chat:write scope).
+ * @param {string} opts.channel Channel name (e.g. "review-opportunities") or ID.
+ * @param {string} opts.text    Fallback / notification text (required by Slack).
+ * @param {Array}  [opts.blocks] Optional Block Kit blocks for rich formatting.
+ * @returns {Promise<{ ok: boolean, ts?: string, channel?: string }>}
+ */
+async function postSlackMessage({ token, channel, text, blocks }) {
+  if (!token) throw new Error('postSlackMessage: missing Slack bot token.');
+  if (!channel) throw new Error('postSlackMessage: missing channel.');
+  const client = new WebClient(token);
+  // Accept a raw channel ID (Cxxxx / Gxxxx) or resolve a human name.
+  const looksLikeId = /^[CG][A-Z0-9]{6,}$/.test(String(channel).trim());
+  const channelId = looksLikeId ? String(channel).trim() : await resolveChannelId(client, channel);
+  const res = await client.chat.postMessage({
+    channel: channelId,
+    text: text || ' ',
+    blocks: blocks && blocks.length ? blocks : undefined,
+    unfurl_links: false,
+    unfurl_media: false,
+  });
+  return { ok: Boolean(res.ok), ts: res.ts, channel: res.channel };
+}
+
+module.exports = { fetchSlackMessages, formatSlackForPrompt, postSlackMessage };

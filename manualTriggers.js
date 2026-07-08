@@ -1,10 +1,18 @@
 const http = require('http');
 const crypto = require('crypto');
 const { URL } = require('url');
+const {
+  renderReviewLandingPage,
+  renderReviewLandingEditor,
+  saveReviewLandingConfig,
+  EDITABLE_FIELDS,
+} = require('./reviewLanding');
 
 /**
- * @typedef {'daily' | 'weekly' | 'monthly' | 'missed'} JobId
+ * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review'} JobId
  */
+
+const JOB_IDS = ['daily', 'weekly', 'monthly', 'missed', 'review'];
 
 function timingSafeEqualString(a, b) {
   const ba = Buffer.from(String(a || ''), 'utf8');
@@ -36,6 +44,26 @@ function parseJsonBody(req) {
     });
     req.on('error', reject);
   });
+}
+
+function parseFormBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => {
+      const raw = Buffer.concat(chunks).toString('utf8');
+      const params = new URLSearchParams(raw);
+      const obj = {};
+      for (const [k, v] of params) obj[k] = v;
+      resolve(obj);
+    });
+    req.on('error', reject);
+  });
+}
+
+function sendHtml(res, status, html) {
+  res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
+  res.end(html);
 }
 
 function sendJson(res, status, obj) {
@@ -118,7 +146,9 @@ function buildIndexHtml(message) {
       <button type="button" data-job="weekly">Run client sentiment (uses selected time frame · summaries + SMS)</button>
       <button type="button" data-job="monthly">Run monthly client newsletter ideas (30 days · summaries)</button>
       <button type="button" data-job="missed">Run missed client call report (trailing 24h · clients only)</button>
+      <button type="button" data-job="review">Run Review Intelligence (trailing 24h · Google review candidates → Slack)</button>
     </div>
+    <p class="hint">Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a></p>
     <p class="hint">Jobs run in the background so the browser does not time out. Only one job at a time.</p>
     <div id="status"></div>
   </div>
@@ -216,7 +246,7 @@ function buildIndexHtml(message) {
  * @param {object} opts
  * @param {number} opts.port
  * @param {string} [opts.adminToken]
- * @param {{ daily: (options?: object) => Promise<unknown>, weekly: (options?: { days?: number, onlyLatest?: boolean }) => Promise<unknown>, monthly: (options?: object) => Promise<unknown>, missed: (options?: object) => Promise<unknown> }} opts.runners
+ * @param {{ daily: (options?: object) => Promise<unknown>, weekly: (options?: { days?: number, onlyLatest?: boolean }) => Promise<unknown>, monthly: (options?: object) => Promise<unknown>, missed: (options?: object) => Promise<unknown>, review: (options?: object) => Promise<unknown> }} opts.runners
  */
 function startManualTriggerServer(opts) {
   const { port, adminToken, runners } = opts;
@@ -269,6 +299,55 @@ function startManualTriggerServer(opts) {
         return;
       }
 
+      // Public, branded review landing page (mobile-first). No auth.
+      if (req.method === 'GET' && path === '/review') {
+        sendHtml(res, 200, renderReviewLandingPage());
+        return;
+      }
+
+      // Token-gated editor to change the landing-page copy without code.
+      if (req.method === 'GET' && path === '/review/edit') {
+        sendHtml(
+          res,
+          200,
+          renderReviewLandingEditor(
+            tokenConfigured ? '' : 'Set ADMIN_TRIGGER_TOKEN to save changes.'
+          )
+        );
+        return;
+      }
+
+      if (req.method === 'POST' && path === '/review/edit') {
+        if (!tokenConfigured) {
+          sendHtml(res, 503, renderReviewLandingEditor('ADMIN_TRIGGER_TOKEN is not set; saving is disabled.'));
+          return;
+        }
+        let form;
+        try {
+          form = await parseFormBody(req);
+        } catch {
+          sendHtml(res, 400, renderReviewLandingEditor('Could not read form.'));
+          return;
+        }
+        if (!timingSafeEqualString(form.token, adminToken)) {
+          sendHtml(res, 401, renderReviewLandingEditor('Invalid token — changes not saved.'));
+          return;
+        }
+        const patch = {};
+        for (const f of EDITABLE_FIELDS) {
+          if (form[f.key] != null) patch[f.key] = form[f.key];
+        }
+        const result = saveReviewLandingConfig(patch);
+        sendHtml(
+          res,
+          result.ok ? 200 : 500,
+          renderReviewLandingEditor(
+            result.ok ? 'Saved. View it at /review.' : `Save failed: ${result.error}`
+          )
+        );
+        return;
+      }
+
       if (req.method === 'GET' && path === '/') {
         const html = buildIndexHtml(
           tokenConfigured
@@ -310,8 +389,8 @@ function startManualTriggerServer(opts) {
         const job = body.job;
         const token = body.token;
         const rawOptions = body.options && typeof body.options === 'object' ? body.options : {};
-        if (!['daily', 'weekly', 'monthly', 'missed'].includes(job)) {
-          sendJson(res, 400, { error: 'job must be daily, weekly, monthly, or missed' });
+        if (!JOB_IDS.includes(job)) {
+          sendJson(res, 400, { error: `job must be one of: ${JOB_IDS.join(', ')}` });
           return;
         }
         if (!timingSafeEqualString(token, adminToken)) {

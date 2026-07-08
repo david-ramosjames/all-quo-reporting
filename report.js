@@ -9,13 +9,16 @@ const { runExport } = require('./fetch_calls');
 const {
   generateDailyLeadReportPrompt,
   buildWeeklyClientBundleSentimentPrompt,
+  buildReviewOpportunityPrompt,
+  REVIEW_CONFIDENCE_TIERS,
   SENTIMENT_REASON_TAGS,
   MONTHLY_EXTRACTION_FIELDS,
   buildMonthlyTranscriptExtractionPrompt,
   buildMonthlyBatchExtractionPrompt,
   buildMonthlyNewsletterAggregationPrompt,
 } = require('./prompts');
-const { fetchSlackMessages, formatSlackForPrompt } = require('./slack');
+const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage } = require('./slack');
+const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require('./reviewOpportunities');
 const {
   getLeadPipelineText,
   fetchSheetData,
@@ -82,6 +85,25 @@ const COMPANY_NAME    = process.env.COMPANY_NAME || 'Ramos James Law, PLLC';
 const TIMEZONE        = process.env.TIMEZONE || 'America/Chicago';
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_CHANNEL   = process.env.SLACK_CHANNEL || 'lead-calls';
+
+// ── Review Intelligence V1 (daily Google-review candidate detection) ──────────
+const clampInt = (raw, def, lo, hi) => {
+  const n = parseInt(raw ?? '', 10);
+  const v = Number.isFinite(n) ? n : def;
+  return Math.max(lo, Math.min(hi, v));
+};
+/** Slack channel that receives the daily review-opportunity report. */
+const REVIEW_SLACK_CHANNEL = (process.env.REVIEW_SLACK_CHANNEL || 'review-opportunities').trim();
+/** How far back to read each client's journey (the 24h activity window gates who is scored). */
+const REVIEW_JOURNEY_DAYS = clampInt(process.env.REVIEW_JOURNEY_DAYS, 14, 1, 120);
+/** Minimum score to persist a Review Opportunity to the backend table. */
+const REVIEW_MIN_SCORE = clampInt(process.env.REVIEW_MIN_SCORE, 60, 0, 100);
+/** Slack report only shows the highest-confidence opportunities: score + confidence floors + cap. */
+const REVIEW_REPORT_MIN_SCORE = clampInt(process.env.REVIEW_REPORT_MIN_SCORE, 75, 0, 100);
+const REVIEW_REPORT_MIN_CONFIDENCE = (process.env.REVIEW_REPORT_MIN_CONFIDENCE || 'Medium').trim();
+const REVIEW_REPORT_LIMIT = clampInt(process.env.REVIEW_REPORT_LIMIT, 10, 1, 50);
+/** Token budget for the per-client review-scoring JSON call. */
+const OPENAI_REVIEW_MAX_TOKENS = clampInt(process.env.OPENAI_REVIEW_MAX_COMPLETION_TOKENS, 4096, 512, 32000);
 
 const GOOGLE_SHEETS_ID    = process.env.GOOGLE_SHEETS_ID;
 // Blank = entire first worksheet. Otherwise e.g. A:ZZ, or 'Master View'!A:ZZ for a specific tab.
@@ -2675,6 +2697,355 @@ async function runMissedClientCallReport() {
   return { rangeLabel, outstandingCount: outstanding.length, outstanding };
 }
 
+// ── Review Intelligence V1 (daily Google-review candidate detection) ──────────
+
+/** "Maria Lopez 1048" → "Maria Lopez" (drop the trailing case number for display). */
+function displayClientName(clientKey) {
+  const stripped = String(clientKey || '').replace(/\s+\d+$/, '').trim();
+  return stripped || String(clientKey || '').trim();
+}
+
+function reviewConfidenceRank(confidence) {
+  switch (String(confidence || '').toLowerCase()) {
+    case 'high':
+      return 0;
+    case 'medium':
+      return 1;
+    default:
+      return 2;
+  }
+}
+
+function reviewConfidenceEmoji(confidence) {
+  switch (String(confidence || '').toLowerCase()) {
+    case 'high':
+      return '🟢';
+    case 'medium':
+      return '🟡';
+    default:
+      return '⚪';
+  }
+}
+
+/** @returns {object | null} */
+function parseReviewOpportunityJson(rawText) {
+  const stripped = stripMarkdownJsonFence(rawText);
+  let obj;
+  try {
+    obj = JSON.parse(stripped);
+  } catch {
+    return null;
+  }
+  if (!obj || typeof obj !== 'object') return null;
+
+  const scoreNum = Number(obj.review_score);
+  if (!Number.isFinite(scoreNum)) return null;
+  const review_score = Math.max(0, Math.min(100, Math.round(scoreNum)));
+
+  const rawConf = String(obj.confidence || '').trim();
+  const capConf = rawConf ? rawConf.charAt(0).toUpperCase() + rawConf.slice(1).toLowerCase() : '';
+  const confidence = REVIEW_CONFIDENCE_TIERS.includes(capConf) ? capConf : 'Low';
+
+  const toList = (v, cap) =>
+    Array.isArray(v)
+      ? v.map((s) => String(s || '').trim()).filter(Boolean).slice(0, cap)
+      : v
+        ? [String(v).trim()].filter(Boolean)
+        : [];
+
+  return {
+    review_score,
+    confidence,
+    qualified: obj.qualified === true,
+    positive_signals: toList(obj.positive_signals, 12),
+    disqualifiers: toList(obj.disqualifiers, 12),
+    reasoning: toList(obj.reasoning, 8),
+  };
+}
+
+async function analyzeReviewOpportunityWithLlm(clientKey, items, rangeLabel, sentiment, attempt = 1) {
+  const caseId = extractTrailingCaseDigitsFromClientKey(clientKey);
+  const phone = (items.find((i) => i.phone)?.phone || '').trim();
+  const bundleMd = buildCommunicationBundleMarkdown(items);
+  const prompt = buildReviewOpportunityPrompt({
+    COMPANY_NAME,
+    clientName: clientKey,
+    caseId,
+    phone,
+    rangeLabel,
+    touchpointCount: items.length,
+    communicationLogMarkdown: bundleMd,
+    priorSentiment: sentiment?.sentiment,
+    priorBadReviewRisk: sentiment?.bad_review_risk,
+    priorPositiveReviewCandidate: sentiment?.positive_review_candidate,
+    priorReasonSummary: sentiment?.reason_summary,
+  });
+  const extraRetry =
+    attempt > 1
+      ? '\n\nYour previous answer failed validation. Reply with **only** one JSON object matching the schema; no markdown.'
+      : '';
+  const text = await runChatCompletion(
+    prompt + extraRetry,
+    OPENAI_REVIEW_MAX_TOKENS,
+    `Review opportunity [${clientKey.slice(0, 28)}]`,
+    { jsonObject: true, throwOnEmpty: true }
+  );
+  const parsed = parseReviewOpportunityJson(text);
+  if (parsed) return parsed;
+  if (attempt < 2) return analyzeReviewOpportunityWithLlm(clientKey, items, rangeLabel, sentiment, attempt + 1);
+  throw new Error('Invalid review opportunity JSON after retry');
+}
+
+/**
+ * A recent-window negative signal from the existing sentiment analyzer that
+ * disqualifies a client from being asked for a review right now.
+ */
+function sentimentDisqualifies(sentiment) {
+  if (!sentiment) return false;
+  const s = String(sentiment.sentiment || '').toLowerCase();
+  const risk = String(sentiment.bad_review_risk || 'none').toLowerCase();
+  return s === 'negative' || risk === 'high' || risk === 'moderate';
+}
+
+function buildReviewSlackMessage(reportItems, meta) {
+  const { rangeLabel, dateLabel, candidateCount, qualifiedCount } = meta;
+  const blocks = [
+    {
+      type: 'header',
+      text: { type: 'plain_text', text: `⭐ Review Intelligence — ${dateLabel}`, emoji: true },
+    },
+    {
+      type: 'context',
+      elements: [
+        {
+          type: 'mrkdwn',
+          text: `Clients active in last 24h: *${candidateCount}*  ·  Qualified opportunities: *${qualifiedCount}*  ·  Showing top *${reportItems.length}*`,
+        },
+      ],
+    },
+    { type: 'divider' },
+  ];
+
+  const lines = [`⭐ Review Intelligence — ${dateLabel}`, `Window: ${rangeLabel}`, ''];
+
+  if (!reportItems.length) {
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '_No high-confidence review candidates in the last 24 hours._',
+      },
+    });
+    lines.push('No high-confidence review candidates in the last 24 hours.');
+    return { text: lines.join('\n'), blocks };
+  }
+
+  reportItems.forEach((o, idx) => {
+    const name = o.clientName || o.clientKey;
+    const caseCell = o.caseId ? `Case *${o.caseId}*` : '_no case #_';
+    const reasons = (o.reasoning.length ? o.reasoning : o.positive_signals)
+      .map((r) => `• ${r}`)
+      .join('\n');
+    blocks.push({
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text:
+          `*${idx + 1}. ${name}*  ·  ${caseCell}\n` +
+          `Score: *${o.review_score}/100*   ·   Confidence: ${reviewConfidenceEmoji(o.confidence)} *${o.confidence}*\n` +
+          `*Why they were selected:*\n${reasons || '• Positive signals across recent conversations.'}`,
+      },
+    });
+    if (idx < reportItems.length - 1) blocks.push({ type: 'divider' });
+
+    lines.push(`${idx + 1}. ${name} · ${o.caseId ? `Case ${o.caseId}` : 'no case #'}`);
+    lines.push(`   Score ${o.review_score}/100 · Confidence ${o.confidence}`);
+    for (const r of (o.reasoning.length ? o.reasoning : o.positive_signals)) lines.push(`   • ${r}`);
+    lines.push('');
+  });
+
+  blocks.push({
+    type: 'context',
+    elements: [{ type: 'mrkdwn', text: `Window: ${rangeLabel}` }],
+  });
+
+  return { text: lines.join('\n'), blocks };
+}
+
+/**
+ * Review Intelligence V1. Every day (default 6:00 PM CST) reads the last 24h of
+ * client communications, evaluates each active client's overall journey, scores
+ * them as a Google-review candidate (0–100), records qualified clients in the
+ * review_opportunities table, and posts the highest-confidence picks to Slack.
+ */
+async function runReviewIntelligenceReport() {
+  // Journey window feeds the "overall client journey" evaluation; the trailing
+  // 24h window decides *who* is eligible (must have communicated yesterday).
+  const { createdAfter, createdBefore } = getTrailingDaysRange(REVIEW_JOURNEY_DAYS);
+  const active = getTrailing24HoursRange();
+  const activeCutoffMs = new Date(active.createdAfter).getTime();
+
+  const a = DateTime.fromISO(active.createdAfter, { zone: 'utc' }).setZone(TIMEZONE);
+  const b = DateTime.fromISO(active.createdBefore, { zone: 'utc' }).setZone(TIMEZONE);
+  const rangeLabel = `${a.toFormat('LLL d, h:mm a')} – ${b.toFormat('LLL d, h:mm a')} ${TIMEZONE}`;
+  const dateLabel = b.toFormat('ccc, LLL d, yyyy');
+  const journeyLabel = buildSentimentTrailingDaysRangeLabel(createdAfter, createdBefore, REVIEW_JOURNEY_DAYS);
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('  Review Intelligence V1 (Google review candidates)');
+  console.log(`  Activity window (24h): ${rangeLabel}`);
+  console.log(`  Journey context: ${REVIEW_JOURNEY_DAYS} day(s)`);
+  console.log('═'.repeat(52));
+
+  console.log(`\n[1/5] Fetching Quo calls + SMS (${REVIEW_JOURNEY_DAYS}-day journey window)...\n`);
+  const { callData } = await runExport({
+    createdAfter,
+    createdBefore,
+    weeklyCommunications: true,
+    includeMessages: true,
+    fetchTranscriptForWeekly: false,
+  });
+
+  const groups = groupClientTouchpointsByContact(callData);
+  const candidates = [...groups.entries()]
+    .filter(([, items]) => items.some((it) => itemTimeMs(it) >= activeCutoffMs))
+    .sort((x, y) => x[0].localeCompare(y[0], undefined, { sensitivity: 'base' }));
+
+  console.log(
+    `\n[2/5] Clients with communications in the last 24h: ${candidates.length} (of ${groups.size} client(s) seen in journey window).`
+  );
+
+  if (!OPENAI_API_KEY) {
+    console.log('\n[3/5] Skipped — OPENAI_API_KEY is not configured; cannot score candidates.');
+    return { rangeLabel, candidates: candidates.length, qualified: 0, reported: 0 };
+  }
+  if (!candidates.length) {
+    console.log('\n[3/5] No active clients to evaluate.');
+  }
+
+  console.log('\n[3/5] Scoring candidates (existing sentiment gate → review decision engine)...');
+  /** @type {object[]} */
+  const opportunities = [];
+  let disqualifiedCount = 0;
+
+  for (let i = 0; i < candidates.length; i++) {
+    const [clientKey, items] = candidates[i];
+    const label = displayClientName(clientKey).slice(0, 40);
+    process.stdout.write(`  [${i + 1}/${candidates.length}] ${label} ... `);
+
+    let sentiment = null;
+    try {
+      sentiment = await analyzeWeeklyClientBundleWithLlm(clientKey, items, journeyLabel);
+    } catch (err) {
+      console.log(`sentiment failed (${err.message}) — skipping`);
+      await sleep(SENTIMENT_LLM_DELAY_MS);
+      continue;
+    }
+
+    // Leverage existing sentiment: a recent negative read disqualifies outright.
+    if (sentimentDisqualifies(sentiment)) {
+      disqualifiedCount++;
+      console.log(`disqualified (sentiment ${sentiment.sentiment}, risk ${sentiment.bad_review_risk})`);
+      await sleep(SENTIMENT_LLM_DELAY_MS);
+      continue;
+    }
+
+    let review = null;
+    try {
+      review = await analyzeReviewOpportunityWithLlm(clientKey, items, journeyLabel, sentiment);
+    } catch (err) {
+      console.log(`review scoring failed (${err.message}) — skipping`);
+      await sleep(SENTIMENT_LLM_DELAY_MS);
+      continue;
+    }
+
+    const qualifies = review.qualified && !review.disqualifiers.length && review.review_score >= REVIEW_MIN_SCORE;
+    console.log(
+      `${review.review_score}/100 · ${review.confidence}${qualifies ? ' · QUALIFIED' : ''}`
+    );
+
+    if (qualifies) {
+      opportunities.push({
+        clientKey,
+        clientName: displayClientName(clientKey),
+        caseId: extractTrailingCaseDigitsFromClientKey(clientKey) || '',
+        ...review,
+      });
+    } else if (!review.qualified || review.disqualifiers.length) {
+      disqualifiedCount++;
+    }
+    await sleep(SENTIMENT_LLM_DELAY_MS);
+  }
+
+  opportunities.sort((x, y) => {
+    if (y.review_score !== x.review_score) return y.review_score - x.review_score;
+    return reviewConfidenceRank(x.confidence) - reviewConfidenceRank(y.confidence);
+  });
+
+  console.log(
+    `\n[4/5] Persisting ${opportunities.length} qualified opportunit(ies) to review_opportunities table...`
+  );
+  if (!reviewStoreConfigured()) {
+    console.log('  Skipped (set GOOGLE_REVIEW_OPPORTUNITIES_SHEET_ID + Google OAuth to persist).');
+  } else {
+    for (const o of opportunities) {
+      try {
+        const res = await upsertReviewOpportunity({
+          case_id: o.caseId,
+          client_name: o.clientName,
+          review_score: o.review_score,
+          confidence: o.confidence,
+          reasoning: o.reasoning,
+        });
+        console.log(`  ${o.clientName} (case ${o.caseId || '—'}): ${res.action}`);
+      } catch (err) {
+        console.warn(`  ${o.clientName}: store failed — ${err.message}`);
+      }
+    }
+  }
+
+  // Report only the highest-confidence opportunities.
+  const minConfRank = reviewConfidenceRank(REVIEW_REPORT_MIN_CONFIDENCE);
+  const reportItems = opportunities
+    .filter(
+      (o) => o.review_score >= REVIEW_REPORT_MIN_SCORE && reviewConfidenceRank(o.confidence) <= minConfRank
+    )
+    .slice(0, REVIEW_REPORT_LIMIT);
+
+  console.log(
+    `\n[5/5] Posting daily Slack report to #${REVIEW_SLACK_CHANNEL} (${reportItems.length} shown; ${disqualifiedCount} disqualified)...`
+  );
+  const { text, blocks } = buildReviewSlackMessage(reportItems, {
+    rangeLabel,
+    dateLabel,
+    candidateCount: candidates.length,
+    qualifiedCount: opportunities.length,
+  });
+
+  if (!SLACK_BOT_TOKEN) {
+    console.log('  Slack not configured (SLACK_BOT_TOKEN) — printing report:\n');
+    console.log(text);
+  } else {
+    try {
+      await postSlackMessage({ token: SLACK_BOT_TOKEN, channel: REVIEW_SLACK_CHANNEL, text, blocks });
+      console.log(`  Posted to #${REVIEW_SLACK_CHANNEL}.`);
+    } catch (err) {
+      console.warn(`  Slack post failed: ${err.message}`);
+      console.log(text);
+    }
+  }
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('Review Intelligence run complete.');
+  return {
+    rangeLabel,
+    candidates: candidates.length,
+    qualified: opportunities.length,
+    reported: reportItems.length,
+    disqualified: disqualifiedCount,
+  };
+}
+
 // ── Main report runner ────────────────────────────────────────────────────────
 
 async function runDailyReport() {
@@ -2806,6 +3177,8 @@ if (require.main === module) {
   let run = runDailyReport;
   if (arg === '--weekly' || arg === 'weekly') run = runWeeklyClientSentimentReport;
   if (arg === '--monthly' || arg === 'monthly') run = runMonthlyNewsletterInsightsReport;
+  if (arg === '--missed' || arg === 'missed') run = runMissedClientCallReport;
+  if (arg === '--review' || arg === 'review') run = runReviewIntelligenceReport;
   run().catch((err) => {
     console.error('\nError:', err.response?.data || err.message);
     process.exit(1);
@@ -2817,4 +3190,5 @@ module.exports = {
   runWeeklyClientSentimentReport,
   runMonthlyNewsletterInsightsReport,
   runMissedClientCallReport,
+  runReviewIntelligenceReport,
 };

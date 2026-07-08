@@ -411,6 +411,108 @@ Do **not** quote entire transcripts. You may paraphrase briefly. Do **not** name
 }
 
 // ============================================================================
+// REVIEW INTELLIGENCE — AI Decision Engine (Google review candidate scoring)
+// ============================================================================
+
+/** Allowed confidence tiers for a Review Opportunity. */
+const REVIEW_CONFIDENCE_TIERS = ['High', 'Medium', 'Low'];
+
+/**
+ * Full client-journey touchpoint bundle → strict JSON scoring one client as a
+ * candidate to be asked for a **public Google review**.
+ *
+ * The engine evaluates the **overall client journey**, not a single message.
+ * A prior holistic sentiment read (from the existing weekly bundle analyzer)
+ * is passed in as corroborating context — the model still forms its own view.
+ */
+function buildReviewOpportunityPrompt({
+  COMPANY_NAME,
+  clientName,
+  caseId,
+  phone,
+  rangeLabel,
+  touchpointCount,
+  communicationLogMarkdown,
+  priorSentiment,
+  priorBadReviewRisk,
+  priorPositiveReviewCandidate,
+  priorReasonSummary,
+}) {
+  const priorBlock = priorSentiment
+    ? `PRIOR SENTIMENT READ (from the firm's existing sentiment analyzer — corroborating context, not gospel):
+- Holistic sentiment: ${priorSentiment}
+- Bad-review risk: ${priorBadReviewRisk || 'none'}
+- Positive-review candidate: ${priorPositiveReviewCandidate || 'none'}
+- Summary: ${priorReasonSummary || '(none)'}`
+    : 'PRIOR SENTIMENT READ: (not available)';
+
+  return `
+You are the **Review Intelligence** decision engine for ${COMPANY_NAME}, a personal injury law firm.
+
+Your ONE job: decide whether **this specific client** is an **excellent candidate right now** to be asked for a **public Google review**, and score that opportunity from **0 to 100**.
+
+Judge the **overall client journey** across everything in the window — not a single message. A great review candidate is a client who is clearly **happy, grateful, and at a natural high point** in their case, with **no** unresolved friction.
+
+POSITIVE SIGNALS (raise the score):
+- Client expresses gratitude or says "thank you"
+- Client compliments the firm, an attorney, a paralegal, or a legal assistant
+- Client expresses relief
+- Client indicates satisfaction with the process or the outcome
+- Settlement has been reached
+- Settlement funds have been distributed / disbursed to the client
+- Case has successfully closed / resolved
+- Warm, trusting, enthusiastic tone across recent touchpoints
+
+NEGATIVE / DISQUALIFYING SIGNALS (do NOT recommend — set qualified=false and keep the score low):
+- Frustration, anger, or distress
+- Confusion the firm has not resolved
+- Complaints about the firm, staff, or outcome
+- Poor or dropped communication (ghosting, repeated unanswered calls, "no one called me back")
+- An active dispute, fee dispute, or threat (bad review, bar complaint, switching firms)
+- Any negative sentiment in the recent conversations
+- The case is clearly still stressful, contested, or mid-fight with no resolution
+
+If ANY credible negative/disqualifying signal is present, the client is **not** a candidate right now: set "qualified": false and score it low (typically under 40), even if there are also some positive moments.
+
+Reporting window: **${rangeLabel}**
+CLIENT (CRM — includes case number): **${clientName}**
+CASE NUMBER: ${caseId || '(unknown)'}
+PHONE: ${phone || '(unknown)'}
+Touchpoints in window: **${touchpointCount}**
+
+${priorBlock}
+
+---
+
+CHRONOLOGICAL CLIENT JOURNEY (oldest → newest). Voice rows show the AI call **Summary**; SMS rows show quoted text. Treat these as the primary evidence; do not invent dialogue:
+
+${communicationLogMarkdown}
+
+---
+
+Respond with **valid JSON only** (no markdown fences). Shape:
+
+{
+  "review_score": number,            // integer 0-100, the Review Opportunity Score
+  "confidence": "High" | "Medium" | "Low",
+  "qualified": boolean,              // true only if this client should be asked for a review now
+  "positive_signals": string[],      // short phrases naming the positive signals you actually observed
+  "disqualifiers": string[],         // short phrases for any negative/disqualifying signals (empty if none)
+  "reasoning": string[]              // 2-5 concrete bullet points, in plain English, citing evidence — this is shown to staff
+}
+
+Rules:
+- **review_score**: 85-100 = textbook candidate (e.g. settlement funds distributed AND clear gratitude, no friction). 70-84 = strong. 55-69 = promising but softer signal. Below 55 = weak or disqualified.
+- **confidence**: "High" only when positive signals are explicit and there is **zero** negative signal. "Medium" when the signal is good but partial or slightly stale. "Low" when you are unsure.
+- **qualified**: must be false whenever "disqualifiers" is non-empty.
+- **positive_signals** / **disqualifiers**: name only signals you truly saw in the journey. Do not pad.
+- **reasoning**: each bullet a **complete sentence** ending in a period. Ground every bullet in the journey (e.g. "Settlement funds were distributed on the call dated ...", "Client thanked the legal assistant twice by text."). This text is posted to staff, so make it specific and skimmable. Never fabricate.
+
+Return JSON only.
+`.trim();
+}
+
+// ============================================================================
 // MONTHLY CLIENT NEWSLETTER — per-call extraction (summary-first, anonymized) + pooled editorial brief
 // ============================================================================
 
@@ -613,6 +715,8 @@ module.exports = {
   buildTranscriptSentimentPrompt,
   buildWeeklyClientBundleSentimentPrompt,
   buildWeeklySentimentEmailPrompt,
+  buildReviewOpportunityPrompt,
+  REVIEW_CONFIDENCE_TIERS,
   SENTIMENT_REASON_TAGS,
   MONTHLY_EXTRACTION_FIELDS,
   buildMonthlyTranscriptExtractionPrompt,
