@@ -21,7 +21,6 @@ const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage } = require('
 const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require('./reviewOpportunities');
 const firmStore = require('./firmStore');
 const reviewRequests = require('./reviewRequests');
-const quoSend = require('./quoSend');
 const {
   getLeadPipelineText,
   fetchSheetData,
@@ -107,8 +106,6 @@ const REVIEW_REPORT_MIN_CONFIDENCE = (process.env.REVIEW_REPORT_MIN_CONFIDENCE |
 const REVIEW_REPORT_LIMIT = clampInt(process.env.REVIEW_REPORT_LIMIT, 10, 1, 50);
 /** Token budget for the per-client review-scoring JSON call. */
 const OPENAI_REVIEW_MAX_TOKENS = clampInt(process.env.OPENAI_REVIEW_MAX_COMPLETION_TOKENS, 4096, 512, 32000);
-/** Auto-text the trackable review link to qualified clients via Quo (OFF by default — outward-facing). */
-const REVIEW_AUTO_SEND_SMS = ['true', '1', 'yes'].includes(String(process.env.REVIEW_AUTO_SEND_SMS || '').trim().toLowerCase());
 
 const GOOGLE_SHEETS_ID    = process.env.GOOGLE_SHEETS_ID;
 // Blank = entire first worksheet. Otherwise e.g. A:ZZ, or 'Master View'!A:ZZ for a specific tab.
@@ -3049,33 +3046,16 @@ async function runReviewIntelligenceReport() {
         });
         if (rr && rr.token) {
           o.reviewToken = rr.token;
+          o.reviewRequestId = rr.id;
           o.reviewLink = publicBase ? `${publicBase}/r/${rr.token}` : `/r/${rr.token}`;
-
-          if (REVIEW_AUTO_SEND_SMS && quoSend.isConfigured() && o.phone && publicBase) {
-            try {
-              await quoSend.sendSms({
-                to: o.phone,
-                content: quoSend.buildReviewSmsText({
-                  firstName: o.clientName.split(/\s+/)[0] || '',
-                  firmName: firm?.firm_name || COMPANY_NAME,
-                  link: o.reviewLink,
-                }),
-              });
-              await reviewRequests.markSent(rr.id);
-              o.autoSent = true;
-              sentCount++;
-              console.log(`    ↳ texted review link to ${o.phone}`);
-            } catch (err) {
-              console.warn(`    ↳ auto-send failed for ${o.clientName}: ${err.message}`);
-            }
-          }
+          // NOTE: no text is sent here. Sending is approval-gated — staff approve
+          // in Slack (✅ / reply) or from the analytics page, which triggers the send.
         }
       } catch (err) {
         console.warn(`  ${o.clientName}: review link failed — ${err.message}`);
       }
     }
   }
-  if (REVIEW_AUTO_SEND_SMS) console.log(`  Auto-sent ${sentCount} review link(s) via Quo.`);
 
   // Report only the highest-confidence opportunities.
   const minConfRank = reviewConfidenceRank(REVIEW_REPORT_MIN_CONFIDENCE);
