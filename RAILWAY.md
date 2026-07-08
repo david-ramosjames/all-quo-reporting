@@ -6,7 +6,7 @@ It also triggers the **Missed Client Call Report** on `MISSED_CLIENT_CALLS_CRON`
 
 The same process also serves a **small web UI** (on `PORT`) to manually run those jobs without waiting for cron: open `/`, enter `ADMIN_TRIGGER_TOKEN`, and click a job. Railway must expose **public networking** (generate a domain) so you can reach it; set a strong `ADMIN_TRIGGER_TOKEN` in variables.
 
-**Review landing page:** the same HTTP server serves a branded, mobile-first review page at **`/review`** (public) and a token-gated copy editor at **`/review/edit`**. Edit the copy (headline, body, button text, Google Review URL, footer) via that form, by editing `review-landing.json`, or with the `REVIEW_PAGE_*` / `REVIEW_GOOGLE_URL` env vars (env vars win — best on Railway since its filesystem is ephemeral).
+**Review landing page:** the same HTTP server serves a branded, mobile-first Google-review page at **`/review`** (public) and a full token-gated **admin editor** at **`/review/edit`**. The admin edits everything — logo, brand/accent/CTA colors, background, headline/body, Google Review URL, helper text, the optional Laura note (image + quote, show/hide), the support section (Text/Call labels + numbers), footer, and “Available 24/7”. Logos/headshots can be a URL or an in-browser upload (embedded into the page). Personalize the headline per client with a query param: `/review?name=Maria` → “Thank you, Maria.”. Config lives in `review-landing.json`; `REVIEW_PAGE_*` env vars override it. Because Railway’s filesystem is ephemeral, make editor changes durable by setting the env vars **or** mounting a volume and pointing `REVIEW_LANDING_CONFIG_PATH` at a file on it.
 
 ## 1. Push the repo to GitHub
 

@@ -5,7 +5,6 @@ const {
   renderReviewLandingPage,
   renderReviewLandingEditor,
   saveReviewLandingConfig,
-  EDITABLE_FIELDS,
 } = require('./reviewLanding');
 
 /**
@@ -300,8 +299,16 @@ function startManualTriggerServer(opts) {
       }
 
       // Public, branded review landing page (mobile-first). No auth.
+      // Personalize the headline with a client first name via query param
+      // (?name= / ?first= / ?client_first_name= / ?fn=), e.g. from a mail-merge link.
       if (req.method === 'GET' && path === '/review') {
-        sendHtml(res, 200, renderReviewLandingPage());
+        const firstName =
+          url.searchParams.get('name') ||
+          url.searchParams.get('first') ||
+          url.searchParams.get('client_first_name') ||
+          url.searchParams.get('fn') ||
+          '';
+        sendHtml(res, 200, renderReviewLandingPage(undefined, { firstName }));
         return;
       }
 
@@ -333,10 +340,7 @@ function startManualTriggerServer(opts) {
           sendHtml(res, 401, renderReviewLandingEditor('Invalid token — changes not saved.'));
           return;
         }
-        const patch = {};
-        for (const f of EDITABLE_FIELDS) {
-          if (form[f.key] != null) patch[f.key] = form[f.key];
-        }
+        const { token, ...patch } = form; // saveReviewLandingConfig ignores unknown keys
         const result = saveReviewLandingConfig(patch);
         sendHtml(
           res,
