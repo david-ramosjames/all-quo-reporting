@@ -466,8 +466,9 @@ function shade(hex, percent) {
 
 // ── Admin editor ──────────────────────────────────────────────────────────────
 
-function renderReviewLandingEditor(message) {
+function renderReviewLandingEditor(message, opts = {}) {
   const cfg = loadReviewLandingConfigFromFileOnly();
+  const authMode = opts.authMode === 'google' ? 'google' : 'token';
   const msg = message
     ? `<p class="msg ${/fail|invalid|disabled|not set/i.test(message) ? 'err' : 'ok'}">${escapeHtml(message)}</p>`
     : '';
@@ -538,7 +539,11 @@ function renderReviewLandingEditor(message) {
     <div class="bar">
       <button type="submit">Save changes</button>
       <div class="tokenbox">
-        <input type="password" name="token" autocomplete="current-password" placeholder="Admin token" required/>
+        ${
+          authMode === 'google'
+            ? `<span style="font-size:.85rem;color:#9aa8bc">Signed in as ${escapeHtml(opts.email || '')} · <a href="/review/auth/logout">Log out</a></span>`
+            : `<input type="password" name="token" autocomplete="current-password" placeholder="Admin token" required/>`
+        }
       </div>
     </div>
     ${sections}

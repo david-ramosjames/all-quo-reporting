@@ -6,6 +6,7 @@ const {
   renderReviewLandingEditor,
   saveReviewLandingConfig,
 } = require('./reviewLanding');
+const reviewAuth = require('./reviewAuth');
 
 /**
  * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review'} JobId
@@ -63,6 +64,11 @@ function parseFormBody(req) {
 function sendHtml(res, status, html) {
   res.writeHead(status, { 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(html);
+}
+
+function redirectTo(res, location) {
+  res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
+  res.end();
 }
 
 function sendJson(res, status, obj) {
@@ -312,19 +318,75 @@ function startManualTriggerServer(opts) {
         return;
       }
 
-      // Token-gated editor to change the landing-page copy without code.
+      // Google sign-in flow for the editor (only meaningful when auth is enabled).
+      const authOn = reviewAuth.isAuthEnabled();
+
+      if (req.method === 'GET' && path === '/review/auth/login') {
+        if (!authOn) return redirectTo(res, '/review/edit');
+        reviewAuth.startLogin(req, res);
+        return;
+      }
+      if (req.method === 'GET' && path === '/review/auth/callback') {
+        if (!authOn) return redirectTo(res, '/review/edit');
+        await reviewAuth.handleCallback(req, res, url, reviewAuth.renderAuthGate);
+        return;
+      }
+      if (req.method === 'GET' && path === '/review/auth/logout') {
+        reviewAuth.handleLogout(req, res);
+        return;
+      }
+
+      // Editor to change the landing-page copy without code.
+      // Gated by Google sign-in when configured; otherwise by ADMIN_TRIGGER_TOKEN.
       if (req.method === 'GET' && path === '/review/edit') {
+        if (authOn) {
+          const session = reviewAuth.getSession(req);
+          if (!session) {
+            reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '');
+            return;
+          }
+          sendHtml(res, 200, renderReviewLandingEditor('', { authMode: 'google', email: session.email }));
+          return;
+        }
         sendHtml(
           res,
           200,
           renderReviewLandingEditor(
-            tokenConfigured ? '' : 'Set ADMIN_TRIGGER_TOKEN to save changes.'
+            tokenConfigured ? '' : 'Set ADMIN_TRIGGER_TOKEN (or enable Google sign-in) to save changes.'
           )
         );
         return;
       }
 
       if (req.method === 'POST' && path === '/review/edit') {
+        // Google-session path (no token needed).
+        if (authOn) {
+          const session = reviewAuth.getSession(req);
+          if (!session) {
+            reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 401, 'Your session expired — sign in again.');
+            return;
+          }
+          let form;
+          try {
+            form = await parseFormBody(req);
+          } catch {
+            sendHtml(res, 400, renderReviewLandingEditor('Could not read form.', { authMode: 'google', email: session.email }));
+            return;
+          }
+          const { token, ...patch } = form;
+          const result = saveReviewLandingConfig(patch);
+          sendHtml(
+            res,
+            result.ok ? 200 : 500,
+            renderReviewLandingEditor(
+              result.ok ? 'Saved. View it at /review.' : `Save failed: ${result.error}`,
+              { authMode: 'google', email: session.email }
+            )
+          );
+          return;
+        }
+
+        // Token path (fallback when Google sign-in isn't configured).
         if (!tokenConfigured) {
           sendHtml(res, 503, renderReviewLandingEditor('ADMIN_TRIGGER_TOKEN is not set; saving is disabled.'));
           return;

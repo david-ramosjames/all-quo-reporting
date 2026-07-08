@@ -8,6 +8,8 @@ The same process also serves a **small web UI** (on `PORT`) to manually run thos
 
 **Review landing page:** the same HTTP server serves a branded, mobile-first Google-review page at **`/review`** (public) and a full token-gated **admin editor** at **`/review/edit`**. The admin edits everything — logo, brand/accent/CTA colors, background, headline/body, Google Review URL, helper text, the optional Laura note (image + quote, show/hide), the support section (Text/Call labels + numbers), footer, and “Available 24/7”. Logos/headshots can be a URL or an in-browser upload (embedded into the page). Personalize the headline per client with a query param: `/review?name=Maria` → “Thank you, Maria.”. Config lives in `review-landing.json`; `REVIEW_PAGE_*` env vars override it. Because Railway’s filesystem is ephemeral, make editor changes durable by setting the env vars **or** mounting a volume and pointing `REVIEW_LANDING_CONFIG_PATH` at a file on it.
 
+**Editor access — Google sign-in:** by default `/review/edit` is gated by `ADMIN_TRIGGER_TOKEN`. To gate it with **Sign in with Google** restricted to your firm instead, create a **Web application** OAuth client in Google Cloud Console (the `setup-sheets-auth.js` client is a *Desktop* client and won’t work for a browser login), add the redirect URI `https://<your-domain>/review/auth/callback`, then set `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` and `REVIEW_ADMIN_EMAILS` (and/or `REVIEW_ADMIN_DOMAIN`). Once those are set, the editor requires an authorized Google account; the public `/review` page stays open.
+
 ## 1. Push the repo to GitHub
 
 Ensure `.env` is **not** committed (it is listed in `.gitignore`).
