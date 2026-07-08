@@ -21,6 +21,7 @@ const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage } = require('
 const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require('./reviewOpportunities');
 const firmStore = require('./firmStore');
 const reviewRequests = require('./reviewRequests');
+const quoSend = require('./quoSend');
 const {
   getLeadPipelineText,
   fetchSheetData,
@@ -2817,74 +2818,65 @@ function sentimentDisqualifies(sentiment) {
   return s === 'negative' || risk === 'high' || risk === 'moderate';
 }
 
-function buildReviewSlackMessage(reportItems, meta) {
-  const { rangeLabel, dateLabel, candidateCount, qualifiedCount } = meta;
-  const blocks = [
-    {
-      type: 'header',
-      text: { type: 'plain_text', text: `⭐ Review Intelligence — ${dateLabel}`, emoji: true },
-    },
-    {
-      type: 'context',
-      elements: [
-        {
-          type: 'mrkdwn',
-          text: `Clients active in last 24h: *${candidateCount}*  ·  Qualified opportunities: *${qualifiedCount}*  ·  Showing top *${reportItems.length}*`,
-        },
-      ],
-    },
-    { type: 'divider' },
-  ];
+/** Emoji staff react with to approve texting the client (configurable). */
+const REVIEW_APPROVE_EMOJI = (process.env.REVIEW_APPROVE_EMOJI || 'white_check_mark').replace(/:/g, '').trim();
 
-  const lines = [`⭐ Review Intelligence — ${dateLabel}`, `Window: ${rangeLabel}`, ''];
-
-  if (!reportItems.length) {
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text: '_No high-confidence review candidates in the last 24 hours._',
+/** Intro / summary message posted before the per-candidate cards. */
+function buildReviewIntroMessage(meta) {
+  const { rangeLabel, dateLabel, candidateCount, qualifiedCount, reportedCount, canApprove } = meta;
+  const approveHint = canApprove
+    ? `React :${REVIEW_APPROVE_EMOJI}: (or reply *approve*) on a card to text that client their review link.`
+    : '_Approval-to-send is off until the review store + Quo sending are configured._';
+  return {
+    text: `⭐ Review Intelligence — ${dateLabel} — ${reportedCount} candidate(s)`,
+    blocks: [
+      { type: 'header', text: { type: 'plain_text', text: `⭐ Review Intelligence — ${dateLabel}`, emoji: true } },
+      {
+        type: 'context',
+        elements: [
+          {
+            type: 'mrkdwn',
+            text: `Active in last 24h: *${candidateCount}*  ·  Qualified: *${qualifiedCount}*  ·  Showing top *${reportedCount}*  ·  ${rangeLabel}`,
+          },
+        ],
       },
-    });
-    lines.push('No high-confidence review candidates in the last 24 hours.');
-    return { text: lines.join('\n'), blocks };
-  }
+      { type: 'section', text: { type: 'mrkdwn', text: approveHint } },
+      { type: 'divider' },
+    ],
+  };
+}
 
-  reportItems.forEach((o, idx) => {
-    const name = o.clientName || o.clientKey;
-    const caseCell = o.caseId ? `Case *${o.caseId}*` : '_no case #_';
-    const reasons = (o.reasoning.length ? o.reasoning : o.positive_signals)
-      .map((r) => `• ${r}`)
-      .join('\n');
-    const linkLine = o.reviewLink
-      ? `\n*Review link:* ${o.reviewLink}${o.autoSent ? '  _(texted ✓)_' : ''}`
+function buildReviewEmptyMessage(meta) {
+  const { dateLabel, rangeLabel } = meta;
+  return {
+    text: `⭐ Review Intelligence — ${dateLabel} — no candidates`,
+    blocks: [
+      { type: 'header', text: { type: 'plain_text', text: `⭐ Review Intelligence — ${dateLabel}`, emoji: true } },
+      { type: 'section', text: { type: 'mrkdwn', text: `_No high-confidence review candidates in the last 24 hours._\n${rangeLabel}` } },
+    ],
+  };
+}
+
+/** One self-contained message per candidate, so a ✅ reaction maps to that client. */
+function buildReviewCandidateMessage(o, idx) {
+  const name = o.clientName || o.clientKey;
+  const caseCell = o.caseId ? `Case *${o.caseId}*` : '_no case #_';
+  const reasons = (o.reasoning.length ? o.reasoning : o.positive_signals).map((r) => `• ${r}`).join('\n');
+  const linkLine = o.reviewLink ? `\n*Review link:* ${o.reviewLink}` : '';
+  const approveLine = o.reviewRequestId && o.phone
+    ? `\n_React :${REVIEW_APPROVE_EMOJI}: or reply *approve* to text this link to ${o.phone}._`
+    : o.reviewRequestId
+      ? '\n_No client phone on file — send the link manually._'
       : '';
-    blocks.push({
-      type: 'section',
-      text: {
-        type: 'mrkdwn',
-        text:
-          `*${idx + 1}. ${name}*  ·  ${caseCell}\n` +
-          `Score: *${o.review_score}/100*   ·   Confidence: ${reviewConfidenceEmoji(o.confidence)} *${o.confidence}*\n` +
-          `*Why they were selected:*\n${reasons || '• Positive signals across recent conversations.'}` +
-          linkLine,
-      },
-    });
-    if (idx < reportItems.length - 1) blocks.push({ type: 'divider' });
-
-    lines.push(`${idx + 1}. ${name} · ${o.caseId ? `Case ${o.caseId}` : 'no case #'}`);
-    lines.push(`   Score ${o.review_score}/100 · Confidence ${o.confidence}`);
-    for (const r of (o.reasoning.length ? o.reasoning : o.positive_signals)) lines.push(`   • ${r}`);
-    if (o.reviewLink) lines.push(`   Review link: ${o.reviewLink}${o.autoSent ? ' (texted)' : ''}`);
-    lines.push('');
-  });
-
-  blocks.push({
-    type: 'context',
-    elements: [{ type: 'mrkdwn', text: `Window: ${rangeLabel}` }],
-  });
-
-  return { text: lines.join('\n'), blocks };
+  const text =
+    `*${idx + 1}. ${name}*  ·  ${caseCell}\n` +
+    `Score: *${o.review_score}/100*   ·   Confidence: ${reviewConfidenceEmoji(o.confidence)} *${o.confidence}*\n` +
+    `*Why they were selected:*\n${reasons || '• Positive signals across recent conversations.'}` +
+    linkLine + approveLine;
+  return {
+    text: `${idx + 1}. ${name} — review candidate (${o.review_score}/100)`,
+    blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+  };
 }
 
 /**
@@ -3068,23 +3060,42 @@ async function runReviewIntelligenceReport() {
   console.log(
     `\n[5/5] Posting daily Slack report to #${REVIEW_SLACK_CHANNEL} (${reportItems.length} shown; ${disqualifiedCount} disqualified)...`
   );
-  const { text, blocks } = buildReviewSlackMessage(reportItems, {
+
+  const meta = {
     rangeLabel,
     dateLabel,
     candidateCount: candidates.length,
     qualifiedCount: opportunities.length,
-  });
+    reportedCount: reportItems.length,
+    canApprove: requestsOn && quoSend.isConfigured(),
+  };
 
   if (!SLACK_BOT_TOKEN) {
     console.log('  Slack not configured (SLACK_BOT_TOKEN) — printing report:\n');
-    console.log(text);
+    const intro = reportItems.length ? buildReviewIntroMessage(meta) : buildReviewEmptyMessage(meta);
+    console.log(intro.text);
+    reportItems.forEach((o, i) => console.log(buildReviewCandidateMessage(o, i).text + (o.reviewLink ? `  ${o.reviewLink}` : '')));
   } else {
     try {
-      await postSlackMessage({ token: SLACK_BOT_TOKEN, channel: REVIEW_SLACK_CHANNEL, text, blocks });
-      console.log(`  Posted to #${REVIEW_SLACK_CHANNEL}.`);
+      const intro = reportItems.length ? buildReviewIntroMessage(meta) : buildReviewEmptyMessage(meta);
+      await postSlackMessage({ token: SLACK_BOT_TOKEN, channel: REVIEW_SLACK_CHANNEL, text: intro.text, blocks: intro.blocks });
+
+      // One message per candidate → its ts maps back to the request for ✅ approval.
+      for (let i = 0; i < reportItems.length; i++) {
+        const o = reportItems[i];
+        const msg = buildReviewCandidateMessage(o, i);
+        const posted = await postSlackMessage({ token: SLACK_BOT_TOKEN, channel: REVIEW_SLACK_CHANNEL, text: msg.text, blocks: msg.blocks });
+        if (o.reviewRequestId && posted?.ts) {
+          try {
+            await reviewRequests.setSlackMessage(o.reviewRequestId, posted.channel || REVIEW_SLACK_CHANNEL, posted.ts);
+          } catch (err) {
+            console.warn(`  Could not map Slack message for ${o.clientName}: ${err.message}`);
+          }
+        }
+      }
+      console.log(`  Posted intro + ${reportItems.length} candidate message(s) to #${REVIEW_SLACK_CHANNEL}.`);
     } catch (err) {
       console.warn(`  Slack post failed: ${err.message}`);
-      console.log(text);
     }
   }
 

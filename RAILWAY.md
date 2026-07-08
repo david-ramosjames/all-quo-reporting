@@ -2,7 +2,7 @@
 
 This app runs as a **long-running worker**: `npm start` launches `scheduler.js`, which triggers **Daily Intake & Lead Report** + Quo CSV on `CRON_SCHEDULE`, **Weekly Client Sentiment** on `WEEKLY_SENTIMENT_CRON` (default **Friday 8:00 PM**), and **Monthly Newsletter Insights** (trailing 30 days, **AI call summaries** for clients + leads) on `MONTHLY_INSIGHTS_CRON` (default **1:00 AM on the 1st** of each month in `TIMEZONE`). Default daily time is **7:00 AM** (all in `TIMEZONE`, e.g. `America/Chicago` for Central).
 
-It also triggers the **Missed Client Call Report** on `MISSED_CLIENT_CALLS_CRON` (default **7:00 AM**) and **Review Intelligence V1** on `REVIEW_INTELLIGENCE_CRON` (default **6:00 PM**). Review Intelligence reads the last 24h of client calls + SMS, evaluates each active client's overall journey, scores them **0–100** as a Google-review candidate (leveraging the existing sentiment analysis as a disqualifying gate), records qualified clients in the **`review_opportunities`** table, creates a **trackable branded review link** for each (`/r/<token>`), and posts the highest-confidence picks — with their links — to the `REVIEW_SLACK_CHANNEL` Slack channel. Link opens and Google/Text/Call clicks are tracked at `/review/analytics`. Texting the link to clients is manual by default (staff send from the analytics page) unless `REVIEW_AUTO_SEND_SMS` is turned on.
+It also triggers the **Missed Client Call Report** on `MISSED_CLIENT_CALLS_CRON` (default **7:00 AM**) and **Review Intelligence V1** on `REVIEW_INTELLIGENCE_CRON` (default **6:00 PM**). Review Intelligence reads the last 24h of client calls + SMS, evaluates each active client's overall journey, scores them **0–100** as a Google-review candidate (leveraging the existing sentiment analysis as a disqualifying gate), records qualified clients in the **`review_opportunities`** table, creates a **trackable branded review link** for each (`/r/<token>`), and posts the highest-confidence picks — with their links — to the `REVIEW_SLACK_CHANNEL` Slack channel. Link opens and Google/Text/Call clicks are tracked at `/review/analytics`. **The app never auto-texts clients** — it posts one Slack message per candidate, and a staff **✅ reaction (or a threaded “approve” reply)** on that message texts the client their link via Quo (see the Slack Events setup below).
 
 The same process also serves a **small web UI** (on `PORT`) to manually run those jobs without waiting for cron: open `/`, enter `ADMIN_TRIGGER_TOKEN`, and click a job. Railway must expose **public networking** (generate a domain) so you can reach it; set a strong `ADMIN_TRIGGER_TOKEN` in variables.
 
@@ -61,6 +61,21 @@ Trigger a deploy (or push to the connected branch). Watch **Deployments → Logs
 
 - You should see `Quo Report Scheduler`, daily / weekly / monthly cron lines, and hourly `Heartbeat — scheduler alive.`
 - After the daily cron, logs should show `[1/6]` … `[6/6]` for the lead report. Weekly sentiment: `[1/4]` … `[4/4]` (fetches **calls + SMS**, one holistic LLM pass per **client** using **summaries**). Monthly insights: `[1/4]` … `[4/4]` (per-call theme extraction from **summaries**, transcripts optional via `MONTHLY_FETCH_TRANSCRIPTS`).
+
+## 5b. Datastore — Postgres (recommended) vs Sheets
+
+The review system (firm settings, trackable links, click events) uses **Postgres when `DATABASE_URL` is set**, otherwise Google Sheets. Postgres is the more stable choice — atomic click counters and no spreadsheet write limits. On Railway: **New → Database → Add PostgreSQL**; Railway injects `DATABASE_URL` into the service. Tables (`firm_settings`, `review_requests`, `review_request_events`) are created automatically on first use. No `DATABASE_URL` → it falls back to the `GOOGLE_REVIEW_SHEET_ID` sheet, and firm settings/editor edits fall back to `review-landing.json`.
+
+## 5c. Slack approval-to-send (Events API)
+
+The daily Slack post shows one message per review candidate. Approving one texts that client their link. To enable:
+
+1. In your Slack app → **Event Subscriptions** → turn on, set the **Request URL** to `https://<your-domain>/slack/events` (it must return Slack's challenge — the app handles that once `SLACK_SIGNING_SECRET` is set).
+2. Subscribe to bot events **`reaction_added`** and **`message.channels`**.
+3. **OAuth & Permissions** → add scopes **`reactions:read`**, **`channels:history`**, **`chat:write`**; reinstall the app.
+4. Set env: **`SLACK_SIGNING_SECRET`** (Slack app → Basic Information), **`QUO_SEND_FROM`** (your Quo line, E.164 or PN id). Optionally `REVIEW_APPROVE_EMOJI` (default `white_check_mark`).
+
+Then: a ✅ reaction (or a threaded **approve** reply) on a candidate message texts the client once (idempotent), and the bot replies in-thread to confirm. Staff can also send from **`/review/analytics`**. Nothing is ever sent automatically.
 
 ## 6. Costs & behavior
 

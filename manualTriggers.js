@@ -10,12 +10,22 @@ const firmStore = require('./firmStore');
 const reviewRequests = require('./reviewRequests');
 const { renderAnalyticsPage } = require('./analyticsPage');
 const quoSend = require('./quoSend');
+const slackEvents = require('./slackEvents');
 
 /**
  * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review'} JobId
  */
 
 const JOB_IDS = ['daily', 'weekly', 'monthly', 'missed', 'review'];
+
+function readRawBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    req.on('data', (c) => chunks.push(c));
+    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    req.on('error', reject);
+  });
+}
 
 function parseJsonBody(req) {
   return new Promise((resolve, reject) => {
@@ -346,6 +356,29 @@ function startManualTriggerServer(opts) {
         return;
       }
 
+      // Slack Events API — approval-to-send (signature-verified, no session).
+      if (req.method === 'POST' && path === '/slack/events') {
+        const raw = await readRawBody(req);
+        if (!slackEvents.isEnabled()) {
+          sendJson(res, 200, { ok: true }); // ack so Slack doesn't retry
+          return;
+        }
+        if (!slackEvents.verifySignature(raw, req.headers['x-slack-request-timestamp'], req.headers['x-slack-signature'])) {
+          sendJson(res, 401, { error: 'bad signature' });
+          return;
+        }
+        let body;
+        try {
+          body = JSON.parse(raw || '{}');
+        } catch {
+          sendJson(res, 400, { error: 'bad json' });
+          return;
+        }
+        const result = slackEvents.handleBody(body);
+        sendJson(res, 200, result.challenge ? { challenge: result.challenge } : { ok: true });
+        return;
+      }
+
       // FAQ / overview of everything this server does — gated like the dashboard.
       if (req.method === 'GET' && (path === '/faq' || path === '/about')) {
         if (!reviewAuth.isAuthEnabled()) {
@@ -475,9 +508,9 @@ function startManualTriggerServer(opts) {
         const { token: _t, ...patch } = form; // unknown keys are ignored downstream
         const result = await firmStore.saveDefaultFirmPageSettings(patch);
         const cfg = firmStore.landingConfigForFirm(await firmStore.getDefaultFirm());
-        const okMsg = result.storage === 'sheet'
-          ? 'Saved (persists across redeploys). View it at /review.'
-          : 'Saved to local file. View it at /review.';
+        const okMsg = result.storage === 'file'
+          ? 'Saved to local file (set DATABASE_URL or a review sheet to persist across redeploys). View it at /review.'
+          : `Saved to ${result.storage} (persists across redeploys). View it at /review.`;
         sendHtml(
           res,
           result.ok ? 200 : 500,

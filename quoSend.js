@@ -8,9 +8,9 @@ const axios = require('axios');
  *   QUO_SEND_FROM  — the sending line, as an E.164 number (+15125005266) or a
  *                    phone-number id (PNxx…). Required to send.
  *
- * Auto-sending texts to real clients is outward-facing and irreversible, so the
- * Review Intelligence job only calls this when REVIEW_AUTO_SEND_SMS is enabled;
- * otherwise staff send the link manually. This module just performs the send.
+ * Texting real clients is outward-facing and irreversible, so nothing here fires
+ * automatically: it runs only on explicit staff approval (a ✅ reaction / reply
+ * in Slack, or the analytics "Send" button). This module just performs the send.
  */
 
 const API_BASE = 'https://api.openphone.com';

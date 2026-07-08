@@ -1,5 +1,6 @@
 const { DateTime } = require('luxon');
 const db = require('./reviewDb');
+const pg = require('./pgStore');
 const {
   DEFAULT_CONFIG,
   loadReviewLandingConfig,
@@ -92,6 +93,13 @@ function syntheticDefaultFirm() {
 }
 
 async function loadFirms() {
+  if (pg.isEnabled()) {
+    try {
+      return await pg.loadFirms();
+    } catch {
+      return [];
+    }
+  }
   if (!db.isConfigured()) return [];
   try {
     return await db.readObjects(TAB, HEADER);
@@ -129,11 +137,12 @@ async function getFirmByHost(host) {
  * @returns {Promise<{ ok: boolean, storage: 'sheet'|'file', error?: string }>}
  */
 async function saveDefaultFirmPageSettings(patch) {
-  if (!db.isConfigured()) {
+  if (!pg.isEnabled() && !db.isConfigured()) {
     const res = saveReviewLandingConfig(patch || {});
     return { ok: res.ok, storage: 'file', error: res.error };
   }
 
+  const storage = pg.isEnabled() ? 'postgres' : 'sheet';
   try {
     // Merge patch onto the current effective config, then split into columns + blob.
     const current = landingConfigForFirm(await getDefaultFirm());
@@ -161,21 +170,23 @@ async function saveDefaultFirmPageSettings(patch) {
       updated_at: now,
     };
 
-    if (existing && existing._row) {
+    if (pg.isEnabled()) {
+      await pg.upsertFirm(rowObj);
+    } else if (existing && existing._row) {
       await db.updateObjectRow(TAB, HEADER, existing._row, rowObj);
     } else {
       await db.appendObject(TAB, HEADER, rowObj);
     }
-    return { ok: true, storage: 'sheet' };
+    return { ok: true, storage };
   } catch (err) {
-    return { ok: false, storage: 'sheet', error: err.message };
+    return { ok: false, storage, error: err.message };
   }
 }
 
 module.exports = {
   HEADER,
   DEFAULT_FIRM_ID,
-  isConfigured: db.isConfigured,
+  isConfigured: () => pg.isEnabled() || db.isConfigured(),
   normalizeHost,
   landingConfigForFirm,
   loadFirms,

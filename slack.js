@@ -201,7 +201,7 @@ async function resolveChannelId(client, channelName) {
  * @param {Array}  [opts.blocks] Optional Block Kit blocks for rich formatting.
  * @returns {Promise<{ ok: boolean, ts?: string, channel?: string }>}
  */
-async function postSlackMessage({ token, channel, text, blocks }) {
+async function postSlackMessage({ token, channel, text, blocks, threadTs }) {
   if (!token) throw new Error('postSlackMessage: missing Slack bot token.');
   if (!channel) throw new Error('postSlackMessage: missing channel.');
   const client = new WebClient(token);
@@ -212,10 +212,11 @@ async function postSlackMessage({ token, channel, text, blocks }) {
     channel: channelId,
     text: text || ' ',
     blocks: blocks && blocks.length ? blocks : undefined,
+    thread_ts: threadTs || undefined,
     unfurl_links: false,
     unfurl_media: false,
   });
   return { ok: Boolean(res.ok), ts: res.ts, channel: res.channel };
 }
 
-module.exports = { fetchSlackMessages, formatSlackForPrompt, postSlackMessage };
+module.exports = { fetchSlackMessages, formatSlackForPrompt, postSlackMessage, resolveChannelId };

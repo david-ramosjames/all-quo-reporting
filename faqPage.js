@@ -85,7 +85,7 @@ const FAQ = [
   },
   {
     q: 'Does it automatically send review requests to clients?',
-    a: 'By default no — it creates the trackable link and posts it to Slack for a human to send (or send from the analytics page). Automatic texting via Quo exists but is off unless REVIEW_AUTO_SEND_SMS is explicitly enabled.',
+    a: 'Never automatically. It posts one Slack message per candidate; a staff member approves by reacting ✅ (or replying “approve” in the thread), which texts that client their link via Quo. You can also send from the analytics page. No text goes out without an explicit human approval.',
   },
   {
     q: 'What is the review landing page?',
