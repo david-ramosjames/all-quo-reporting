@@ -309,7 +309,8 @@ function renderReviewLandingPage(configOverride, opts = {}) {
   const showLaura = coerceBool(cfg.showLaura, true);
   const lauraImg = String(cfg.lauraImageUrl || '').trim();
   const lauraBlock = showLaura
-    ? `<section class="laura">
+    ? `<div class="divider"></div>
+        <section class="laura">
         ${lauraImg ? `<img class="laura-img" src="${escapeAttr(lauraImg)}" alt="Laura Ramos"/>` : ''}
         <p class="laura-quote">${nl2br(cfg.lauraQuote)}</p>
         <p class="laura-attr">${escapeHtml(cfg.lauraAttribution)}</p>
@@ -398,7 +399,7 @@ function renderReviewLandingPage(configOverride, opts = {}) {
     .cta[aria-disabled="true"] { opacity: .5; pointer-events: none; box-shadow: none; }
     .helper { font-size: 13.5px; color: var(--muted); margin: 12px 0 0; }
     .config-note { margin: 12px 0 0; font-size: 13px; color: #b4560a; background: #fff6ea; border: 1px solid #f3d6ac; border-radius: 8px; padding: 8px 10px; }
-    .laura { margin: 26px 0 4px; }
+    .laura { margin: 2px 0 4px; }
     .laura-img { width: 76px; height: 76px; border-radius: 50%; object-fit: cover; border: 3px solid #eef2fb; margin-bottom: 12px; }
     .laura-quote { font-size: 15px; line-height: 1.55; font-style: italic; color: #3c4a66; margin: 0 auto 8px; max-width: 26rem; }
     .laura-attr { font-size: 14px; font-weight: 700; color: var(--accent); margin: 0; }
@@ -436,8 +437,8 @@ function renderReviewLandingPage(configOverride, opts = {}) {
     <a class="cta" href="${btnHref}"${hasUrl ? '' : ' aria-disabled="true"'} rel="noopener">${GOOGLE_G_SVG}${escapeHtml(cfg.buttonText)}</a>
     ${cfg.helperText ? `<p class="helper">${escapeHtml(cfg.helperText)}</p>` : ''}
     ${disabledNote}
-    ${lauraBlock}
     ${helpBlock}
+    ${lauraBlock}
   </main>
   <footer class="footer">${nl2br(cfg.footer)}</footer>
 </body>

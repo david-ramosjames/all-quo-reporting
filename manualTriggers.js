@@ -6,6 +6,7 @@ const {
   saveReviewLandingConfig,
 } = require('./reviewLanding');
 const reviewAuth = require('./reviewAuth');
+const { renderFaqPage } = require('./faqPage');
 
 /**
  * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review'} JobId
@@ -145,7 +146,7 @@ function buildIndexHtml(message, email) {
       <button type="button" data-job="missed">Run missed client call report (trailing 24h · clients only)</button>
       <button type="button" data-job="review">Run Review Intelligence (trailing 24h · Google review candidates → Slack)</button>
     </div>
-    <p class="hint">Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a></p>
+    <p class="hint">Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a> · what does this all do? <a href="/faq" style="color:#60a5fa">/faq</a></p>
     <p class="hint">Jobs run in the background so the browser does not time out. Only one job at a time.</p>
     <div id="status"></div>
   </div>
@@ -245,7 +246,7 @@ function buildLockedHtml(what) {
 <title>Locked</title><style>:root{font-family:system-ui,sans-serif}body{background:#0f1419;color:#e7ecf3;display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;padding:1rem}.card{background:#1a2332;border-radius:12px;padding:1.6rem;max-width:26rem}code{background:#0f1419;padding:.1em .35em;border-radius:4px;font-size:.85em}</style></head>
 <body><div class="card"><h2 style="margin-top:0">${escapeHtml(what)} is locked</h2>
 <p>Google sign-in isn’t configured yet. Set <code>GOOGLE_OAUTH_CLIENT_ID</code>, <code>GOOGLE_OAUTH_CLIENT_SECRET</code>, and <code>REVIEW_ADMIN_EMAILS</code> (and/or <code>REVIEW_ADMIN_DOMAIN</code>) to enable access.</p>
-<p style="color:#7d8da3;font-size:.85rem">The public review page at <a href="/review" style="color:#60a5fa">/review</a> and <code>/health</code> stay open. Scheduled jobs keep running regardless.</p></div></body></html>`;
+<p style="color:#7d8da3;font-size:.85rem">The <a href="/faq" style="color:#60a5fa">/faq</a> overview and public review page <a href="/review" style="color:#60a5fa">/review</a> stay open. Scheduled jobs keep running regardless.</p></div></body></html>`;
 }
 
 /**
@@ -300,6 +301,12 @@ function startManualTriggerServer(opts) {
       if (req.method === 'GET' && path === '/health') {
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('ok');
+        return;
+      }
+
+      // Public FAQ / overview of everything this server does.
+      if (req.method === 'GET' && (path === '/faq' || path === '/about')) {
+        sendHtml(res, 200, renderFaqPage());
         return;
       }
 
