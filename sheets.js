@@ -136,6 +136,23 @@ async function batchUpdateSheetValues(spreadsheetId, data) {
   return last?.data;
 }
 
+/** Creates a worksheet tab if it doesn't already exist (no-op if present). */
+async function ensureSheetTab(spreadsheetId, title) {
+  const auth = makeAuthClient();
+  const sheets = google.sheets({ version: 'v4', auth });
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId,
+    fields: 'sheets.properties.title',
+  });
+  const exists = (meta.data.sheets || []).some((s) => s.properties?.title === title);
+  if (exists) return false;
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId,
+    requestBody: { requests: [{ addSheet: { properties: { title } } }] },
+  });
+  return true;
+}
+
 /** @returns {number} numeric sheetId for batchUpdate */
 async function getSheetIdByTitle(spreadsheetId, title) {
   const auth = makeAuthClient();
@@ -484,6 +501,7 @@ module.exports = {
   updateSheetValues,
   clearSheetValuesRange,
   batchUpdateSheetValues,
+  ensureSheetTab,
   getSheetIdByTitle,
   deleteSheetRowsByIndex,
   sheetTabFromRangeA1,

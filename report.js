@@ -19,6 +19,9 @@ const {
 } = require('./prompts');
 const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage } = require('./slack');
 const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require('./reviewOpportunities');
+const firmStore = require('./firmStore');
+const reviewRequests = require('./reviewRequests');
+const quoSend = require('./quoSend');
 const {
   getLeadPipelineText,
   fetchSheetData,
@@ -104,6 +107,8 @@ const REVIEW_REPORT_MIN_CONFIDENCE = (process.env.REVIEW_REPORT_MIN_CONFIDENCE |
 const REVIEW_REPORT_LIMIT = clampInt(process.env.REVIEW_REPORT_LIMIT, 10, 1, 50);
 /** Token budget for the per-client review-scoring JSON call. */
 const OPENAI_REVIEW_MAX_TOKENS = clampInt(process.env.OPENAI_REVIEW_MAX_COMPLETION_TOKENS, 4096, 512, 32000);
+/** Auto-text the trackable review link to qualified clients via Quo (OFF by default — outward-facing). */
+const REVIEW_AUTO_SEND_SMS = ['true', '1', 'yes'].includes(String(process.env.REVIEW_AUTO_SEND_SMS || '').trim().toLowerCase());
 
 const GOOGLE_SHEETS_ID    = process.env.GOOGLE_SHEETS_ID;
 // Blank = entire first worksheet. Otherwise e.g. A:ZZ, or 'Master View'!A:ZZ for a specific tab.
@@ -2705,6 +2710,14 @@ function displayClientName(clientKey) {
   return stripped || String(clientKey || '').trim();
 }
 
+/** Absolute base for client-facing review links: firm branded domain → env → none. */
+function reviewPublicBase(firm) {
+  const dom = firm && firm.review_domain ? String(firm.review_domain).trim() : '';
+  if (dom) return `https://${dom.replace(/^https?:\/\//, '').replace(/\/+$/, '')}`;
+  const env = (process.env.REVIEW_PUBLIC_BASE_URL || '').trim();
+  return env ? env.replace(/\/+$/, '') : '';
+}
+
 function reviewConfidenceRank(confidence) {
   switch (String(confidence || '').toLowerCase()) {
     case 'high':
@@ -2846,6 +2859,9 @@ function buildReviewSlackMessage(reportItems, meta) {
     const reasons = (o.reasoning.length ? o.reasoning : o.positive_signals)
       .map((r) => `• ${r}`)
       .join('\n');
+    const linkLine = o.reviewLink
+      ? `\n*Review link:* ${o.reviewLink}${o.autoSent ? '  _(texted ✓)_' : ''}`
+      : '';
     blocks.push({
       type: 'section',
       text: {
@@ -2853,7 +2869,8 @@ function buildReviewSlackMessage(reportItems, meta) {
         text:
           `*${idx + 1}. ${name}*  ·  ${caseCell}\n` +
           `Score: *${o.review_score}/100*   ·   Confidence: ${reviewConfidenceEmoji(o.confidence)} *${o.confidence}*\n` +
-          `*Why they were selected:*\n${reasons || '• Positive signals across recent conversations.'}`,
+          `*Why they were selected:*\n${reasons || '• Positive signals across recent conversations.'}` +
+          linkLine,
       },
     });
     if (idx < reportItems.length - 1) blocks.push({ type: 'divider' });
@@ -2861,6 +2878,7 @@ function buildReviewSlackMessage(reportItems, meta) {
     lines.push(`${idx + 1}. ${name} · ${o.caseId ? `Case ${o.caseId}` : 'no case #'}`);
     lines.push(`   Score ${o.review_score}/100 · Confidence ${o.confidence}`);
     for (const r of (o.reasoning.length ? o.reasoning : o.positive_signals)) lines.push(`   • ${r}`);
+    if (o.reviewLink) lines.push(`   Review link: ${o.reviewLink}${o.autoSent ? ' (texted)' : ''}`);
     lines.push('');
   });
 
@@ -2969,6 +2987,7 @@ async function runReviewIntelligenceReport() {
         clientKey,
         clientName: displayClientName(clientKey),
         caseId: extractTrailingCaseDigitsFromClientKey(clientKey) || '',
+        phone: (items.find((i) => i.phone)?.phone || '').trim(),
         ...review,
       });
     } else if (!review.qualified || review.disqualifiers.length) {
@@ -2983,12 +3002,24 @@ async function runReviewIntelligenceReport() {
   });
 
   console.log(
-    `\n[4/5] Persisting ${opportunities.length} qualified opportunit(ies) to review_opportunities table...`
+    `\n[4/5] Persisting ${opportunities.length} qualified opportunit(ies) + creating trackable links...`
   );
-  if (!reviewStoreConfigured()) {
-    console.log('  Skipped (set GOOGLE_REVIEW_OPPORTUNITIES_SHEET_ID + Google OAuth to persist).');
-  } else {
-    for (const o of opportunities) {
+
+  let firm = null;
+  try {
+    firm = await firmStore.getDefaultFirm();
+  } catch { /* fall back to no firm */ }
+  const publicBase = reviewPublicBase(firm);
+  const requestsOn = reviewRequests.isConfigured();
+  let sentCount = 0;
+
+  if (!reviewStoreConfigured() && !requestsOn) {
+    console.log('  Skipped (set GOOGLE_REVIEW_OPPORTUNITIES_SHEET_ID / GOOGLE_REVIEW_SHEET_ID + Google OAuth to persist).');
+  }
+
+  for (const o of opportunities) {
+    let oppId = '';
+    if (reviewStoreConfigured()) {
       try {
         const res = await upsertReviewOpportunity({
           case_id: o.caseId,
@@ -2997,12 +3028,54 @@ async function runReviewIntelligenceReport() {
           confidence: o.confidence,
           reasoning: o.reasoning,
         });
+        oppId = res.id || '';
         console.log(`  ${o.clientName} (case ${o.caseId || '—'}): ${res.action}`);
       } catch (err) {
-        console.warn(`  ${o.clientName}: store failed — ${err.message}`);
+        console.warn(`  ${o.clientName}: opportunity store failed — ${err.message}`);
+      }
+    }
+
+    // Create a trackable review link (idempotent per opportunity).
+    if (requestsOn) {
+      try {
+        const rr = await reviewRequests.createReviewRequest({
+          firmId: firm?.id || '',
+          caseId: o.caseId,
+          clientName: o.clientName,
+          clientFirstName: o.clientName.split(/\s+/)[0] || '',
+          clientPhone: o.phone,
+          source: 'review_intelligence',
+          reviewOpportunityId: oppId,
+        });
+        if (rr && rr.token) {
+          o.reviewToken = rr.token;
+          o.reviewLink = publicBase ? `${publicBase}/r/${rr.token}` : `/r/${rr.token}`;
+
+          if (REVIEW_AUTO_SEND_SMS && quoSend.isConfigured() && o.phone && publicBase) {
+            try {
+              await quoSend.sendSms({
+                to: o.phone,
+                content: quoSend.buildReviewSmsText({
+                  firstName: o.clientName.split(/\s+/)[0] || '',
+                  firmName: firm?.firm_name || COMPANY_NAME,
+                  link: o.reviewLink,
+                }),
+              });
+              await reviewRequests.markSent(rr.id);
+              o.autoSent = true;
+              sentCount++;
+              console.log(`    ↳ texted review link to ${o.phone}`);
+            } catch (err) {
+              console.warn(`    ↳ auto-send failed for ${o.clientName}: ${err.message}`);
+            }
+          }
+        }
+      } catch (err) {
+        console.warn(`  ${o.clientName}: review link failed — ${err.message}`);
       }
     }
   }
+  if (REVIEW_AUTO_SEND_SMS) console.log(`  Auto-sent ${sentCount} review link(s) via Quo.`);
 
   // Report only the highest-confidence opportunities.
   const minConfRank = reviewConfidenceRank(REVIEW_REPORT_MIN_CONFIDENCE);

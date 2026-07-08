@@ -1,8 +1,7 @@
 /**
  * A plain-English overview of what this server does — the scheduled reports,
  * Review Intelligence, the review landing page, manual triggers, and how access
- * works. Served publicly at /faq (and /about) as a team reference. Contains no
- * secrets or client data; the actual controls and data are all gated.
+ * works. Served at /faq (and /about) behind Google sign-in as a team reference.
  */
 
 const COMPANY_NAME = process.env.COMPANY_NAME || 'Ramos James Law, PLLC';
@@ -81,8 +80,12 @@ const FAQ = [
     a: 'Every evening it looks at each client who communicated in the last 24 hours and evaluates their whole recent journey — not a single message. It first reuses the existing sentiment analysis as a gate (anyone negative or at risk of a bad review is dropped), then an AI “decision engine” scores the rest 0–100 on positive signals (gratitude, relief, settlement reached/distributed, case closed) and disqualifies anyone with frustration, confusion, complaints, or poor communication. Qualified clients are saved to the review_opportunities table and the highest-confidence ones are posted to Slack.',
   },
   {
+    q: 'How do the trackable review links work?',
+    a: 'Each recommended client gets a short, branded link like reviews.ramosjames.com/r/8Ksd92L — the token identifies the request without exposing case numbers or names. Opening it and every button (Google / Text / Call) is tracked, so /review/analytics shows opens, Google click-through rate, and support-click rate per client. The link is posted in Slack for staff to send.',
+  },
+  {
     q: 'Does it automatically send review requests to clients?',
-    a: 'No. V1 only identifies the right clients and recommends them in Slack for a human to review. Nobody is contacted automatically — that’s intentional for this version.',
+    a: 'By default no — it creates the trackable link and posts it to Slack for a human to send (or send from the analytics page). Automatic texting via Quo exists but is off unless REVIEW_AUTO_SEND_SMS is explicitly enabled.',
   },
   {
     q: 'What is the review landing page?',
@@ -105,9 +108,9 @@ const FAQ = [
 function renderFaqPage() {
   const linkCards = [
     { href: '/', title: 'Manual triggers', sub: 'Run a report now', lock: true },
+    { href: '/review/analytics', title: 'Review analytics', sub: 'Link opens &amp; clicks', lock: true },
     { href: '/review/edit', title: 'Edit review page', sub: 'Change copy &amp; branding', lock: true },
     { href: '/review', title: 'Review page', sub: 'What clients see', lock: false },
-    { href: '/health', title: 'Health', sub: 'Uptime check', lock: false },
   ]
     .map(
       (c) => `<a class="linkcard" href="${c.href}">

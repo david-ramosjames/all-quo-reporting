@@ -3,10 +3,13 @@ const { URL } = require('url');
 const {
   renderReviewLandingPage,
   renderReviewLandingEditor,
-  saveReviewLandingConfig,
 } = require('./reviewLanding');
 const reviewAuth = require('./reviewAuth');
 const { renderFaqPage } = require('./faqPage');
+const firmStore = require('./firmStore');
+const reviewRequests = require('./reviewRequests');
+const { renderAnalyticsPage } = require('./analyticsPage');
+const quoSend = require('./quoSend');
 
 /**
  * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review'} JobId
@@ -57,6 +60,45 @@ function sendHtml(res, status, html) {
 function redirectTo(res, location) {
   res.writeHead(302, { Location: location, 'Cache-Control': 'no-store' });
   res.end();
+}
+
+/** Lightweight, privacy-preserving request metadata for a tracked event. */
+function trackingMeta(req) {
+  const xff = String(req.headers['x-forwarded-for'] || '').split(',')[0].trim();
+  const ip = xff || req.socket?.remoteAddress || '';
+  return {
+    userAgent: req.headers['user-agent'] || '',
+    ipHash: reviewRequests.hashIp(ip),
+    referrer: req.headers['referer'] || req.headers['referrer'] || '',
+  };
+}
+
+/** Public base URL for building client-facing links (branded domain preferred). */
+function publicBaseUrl(req, firm) {
+  const dom = firm && firm.review_domain ? String(firm.review_domain).trim() : '';
+  if (dom) return `https://${dom.replace(/^https?:\/\//, '').replace(/\/+$/, '')}`;
+  const env = (process.env.REVIEW_PUBLIC_BASE_URL || '').trim();
+  if (env) return env.replace(/\/+$/, '');
+  const proto = (req.headers['x-forwarded-proto'] || 'https').split(',')[0].trim();
+  const host = (req.headers['x-forwarded-host'] || req.headers.host || '').split(',')[0].trim();
+  return `${proto}://${host}`;
+}
+
+/** Real destination for a click route, from the firm's effective config. */
+function clickDestination(action, cfg) {
+  if (action === 'google') {
+    const u = String(cfg.googleReviewUrl || '').trim();
+    return /^https?:\/\//i.test(u) ? u : '';
+  }
+  if (action === 'text') {
+    const t = quoSend.toE164(cfg.textNumber);
+    return t ? `sms:${t}` : '';
+  }
+  if (action === 'call') {
+    const t = quoSend.toE164(cfg.callNumber);
+    return t ? `tel:${t}` : '';
+  }
+  return '';
 }
 
 function sendJson(res, status, obj) {
@@ -246,7 +288,7 @@ function buildLockedHtml(what) {
 <title>Locked</title><style>:root{font-family:system-ui,sans-serif}body{background:#0f1419;color:#e7ecf3;display:flex;min-height:100vh;margin:0;align-items:center;justify-content:center;padding:1rem}.card{background:#1a2332;border-radius:12px;padding:1.6rem;max-width:26rem}code{background:#0f1419;padding:.1em .35em;border-radius:4px;font-size:.85em}</style></head>
 <body><div class="card"><h2 style="margin-top:0">${escapeHtml(what)} is locked</h2>
 <p>Google sign-in isn’t configured yet. Set <code>GOOGLE_OAUTH_CLIENT_ID</code>, <code>GOOGLE_OAUTH_CLIENT_SECRET</code>, and <code>REVIEW_ADMIN_EMAILS</code> (and/or <code>REVIEW_ADMIN_DOMAIN</code>) to enable access.</p>
-<p style="color:#7d8da3;font-size:.85rem">The <a href="/faq" style="color:#60a5fa">/faq</a> overview and public review page <a href="/review" style="color:#60a5fa">/review</a> stay open. Scheduled jobs keep running regardless.</p></div></body></html>`;
+<p style="color:#7d8da3;font-size:.85rem">The public review page <a href="/review" style="color:#60a5fa">/review</a> and <code>/health</code> stay open. Scheduled jobs keep running regardless.</p></div></body></html>`;
 }
 
 /**
@@ -304,15 +346,22 @@ function startManualTriggerServer(opts) {
         return;
       }
 
-      // Public FAQ / overview of everything this server does.
+      // FAQ / overview of everything this server does — gated like the dashboard.
       if (req.method === 'GET' && (path === '/faq' || path === '/about')) {
+        if (!reviewAuth.isAuthEnabled()) {
+          sendHtml(res, 200, buildLockedHtml('The FAQ'));
+          return;
+        }
+        if (!reviewAuth.getSession(req)) {
+          reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '', path);
+          return;
+        }
         sendHtml(res, 200, renderFaqPage());
         return;
       }
 
       // Public, branded review landing page (mobile-first). No auth.
-      // Personalize the headline with a client first name via query param
-      // (?name= / ?first= / ?client_first_name= / ?fn=), e.g. from a mail-merge link.
+      // Resolves firm branding by Host (custom domain), personalizes via ?name=.
       if (req.method === 'GET' && path === '/review') {
         const firstName =
           url.searchParams.get('name') ||
@@ -320,8 +369,56 @@ function startManualTriggerServer(opts) {
           url.searchParams.get('client_first_name') ||
           url.searchParams.get('fn') ||
           '';
-        sendHtml(res, 200, renderReviewLandingPage(undefined, { firstName }));
+        const firm = await firmStore.getFirmByHost(req.headers.host);
+        const cfg = firmStore.landingConfigForFirm(firm);
+        sendHtml(res, 200, renderReviewLandingPage(cfg, { firstName }));
         return;
+      }
+
+      // Public trackable review link:  /r/:token  (and click routes below).
+      // No case number or client name in the URL — only the opaque token.
+      const rMatch = path.match(/^\/r\/([A-Za-z0-9_-]{4,64})(?:\/(google|text|call))?$/);
+      if (req.method === 'GET' && rMatch) {
+        const token = rMatch[1];
+        const action = rMatch[2];
+        const meta = trackingMeta(req);
+        try {
+          if (!action) {
+            // Page view: render personalized page, record page_opened.
+            const request = await reviewRequests.getByToken(token);
+            const firm = request
+              ? (await firmStore.getFirmById(request.firm_id)) || (await firmStore.getFirmByHost(req.headers.host))
+              : await firmStore.getFirmByHost(req.headers.host);
+            const cfg = firmStore.landingConfigForFirm(firm);
+            if (request) {
+              reviewRequests.recordEvent(token, 'page_opened', meta).catch(() => {});
+              sendHtml(res, 200, renderReviewLandingPage(cfg, {
+                trackingBase: `/r/${token}`,
+                firstName: request.client_first_name || '',
+              }));
+            } else {
+              // Invalid/unknown token → default, non-personalized page. No error shown.
+              sendHtml(res, 200, renderReviewLandingPage(cfg, {}));
+            }
+            return;
+          }
+
+          // Click route: record then redirect to the real destination.
+          const eventType =
+            action === 'google' ? 'google_clicked' : action === 'text' ? 'text_clicked' : 'call_clicked';
+          const request = await reviewRequests.recordEvent(token, eventType, meta).catch(() => null);
+          const firm = request
+            ? (await firmStore.getFirmById(request.firm_id)) || (await firmStore.getDefaultFirm())
+            : await firmStore.getFirmByHost(req.headers.host);
+          const cfg = firmStore.landingConfigForFirm(firm);
+          const dest = clickDestination(action, cfg);
+          redirectTo(res, dest || '/review');
+          return;
+        } catch {
+          // Never surface internal errors to the client.
+          redirectTo(res, '/review');
+          return;
+        }
       }
 
       // Google sign-in flow for the editor (only meaningful when auth is enabled).
@@ -353,7 +450,8 @@ function startManualTriggerServer(opts) {
           reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '', '/review/edit');
           return;
         }
-        sendHtml(res, 200, renderReviewLandingEditor('', { authMode: 'google', email: session.email }));
+        const cfg = firmStore.landingConfigForFirm(await firmStore.getDefaultFirm());
+        sendHtml(res, 200, renderReviewLandingEditor('', { authMode: 'google', email: session.email, config: cfg }));
         return;
       }
 
@@ -374,16 +472,85 @@ function startManualTriggerServer(opts) {
           sendHtml(res, 400, renderReviewLandingEditor('Could not read form.', { authMode: 'google', email: session.email }));
           return;
         }
-        const { token: _t, ...patch } = form; // saveReviewLandingConfig ignores unknown keys
-        const result = saveReviewLandingConfig(patch);
+        const { token: _t, ...patch } = form; // unknown keys are ignored downstream
+        const result = await firmStore.saveDefaultFirmPageSettings(patch);
+        const cfg = firmStore.landingConfigForFirm(await firmStore.getDefaultFirm());
+        const okMsg = result.storage === 'sheet'
+          ? 'Saved (persists across redeploys). View it at /review.'
+          : 'Saved to local file. View it at /review.';
         sendHtml(
           res,
           result.ok ? 200 : 500,
           renderReviewLandingEditor(
-            result.ok ? 'Saved. View it at /review.' : `Save failed: ${result.error}`,
-            { authMode: 'google', email: session.email }
+            result.ok ? okMsg : `Save failed: ${result.error || 'unknown error'}`,
+            { authMode: 'google', email: session.email, config: cfg }
           )
         );
+        return;
+      }
+
+      // Review-link analytics dashboard — gated by the same Google sign-in.
+      if (req.method === 'GET' && path === '/review/analytics') {
+        if (!authOn) {
+          sendHtml(res, 200, buildLockedHtml('Review analytics'));
+          return;
+        }
+        if (!reviewAuth.getSession(req)) {
+          reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '', '/review/analytics');
+          return;
+        }
+        const firm = await firmStore.getDefaultFirm();
+        const [stats, requests] = await Promise.all([
+          reviewRequests.aggregate(),
+          reviewRequests.listRequests(),
+        ]);
+        sendHtml(res, 200, renderAnalyticsPage({
+          stats,
+          requests,
+          publicBase: publicBaseUrl(req, firm),
+          configured: reviewRequests.isConfigured(),
+          sendConfigured: quoSend.isConfigured(),
+        }));
+        return;
+      }
+
+      // Manually send a review link by SMS (staff-approved send).
+      if (req.method === 'POST' && path === '/review/analytics/send') {
+        if (!authOn || !reviewAuth.getSession(req)) {
+          sendJson(res, authOn ? 401 : 503, { error: authOn ? 'Sign in required.' : 'Locked.' });
+          return;
+        }
+        let form;
+        try {
+          form = await parseFormBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'Bad form.' });
+          return;
+        }
+        try {
+          const requests = await reviewRequests.listRequests();
+          const reqRec = requests.find((r) => r.id === form.id || r.token === form.id);
+          if (!reqRec) {
+            sendJson(res, 404, { error: 'Request not found.' });
+            return;
+          }
+          if (!quoSend.isConfigured()) {
+            sendJson(res, 503, { error: 'Quo send not configured (QUO_API_KEY + QUO_SEND_FROM).' });
+            return;
+          }
+          const firm = (await firmStore.getFirmById(reqRec.firm_id)) || (await firmStore.getDefaultFirm());
+          const link = `${publicBaseUrl(req, firm)}/r/${reqRec.token}`;
+          const text = quoSend.buildReviewSmsText({
+            firstName: reqRec.client_first_name,
+            firmName: firm.firm_name,
+            link,
+          });
+          await quoSend.sendSms({ to: reqRec.client_phone, content: text });
+          await reviewRequests.markSent(reqRec.id);
+          sendJson(res, 200, { ok: true, sentTo: reqRec.client_phone, link });
+        } catch (err) {
+          sendJson(res, 502, { error: err.message });
+        }
         return;
       }
 

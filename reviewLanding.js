@@ -290,10 +290,17 @@ function renderReviewLandingPage(configOverride, opts = {}) {
   const firstName = sanitizeFirstName(opts.firstName);
   const headline = firstName ? `Thank you, ${firstName}.` : cfg.headline;
 
+  // Tracking mode: when a token base like "/r/8Ksd92L" is supplied, the buttons
+  // point at internal tracking routes (which record the click, then redirect)
+  // instead of linking straight to Google / sms: / tel:.
+  const trackingBase = opts.trackingBase ? String(opts.trackingBase).replace(/\/+$/, '') : '';
+  const tracking = Boolean(trackingBase);
+
   const urlRaw = String(cfg.googleReviewUrl || '').trim();
   const hasUrl = /^https?:\/\//i.test(urlRaw);
-  const btnHref = hasUrl ? escapeAttr(urlRaw) : '#';
-  const disabledNote = hasUrl
+  const btnHref = tracking ? `${escapeAttr(trackingBase)}/google` : hasUrl ? escapeAttr(urlRaw) : '#';
+  const btnActive = tracking || hasUrl;
+  const disabledNote = btnActive
     ? ''
     : '<p class="config-note">Set the Google Review URL in the admin to activate this button.</p>';
 
@@ -319,12 +326,14 @@ function renderReviewLandingPage(configOverride, opts = {}) {
 
   const textHref = telHref(cfg.textNumber);
   const callHref = telHref(cfg.callNumber);
+  const textTarget = tracking ? `${escapeAttr(trackingBase)}/text` : textHref ? `sms:${escapeAttr(textHref)}` : '';
+  const callTarget = tracking ? `${escapeAttr(trackingBase)}/call` : callHref ? `tel:${escapeAttr(callHref)}` : '';
   const supportButtons = [
     textHref
-      ? `<a class="support-btn" href="sms:${escapeAttr(textHref)}">${supportIcon('text')}${escapeHtml(cfg.textLabel || 'Text Us')}</a>`
+      ? `<a class="support-btn" href="${textTarget}">${supportIcon('text')}${escapeHtml(cfg.textLabel || 'Text Us')}</a>`
       : '',
     callHref
-      ? `<a class="support-btn" href="tel:${escapeAttr(callHref)}">${supportIcon('call')}${escapeHtml(cfg.callLabel || 'Call Us')}</a>`
+      ? `<a class="support-btn" href="${callTarget}">${supportIcon('call')}${escapeHtml(cfg.callLabel || 'Call Us')}</a>`
       : '',
   ]
     .filter(Boolean)
@@ -434,7 +443,7 @@ function renderReviewLandingPage(configOverride, opts = {}) {
     <div class="stars" aria-hidden="true">★★★★★</div>
     <h1>${nl2br(headline)}</h1>
     <p class="body">${nl2br(cfg.body)}</p>
-    <a class="cta" href="${btnHref}"${hasUrl ? '' : ' aria-disabled="true"'} rel="noopener">${GOOGLE_G_SVG}${escapeHtml(cfg.buttonText)}</a>
+    <a class="cta" href="${btnHref}"${btnActive ? '' : ' aria-disabled="true"'} rel="noopener">${GOOGLE_G_SVG}${escapeHtml(cfg.buttonText)}</a>
     ${cfg.helperText ? `<p class="helper">${escapeHtml(cfg.helperText)}</p>` : ''}
     ${disabledNote}
     ${helpBlock}
@@ -468,7 +477,9 @@ function shade(hex, percent) {
 // ── Admin editor ──────────────────────────────────────────────────────────────
 
 function renderReviewLandingEditor(message, opts = {}) {
-  const cfg = loadReviewLandingConfigFromFileOnly();
+  const cfg = opts.config && typeof opts.config === 'object'
+    ? { ...DEFAULT_CONFIG, ...opts.config }
+    : loadReviewLandingConfigFromFileOnly();
   const authMode = opts.authMode === 'google' ? 'google' : 'token';
   const msg = message
     ? `<p class="msg ${/fail|invalid|disabled|not set/i.test(message) ? 'err' : 'ok'}">${escapeHtml(message)}</p>`
