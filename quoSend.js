@@ -73,11 +73,19 @@ function buildReviewSmsText({ firstName, firmName, link, template }) {
     (template && String(template).trim()) ||
     process.env.REVIEW_SMS_TEMPLATE ||
     'Hi {first}, thank you for trusting {firm}. If we made a difference, a quick Google review would mean a lot: {link}';
-  return tmpl
+  const cleanLink = String(link || '').trim();
+  const body = tmpl
     .replace(/\{first\}/g, (firstName || 'there').trim() || 'there')
     .replace(/\{firm\}/g, (firmName || 'our firm').trim())
-    .replace(/\{link\}/g, String(link || '').trim())
+    .replace(/\{link\}/g, cleanLink)
     .trim();
+  // Safety net: a review text with no link is useless. If the template has no
+  // {link} token (e.g. it was edited out in the admin), append the link so the
+  // client always gets a way to leave the review.
+  if (cleanLink && !tmpl.includes('{link}')) {
+    return `${body} ${cleanLink}`.trim();
+  }
+  return body;
 }
 
 module.exports = { isConfigured, sendSms, toE164: exportedToE164, buildReviewSmsText };
