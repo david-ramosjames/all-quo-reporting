@@ -135,6 +135,9 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
     .of-actions { display:flex; align-items:center; gap:.8rem; margin-top:.7rem; }
     .oneoff button { background:var(--cta); color:#062033; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:650; cursor:pointer; }
     .oneoff button:disabled { opacity:.5; cursor:default; }
+    .runbar { display:flex; align-items:center; gap:.8rem; margin:0 0 1.4rem; }
+    #run-review { background:#123a24; color:#8ff0b6; border:1px solid #1e6b3e; border-radius:8px; padding:.5rem .9rem; font-weight:650; cursor:pointer; }
+    #run-review:hover { filter:brightness(1.1); } #run-review:disabled { opacity:.5; cursor:default; }
   </style>
 </head>
 <body>
@@ -142,6 +145,10 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
     <h1>Review link analytics</h1>
     <div class="nav">
       <a href="/">Manual triggers</a><a href="/review/edit">Edit review page</a><a href="/faq">FAQ</a><a href="/review" target="_blank">Review page ↗</a>
+    </div>
+    <div class="runbar">
+      <button id="run-review">▶ Run review job now (test)</button>
+      <span id="run-status" class="muted"></span>
     </div>
     ${notice}
     ${oneOff}
@@ -158,6 +165,34 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
     <footer>Google CTR = Google clicks ÷ opens · Support click rate = (text + call clicks) ÷ opens. Links use the token only — no case numbers or names in the URL.</footer>
   </div>
   <script>
+    (function () {
+      var rb = document.getElementById('run-review');
+      var rs = document.getElementById('run-status');
+      if (!rb) return;
+      var timer = null;
+      function poll() {
+        fetch('/api/status', { credentials: 'same-origin' }).then(function (r) { return r.json(); }).then(function (j) {
+          if (j.running) { rs.textContent = 'Running ' + j.running + '… (watch Slack + logs)'; return; }
+          clearInterval(timer); timer = null; rb.disabled = false;
+          if (j.lastError) rs.textContent = 'Failed: ' + j.lastError;
+          else if (j.lastFinished) { rs.textContent = 'Finished: ' + j.lastFinished + '. Reload to see new requests.'; }
+          else rs.textContent = 'Idle.';
+        }).catch(function (e) { rs.textContent = 'Status error: ' + e.message; });
+      }
+      rb.addEventListener('click', async function () {
+        if (!confirm('Run the Review Intelligence job now? It scores the last 24h and posts to Slack.')) return;
+        rb.disabled = true; rs.textContent = 'Starting…';
+        try {
+          var r = await fetch('/api/trigger', { method: 'POST', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ job: 'review' }) });
+          var j = await r.json().catch(function () { return {}; });
+          if (r.status === 409) { rs.textContent = j.error || 'A job is already running.'; rb.disabled = false; return; }
+          if (!r.ok) { rs.textContent = 'Error: ' + (j.error || r.status); rb.disabled = false; return; }
+          rs.textContent = 'Started — running…';
+          timer = setInterval(poll, 2000); poll();
+        } catch (e) { rs.textContent = 'Failed: ' + e.message; rb.disabled = false; }
+      });
+    })();
     (function () {
       var btn = document.getElementById('of-send');
       if (!btn) return;
