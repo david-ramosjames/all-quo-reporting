@@ -2849,7 +2849,7 @@ function buildReviewIntroMessage(meta) {
 function buildReviewEmptyMessage(meta) {
   const { dateLabel, rangeLabel, candidateCount, qualifiedCount } = meta;
   const note = qualifiedCount
-    ? `_No clients met the bar to recommend today (score ≥ ${REVIEW_REPORT_MIN_SCORE} and High confidence — i.e. a settlement/closing moment)._\n${qualifiedCount} were positive but below the bar · ${candidateCount} active · ${rangeLabel}`
+    ? `_No clients met the bar to recommend today (score ≥ ${REVIEW_REPORT_MIN_SCORE} and High confidence — a standout positive moment)._\n${qualifiedCount} were positive but below the bar · ${candidateCount} active · ${rangeLabel}`
     : `_No review candidates in the last 24 hours._\n${candidateCount} active · ${rangeLabel}`;
   return {
     text: `⭐ Review Intelligence — ${dateLabel} — nothing recommended`,

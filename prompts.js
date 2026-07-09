@@ -502,13 +502,17 @@ Respond with **valid JSON only** (no markdown fences). Shape:
 }
 
 Rules:
-- **review_score** measures how strong a **review MOMENT** this is — the right client at the right time — NOT how polite, cooperative, or responsive the client is in general. Cooperation and courtesy are not, by themselves, review-worthy.
-  - **90-100**: an unmistakable high point — **settlement reached**, **settlement funds distributed/disbursed**, **check ready/picked up**, or the **case successfully closed/resolved** — AND the client is clearly positive (gratitude, relief, satisfaction), with zero negatives. This is the only band that should be surfaced.
-  - **75-89**: a strong, near-outcome moment (e.g. release signed and disbursement imminent) with clear positivity, but the outcome isn't fully complete yet.
-  - **55-74**: positive but **mid-process** — intake completed, HIPAA/forms signed, appointment scheduled or confirmed, documents requested/received, onboarding videos watched, a polite "thank you"/"ok gracias" during routine steps. These are NOT review moments yet.
-  - **Below 55**: weak, unclear, or disqualified.
-  - **Hard ceiling:** if the case is still **active / mid-process** — no settlement reached, no funds distributed, no closure — the score must stay **below 75**, no matter how cooperative or grateful the client is. A "thank you" during onboarding or scheduling does **not** lift it into the surfaced band.
-- **confidence**: "High" ONLY when there is a genuine outcome/high-point (settlement reached, funds distributed, or case closed/resolved) AND explicit client gratitude or satisfaction, with zero negatives — i.e. a score in the 90+ band. If the case is mid-process or the positive signal is just cooperation/politeness, use "Medium" at most; use "Low" when unsure. Never mark routine intake/onboarding/scheduling as "High".
+- **review_score** measures the **strength and authenticity of the client's positive experience right now** — the quality of the review moment. A great moment can happen at **any** case stage (a delighted intake, mid-case reassurance, a settlement, a closing). **Do NOT penalize a client just for being mid-process** — a genuinely happy mid-case client can be an excellent review ask.
+  - Judge the **strength** of the positive signals, not mere cooperation or politeness:
+    - **STRONG (review-worthy):** heartfelt or explicit gratitude, praise of the firm or a specific staff member, expressed relief/reassurance, delight or enthusiasm, a settlement reached, funds distributed / check ready or picked up, or the case successfully closed.
+    - **WEAK (not enough on their own):** routine courtesy or a sign-off "thanks"/"ok gracias", confirming an appointment, signing or returning a form, or simply providing requested info. These show cooperation, not a standout experience.
+  - Bands:
+    - **90-100:** a clear, standout positive moment — effusive gratitude/praise, OR a settlement/closing milestone paired with genuine appreciation — with zero negatives.
+    - **75-89:** solid, genuine positivity or a meaningful positive milestone, but somewhat softer or partial.
+    - **55-74:** mild positive or mostly routine cooperation; no standout sentiment.
+    - **Below 55:** weak, unclear, or disqualified.
+  - **Do not inflate a score just because there are no negatives** — the absence of complaints is not the same as a strong positive experience.
+- **confidence**: "High" when the client's positive experience is explicit, genuine, and unambiguous (a STRONG signal) with zero negatives — this can be at **any** stage. "Medium" when positive but softer, partial, or mostly routine cooperation. "Low" when unsure. Routine courtesy or procedural cooperation alone is not "High".
 - **qualified**: must be false whenever "disqualifiers" is non-empty.
 - **positive_signals** / **disqualifiers**: name only signals you truly saw in the journey. Do not pad.
 - **reasoning**: each bullet a **complete sentence** ending in a period. Ground every bullet in the journey (e.g. "Settlement funds were distributed on the call dated ...", "Client thanked the legal assistant twice by text."). This text is posted to staff, so make it specific and skimmable. Never fabricate.
