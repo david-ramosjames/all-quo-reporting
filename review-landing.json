@@ -22,5 +22,6 @@
   "textNumber": "+15128723341",
   "callLabel": "Call Us",
   "callNumber": "+15128723341",
-  "footer": "Ramos James Law, PLLC · Austin, TX"
+  "footer": "Ramos James Law, PLLC · Austin, TX",
+  "smsTemplate": "Hi {first}, thank you for trusting {firm}. If we made a difference, a quick Google review would mean a lot: {link}"
 }

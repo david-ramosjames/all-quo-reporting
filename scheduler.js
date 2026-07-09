@@ -1,5 +1,6 @@
 require('dotenv').config();
 const cron = require('node-cron');
+const { DateTime } = require('luxon');
 const {
   runDailyReport,
   runWeeklyClientSentimentReport,
@@ -127,6 +128,61 @@ cron.schedule(
   },
   { timezone: TIMEZONE }
 );
+
+// ── Next-run visibility ───────────────────────────────────────────────────────
+// Cron jobs only log when they FIRE, so print the next scheduled fire time for
+// each at boot — an easy way to confirm (e.g.) Review Intelligence is armed for 6 PM.
+function cronFieldMatch(field, val, isDow) {
+  for (const part of String(field).split(',')) {
+    if (part === '*') return true;
+    let m;
+    if ((m = part.match(/^\*\/(\d+)$/))) { if (val % Number(m[1]) === 0) return true; continue; }
+    if ((m = part.match(/^(\d+)-(\d+)$/))) {
+      let a = Number(m[1]); let b = Number(m[2]);
+      if (isDow) { a %= 7; b %= 7; }
+      if (val >= Math.min(a, b) && val <= Math.max(a, b)) return true;
+      continue;
+    }
+    let n = Number(part);
+    if (isDow) n %= 7;
+    if (val === n) return true;
+  }
+  return false;
+}
+function cronMatches(expr, dt) {
+  const parts = String(expr).trim().split(/\s+/);
+  if (parts.length < 5) return false;
+  const [mi, ho, dom, mo, dowF] = parts;
+  const cronDow = dt.weekday === 7 ? 0 : dt.weekday; // luxon 7=Sun → cron 0
+  return (
+    cronFieldMatch(mi, dt.minute) &&
+    cronFieldMatch(ho, dt.hour) &&
+    cronFieldMatch(dom, dt.day) &&
+    cronFieldMatch(mo, dt.month) &&
+    cronFieldMatch(dowF, cronDow, true)
+  );
+}
+function nextRun(expr, tz) {
+  let dt = DateTime.now().setZone(tz).set({ second: 0, millisecond: 0 }).plus({ minutes: 1 });
+  for (let i = 0; i < 367 * 1440; i++) {
+    if (cronMatches(expr, dt)) return dt;
+    dt = dt.plus({ minutes: 1 });
+  }
+  return null;
+}
+
+console.log(`Next scheduled runs (${TIMEZONE}):`);
+for (const [label, expr] of [
+  ['Daily lead + CSV', SCHEDULE],
+  ['Weekly sentiment', WEEKLY_SENTIMENT_CRON],
+  ['Monthly newsletter', MONTHLY_INSIGHTS_CRON],
+  ['Missed client calls', MISSED_CLIENT_CALLS_CRON],
+  ['Review intelligence', REVIEW_INTELLIGENCE_CRON],
+]) {
+  const n = nextRun(expr, TIMEZONE);
+  console.log(`  ${label.padEnd(20)}: ${n ? n.toFormat("ccc, LLL d 'at' h:mm a ZZZZ") : '(unknown)'}`);
+}
+console.log('');
 
 console.log('Scheduler running. Waiting for next trigger...');
 console.log('(Press Ctrl+C to stop)\n');

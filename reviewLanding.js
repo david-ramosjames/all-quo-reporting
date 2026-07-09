@@ -59,6 +59,9 @@ const DEFAULT_CONFIG = {
   callNumber: '+15128723341',
   // Footer
   footer: 'Ramos James Law, PLLC · Austin, TX',
+  // The SMS body sent to a client with their review link. Tokens: {first} {firm} {link}
+  smsTemplate:
+    'Hi {first}, thank you for trusting {firm}. If we made a difference, a quick Google review would mean a lot: {link}',
 };
 
 /**
@@ -101,6 +104,13 @@ const FIELD_DEFS = [
   { key: 'callNumber', label: 'Call phone number', type: 'tel', group: 'Support section' },
   // Footer
   { key: 'footer', label: 'Footer text', type: 'textarea', group: 'Footer' },
+  // Text message sent to clients
+  {
+    key: 'smsTemplate',
+    label: 'Review text message — tokens: {first} {firm} {link}',
+    type: 'textarea',
+    group: 'Text message',
+  },
 ];
 
 const BOOL_KEYS = new Set(FIELD_DEFS.filter((f) => f.type === 'bool').map((f) => f.key));

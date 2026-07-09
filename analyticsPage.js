@@ -31,8 +31,20 @@ function tile(label, value, hint) {
   }</div>`;
 }
 
-function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConfigured }) {
+function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConfigured, smsTemplate }) {
   const base = String(publicBase || '').replace(/\/+$/, '');
+
+  const oneOff = sendConfigured
+    ? `<details class="oneoff">
+        <summary>One-off / test text</summary>
+        <p class="muted" style="margin:.4rem 0 .8rem">Send any message to any number (e.g. a test to your own phone). Uses the Quo sending line.</p>
+        <div class="of-row">
+          <input type="tel" id="of-to" placeholder="Phone e.g. (512) 555-1234"/>
+        </div>
+        <textarea id="of-msg" rows="3" placeholder="Message text">${esc(smsTemplate || '')}</textarea>
+        <div class="of-actions"><button id="of-send">Send text</button><span id="of-status" class="muted"></span></div>
+      </details>`
+    : `<p class="notice">To send texts (approvals and one-offs), set <code>QUO_API_KEY</code> and <code>QUO_SEND_FROM</code>.</p>`;
 
   const tiles = [
     tile('Requests created', stats.totalRequests),
@@ -116,6 +128,13 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
     button.send:hover { filter:brightness(1.06); }
     button.send:disabled { opacity:.5; cursor:default; }
     footer { color:var(--muted); font-size:.8rem; margin-top:1.6rem; }
+    .oneoff { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.4rem 1rem 1rem; margin:0 0 1.4rem; }
+    .oneoff summary { cursor:pointer; font-weight:650; padding:.7rem 0; }
+    .oneoff input, .oneoff textarea { width:100%; box-sizing:border-box; padding:.55rem .7rem; border-radius:8px; border:1px solid var(--line); background:#0e2350; color:var(--ink); font:inherit; }
+    .of-row { margin-bottom:.6rem; } .of-row input { max-width:20rem; }
+    .of-actions { display:flex; align-items:center; gap:.8rem; margin-top:.7rem; }
+    .oneoff button { background:var(--cta); color:#062033; border:none; border-radius:8px; padding:.5rem 1rem; font-weight:650; cursor:pointer; }
+    .oneoff button:disabled { opacity:.5; cursor:default; }
   </style>
 </head>
 <body>
@@ -125,6 +144,7 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
       <a href="/">Manual triggers</a><a href="/review/edit">Edit review page</a><a href="/faq">FAQ</a><a href="/review" target="_blank">Review page ↗</a>
     </div>
     ${notice}
+    ${oneOff}
     <div class="tiles">${tiles}</div>
     <div class="tablewrap">
       <table>
@@ -138,6 +158,26 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
     <footer>Google CTR = Google clicks ÷ opens · Support click rate = (text + call clicks) ÷ opens. Links use the token only — no case numbers or names in the URL.</footer>
   </div>
   <script>
+    (function () {
+      var btn = document.getElementById('of-send');
+      if (!btn) return;
+      btn.addEventListener('click', async function () {
+        var to = (document.getElementById('of-to').value || '').trim();
+        var msg = (document.getElementById('of-msg').value || '').trim();
+        var status = document.getElementById('of-status');
+        if (!to || !msg) { status.textContent = 'Enter a number and a message.'; return; }
+        if (!confirm('Send this text to ' + to + '?')) return;
+        btn.disabled = true; status.textContent = 'Sending…';
+        try {
+          var body = new URLSearchParams({ to: to, message: msg });
+          var r = await fetch('/review/send-oneoff', { method:'POST', credentials:'same-origin',
+            headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body.toString() });
+          var j = await r.json().catch(function(){return {};});
+          status.textContent = (r.ok && j.ok) ? ('Sent to ' + j.sentTo) : ('Failed: ' + (j.error || r.status));
+        } catch (e) { status.textContent = 'Failed: ' + e.message; }
+        btn.disabled = false;
+      });
+    })();
     document.querySelectorAll('button.send').forEach(function (btn) {
       btn.addEventListener('click', async function () {
         if (!confirm('Text this review link to the client now?')) return;

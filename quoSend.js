@@ -68,8 +68,9 @@ function exportedToE164(raw) {
  * Builds the SMS body from a template. Tokens: {first} {firm} {link}.
  * Default keeps it short, warm, and clearly from the firm.
  */
-function buildReviewSmsText({ firstName, firmName, link }) {
+function buildReviewSmsText({ firstName, firmName, link, template }) {
   const tmpl =
+    (template && String(template).trim()) ||
     process.env.REVIEW_SMS_TEMPLATE ||
     'Hi {first}, thank you for trusting {firm}. If we made a difference, a quick Google review would mean a lot: {link}';
   return tmpl

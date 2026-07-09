@@ -83,12 +83,14 @@ async function approveAndSend({ channel, messageTs, approvedBy }) {
 
   try {
     const firm = (await firmStore.getFirmById(req.firm_id)) || (await firmStore.getDefaultFirm());
+    const cfg = firmStore.landingConfigForFirm(firm);
     const base = reviewPublicBase(firm);
     const link = base ? `${base}/r/${req.token}` : `/r/${req.token}`;
     const text = quoSend.buildReviewSmsText({
       firstName: req.client_first_name,
       firmName: firm.firm_name,
       link,
+      template: cfg.smsTemplate,
     });
     await quoSend.sendSms({ to: req.client_phone, content: text });
     await reviewRequests.markSent(req.id);

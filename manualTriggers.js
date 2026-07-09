@@ -533,6 +533,7 @@ function startManualTriggerServer(opts) {
           return;
         }
         const firm = await firmStore.getDefaultFirm();
+        const cfg = firmStore.landingConfigForFirm(firm);
         const [stats, requests] = await Promise.all([
           reviewRequests.aggregate(),
           reviewRequests.listRequests(),
@@ -543,6 +544,7 @@ function startManualTriggerServer(opts) {
           publicBase: publicBaseUrl(req, firm),
           configured: reviewRequests.isConfigured(),
           sendConfigured: quoSend.isConfigured(),
+          smsTemplate: cfg.smsTemplate || '',
         }));
         return;
       }
@@ -572,15 +574,53 @@ function startManualTriggerServer(opts) {
             return;
           }
           const firm = (await firmStore.getFirmById(reqRec.firm_id)) || (await firmStore.getDefaultFirm());
+          const cfg = firmStore.landingConfigForFirm(firm);
           const link = `${publicBaseUrl(req, firm)}/r/${reqRec.token}`;
           const text = quoSend.buildReviewSmsText({
             firstName: reqRec.client_first_name,
             firmName: firm.firm_name,
             link,
+            template: cfg.smsTemplate,
           });
           await quoSend.sendSms({ to: reqRec.client_phone, content: text });
           await reviewRequests.markSent(reqRec.id);
           sendJson(res, 200, { ok: true, sentTo: reqRec.client_phone, link });
+        } catch (err) {
+          sendJson(res, 502, { error: err.message });
+        }
+        return;
+      }
+
+      // One-off / test SMS: staff provide a number + message; we just send it.
+      if (req.method === 'POST' && path === '/review/send-oneoff') {
+        if (!authOn || !reviewAuth.getSession(req)) {
+          sendJson(res, authOn ? 401 : 503, { error: authOn ? 'Sign in required.' : 'Locked.' });
+          return;
+        }
+        let form;
+        try {
+          form = await parseFormBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'Bad form.' });
+          return;
+        }
+        const to = String(form.to || '').trim();
+        const message = String(form.message || '').trim();
+        if (!quoSend.isConfigured()) {
+          sendJson(res, 503, { error: 'Quo send not configured (QUO_API_KEY + QUO_SEND_FROM).' });
+          return;
+        }
+        if (!quoSend.toE164(to)) {
+          sendJson(res, 400, { error: `Invalid phone number: "${to}"` });
+          return;
+        }
+        if (!message) {
+          sendJson(res, 400, { error: 'Message is empty.' });
+          return;
+        }
+        try {
+          const r = await quoSend.sendSms({ to, content: message });
+          sendJson(res, 200, { ok: true, sentTo: quoSend.toE164(to), id: r.id });
         } catch (err) {
           sendJson(res, 502, { error: err.message });
         }
