@@ -240,14 +240,26 @@ async function recordEvent(token, eventType, meta = {}) {
   return mapRow(rows[0]);
 }
 
-/** Atomically claim the request for sending (only if not already sent). */
+/** Atomically claim the request for sending (only if not already sent or cancelled). */
 async function approveForSend(idOrToken, approvedBy) {
   const { rows } = await query(
     `UPDATE review_requests
        SET status='approved', approved_at=COALESCE(approved_at, now()), approved_by=COALESCE(approved_by,$2), updated_at=now()
-     WHERE (id::text=$1 OR token=$1) AND sent_at IS NULL
+     WHERE (id::text=$1 OR token=$1) AND sent_at IS NULL AND status <> 'cancelled'
      RETURNING *`,
     [String(idOrToken), approvedBy || '']
+  );
+  return rows[0] ? mapRow(rows[0]) : null;
+}
+
+/** Cancel an un-sent request so it can no longer be triggered (dashboard or Slack). */
+async function cancelRequest(idOrToken) {
+  const { rows } = await query(
+    `UPDATE review_requests
+       SET status='cancelled', updated_at=now()
+     WHERE (id::text=$1 OR token=$1) AND sent_at IS NULL AND status <> 'cancelled'
+     RETURNING *`,
+    [String(idOrToken)]
   );
   return rows[0] ? mapRow(rows[0]) : null;
 }
@@ -311,6 +323,7 @@ module.exports = {
   setSlackMessage,
   recordEvent,
   approveForSend,
+  cancelRequest,
   markSent,
   listRequests,
   aggregate,

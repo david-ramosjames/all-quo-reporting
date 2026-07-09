@@ -238,13 +238,13 @@ async function recordEvent(token, eventType, meta = {}) {
   return updated;
 }
 
-/** Atomically claim a request for sending (returns null if already sent). */
+/** Atomically claim a request for sending (returns null if already sent or cancelled). */
 async function approveForSend(idOrToken, approvedBy) {
   if (pg.isEnabled()) return pg.approveForSend(idOrToken, approvedBy);
   if (!db.isConfigured()) return null;
   const rows = await sheetAll(true);
   const r = rows.find((x) => x.id === idOrToken || x.token === idOrToken);
-  if (!r || !r._row || r.sent_at) return null;
+  if (!r || !r._row || r.sent_at || r.status === 'cancelled') return null;
   const now = nowIso();
   await db.updateObjectRow(REQUESTS_TAB, REQUEST_HEADER, r._row, {
     ...r,
@@ -254,6 +254,26 @@ async function approveForSend(idOrToken, approvedBy) {
     updated_at: now,
   });
   return { ...r, status: 'approved' };
+}
+
+/**
+ * Cancel an un-sent request so it can no longer be triggered — from the
+ * dashboard Send button or a Slack approval. Returns null if it's already been
+ * sent, already cancelled, or not found.
+ */
+async function cancelRequest(idOrToken) {
+  if (pg.isEnabled()) return pg.cancelRequest(idOrToken);
+  if (!db.isConfigured()) return null;
+  const rows = await sheetAll(true);
+  const r = rows.find((x) => x.id === idOrToken || x.token === idOrToken);
+  if (!r || !r._row || r.sent_at || r.status === 'cancelled') return null;
+  const now = nowIso();
+  await db.updateObjectRow(REQUESTS_TAB, REQUEST_HEADER, r._row, {
+    ...r,
+    status: 'cancelled',
+    updated_at: now,
+  });
+  return { ...r, status: 'cancelled' };
 }
 
 async function markSent(idOrToken) {
@@ -314,6 +334,7 @@ module.exports = {
   setSlackMessage,
   recordEvent,
   approveForSend,
+  cancelRequest,
   markSent,
   listRequests,
   aggregate,

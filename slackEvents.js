@@ -65,6 +65,10 @@ async function approveAndSend({ channel, messageTs, approvedBy }) {
     await reply(channel, messageTs, '↩️ Already sent — skipping.');
     return;
   }
+  if (req.status === 'cancelled') {
+    await reply(channel, messageTs, '🚫 This request was cancelled in the dashboard — not sending.');
+    return;
+  }
   if (!req.client_phone) {
     await reply(channel, messageTs, '⚠️ No client phone on file — send the link manually.');
     return;

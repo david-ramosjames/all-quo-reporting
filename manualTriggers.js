@@ -569,6 +569,10 @@ function startManualTriggerServer(opts) {
             sendJson(res, 404, { error: 'Request not found.' });
             return;
           }
+          if (reqRec.status === 'cancelled') {
+            sendJson(res, 409, { error: 'This request was cancelled and can’t be sent.' });
+            return;
+          }
           if (!quoSend.isConfigured()) {
             sendJson(res, 503, { error: 'Quo send not configured (QUO_API_KEY + QUO_SEND_FROM).' });
             return;
@@ -585,6 +589,33 @@ function startManualTriggerServer(opts) {
           await quoSend.sendSms({ to: reqRec.client_phone, content: text });
           await reviewRequests.markSent(reqRec.id);
           sendJson(res, 200, { ok: true, sentTo: reqRec.client_phone, link });
+        } catch (err) {
+          sendJson(res, 502, { error: err.message });
+        }
+        return;
+      }
+
+      // Cancel an open (un-sent) review request so it can no longer be
+      // triggered — from the dashboard Send button or a Slack approval.
+      if (req.method === 'POST' && path === '/review/analytics/cancel') {
+        if (!authOn || !reviewAuth.getSession(req)) {
+          sendJson(res, authOn ? 401 : 503, { error: authOn ? 'Sign in required.' : 'Locked.' });
+          return;
+        }
+        let form;
+        try {
+          form = await parseFormBody(req);
+        } catch {
+          sendJson(res, 400, { error: 'Bad form.' });
+          return;
+        }
+        try {
+          const cancelled = await reviewRequests.cancelRequest(form.id);
+          if (!cancelled) {
+            sendJson(res, 409, { error: 'Could not cancel — already sent, already cancelled, or not found.' });
+            return;
+          }
+          sendJson(res, 200, { ok: true, id: cancelled.id, status: cancelled.status });
         } catch (err) {
           sendJson(res, 502, { error: err.message });
         }

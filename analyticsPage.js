@@ -61,12 +61,22 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
   const rows = (requests || [])
     .map((r) => {
       const link = `${base}/r/${r.token}`;
-      const canSend = sendConfigured && r.client_phone;
-      const sendCell = canSend
-        ? `<button class="send" data-id="${esc(r.id)}">Send</button>`
-        : r.client_phone
-          ? '<span class="muted">—</span>'
-          : '<span class="muted">no #</span>';
+      const isSent = Boolean(r.sent_at);
+      const isCancelled = r.status === 'cancelled';
+      let sendCell;
+      if (isCancelled) {
+        sendCell = '<span class="muted">Cancelled</span>';
+      } else if (!r.client_phone) {
+        sendCell = '<span class="muted">no #</span>';
+      } else if (!sendConfigured) {
+        sendCell = '<span class="muted">—</span>';
+      } else {
+        // Open (un-sent) requests get a Cancel button so they can no longer be
+        // triggered here or via a Slack approval.
+        const sendBtn = `<button class="send" data-id="${esc(r.id)}">Send</button>`;
+        const cancelBtn = isSent ? '' : `<button class="cancel" data-id="${esc(r.id)}">Cancel</button>`;
+        sendCell = `<div class="act">${sendBtn}${cancelBtn}</div>`;
+      }
       return `<tr>
         <td>${esc(r.client_name || r.client_first_name || '—')}</td>
         <td>${esc(r.case_id || '—')}</td>
@@ -124,9 +134,14 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
     .s-google_clicked { background:#123a24; color:#8ff0b6; }
     .s-opened { background:#123049; color:#9fd0f5; }
     .s-sent { background:#2a2350; color:#c3b6f0; }
+    .s-cancelled { background:#3a1c22; color:#f0a8b4; }
+    .act { display:flex; gap:.4rem; align-items:center; }
     button.send { background:var(--cta); color:#062033; border:none; border-radius:7px; padding:.35rem .7rem; font-weight:650; cursor:pointer; font-size:.82rem; }
     button.send:hover { filter:brightness(1.06); }
     button.send:disabled { opacity:.5; cursor:default; }
+    button.cancel { background:transparent; color:#f0a8b4; border:1px solid #6b3340; border-radius:7px; padding:.35rem .7rem; font-weight:650; cursor:pointer; font-size:.82rem; }
+    button.cancel:hover { background:#3a1c22; }
+    button.cancel:disabled { opacity:.5; cursor:default; }
     footer { color:var(--muted); font-size:.8rem; margin-top:1.6rem; }
     .oneoff { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:.4rem 1rem 1rem; margin:0 0 1.4rem; }
     .oneoff summary { cursor:pointer; font-weight:650; padding:.7rem 0; }
@@ -225,6 +240,25 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
           if (r.ok && j.ok) { btn.textContent = 'Sent ✓'; }
           else { alert(j.error || 'Send failed'); btn.disabled = false; btn.textContent = 'Send'; }
         } catch (e) { alert('Send failed: ' + e.message); btn.disabled = false; btn.textContent = 'Send'; }
+      });
+    });
+    document.querySelectorAll('button.cancel').forEach(function (btn) {
+      btn.addEventListener('click', async function () {
+        if (!confirm('Cancel this review send? It can no longer be texted — not from here and not from a Slack approval.')) return;
+        btn.disabled = true; btn.textContent = 'Cancelling…';
+        try {
+          var body = new URLSearchParams({ id: btn.getAttribute('data-id') });
+          var r = await fetch('/review/analytics/cancel', { method:'POST', credentials:'same-origin',
+            headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body.toString() });
+          var j = await r.json().catch(function(){return {};});
+          if (r.ok && j.ok) {
+            var cell = btn.closest('td');
+            if (cell) cell.innerHTML = '<span class="muted">Cancelled</span>';
+            var row = btn.closest('tr');
+            var badge = row ? row.querySelector('.status') : null;
+            if (badge) { badge.textContent = 'cancelled'; badge.className = 'status s-cancelled'; }
+          } else { alert(j.error || 'Cancel failed'); btn.disabled = false; btn.textContent = 'Cancel'; }
+        } catch (e) { alert('Cancel failed: ' + e.message); btn.disabled = false; btn.textContent = 'Cancel'; }
       });
     });
   </script>
