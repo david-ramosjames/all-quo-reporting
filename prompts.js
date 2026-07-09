@@ -502,8 +502,13 @@ Respond with **valid JSON only** (no markdown fences). Shape:
 }
 
 Rules:
-- **review_score**: 85-100 = textbook candidate (e.g. settlement funds distributed AND clear gratitude, no friction). 70-84 = strong. 55-69 = promising but softer signal. Below 55 = weak or disqualified.
-- **confidence**: "High" only when positive signals are explicit and there is **zero** negative signal. "Medium" when the signal is good but partial or slightly stale. "Low" when you are unsure.
+- **review_score** measures how strong a **review MOMENT** this is — the right client at the right time — NOT how polite, cooperative, or responsive the client is in general. Cooperation and courtesy are not, by themselves, review-worthy.
+  - **90-100**: an unmistakable high point — **settlement reached**, **settlement funds distributed/disbursed**, **check ready/picked up**, or the **case successfully closed/resolved** — AND the client is clearly positive (gratitude, relief, satisfaction), with zero negatives. This is the only band that should be surfaced.
+  - **75-89**: a strong, near-outcome moment (e.g. release signed and disbursement imminent) with clear positivity, but the outcome isn't fully complete yet.
+  - **55-74**: positive but **mid-process** — intake completed, HIPAA/forms signed, appointment scheduled or confirmed, documents requested/received, onboarding videos watched, a polite "thank you"/"ok gracias" during routine steps. These are NOT review moments yet.
+  - **Below 55**: weak, unclear, or disqualified.
+  - **Hard ceiling:** if the case is still **active / mid-process** — no settlement reached, no funds distributed, no closure — the score must stay **below 75**, no matter how cooperative or grateful the client is. A "thank you" during onboarding or scheduling does **not** lift it into the surfaced band.
+- **confidence**: "High" ONLY when there is a genuine outcome/high-point (settlement reached, funds distributed, or case closed/resolved) AND explicit client gratitude or satisfaction, with zero negatives — i.e. a score in the 90+ band. If the case is mid-process or the positive signal is just cooperation/politeness, use "Medium" at most; use "Low" when unsure. Never mark routine intake/onboarding/scheduling as "High".
 - **qualified**: must be false whenever "disqualifiers" is non-empty.
 - **positive_signals** / **disqualifiers**: name only signals you truly saw in the journey. Do not pad.
 - **reasoning**: each bullet a **complete sentence** ending in a period. Ground every bullet in the journey (e.g. "Settlement funds were distributed on the call dated ...", "Client thanked the legal assistant twice by text."). This text is posted to staff, so make it specific and skimmable. Never fabricate.

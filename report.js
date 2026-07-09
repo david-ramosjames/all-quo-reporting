@@ -101,9 +101,9 @@ const REVIEW_SLACK_CHANNEL = (process.env.REVIEW_SLACK_CHANNEL || 'review-opport
 const REVIEW_JOURNEY_DAYS = clampInt(process.env.REVIEW_JOURNEY_DAYS, 14, 1, 120);
 /** Minimum score to persist a Review Opportunity to the backend table. */
 const REVIEW_MIN_SCORE = clampInt(process.env.REVIEW_MIN_SCORE, 60, 0, 100);
-/** Slack report only shows the highest-confidence opportunities: score + confidence floors + cap. */
-const REVIEW_REPORT_MIN_SCORE = clampInt(process.env.REVIEW_REPORT_MIN_SCORE, 75, 0, 100);
-const REVIEW_REPORT_MIN_CONFIDENCE = (process.env.REVIEW_REPORT_MIN_CONFIDENCE || 'Medium').trim();
+/** Slack report only shows the very best opportunities: high score + High confidence. */
+const REVIEW_REPORT_MIN_SCORE = clampInt(process.env.REVIEW_REPORT_MIN_SCORE, 90, 0, 100);
+const REVIEW_REPORT_MIN_CONFIDENCE = (process.env.REVIEW_REPORT_MIN_CONFIDENCE || 'High').trim();
 const REVIEW_REPORT_LIMIT = clampInt(process.env.REVIEW_REPORT_LIMIT, 10, 1, 50);
 /** Token budget for the per-client review-scoring JSON call. */
 const OPENAI_REVIEW_MAX_TOKENS = clampInt(process.env.OPENAI_REVIEW_MAX_COMPLETION_TOKENS, 4096, 512, 32000);
@@ -2847,12 +2847,15 @@ function buildReviewIntroMessage(meta) {
 }
 
 function buildReviewEmptyMessage(meta) {
-  const { dateLabel, rangeLabel } = meta;
+  const { dateLabel, rangeLabel, candidateCount, qualifiedCount } = meta;
+  const note = qualifiedCount
+    ? `_No clients met the bar to recommend today (score ≥ ${REVIEW_REPORT_MIN_SCORE} and High confidence — i.e. a settlement/closing moment)._\n${qualifiedCount} were positive but below the bar · ${candidateCount} active · ${rangeLabel}`
+    : `_No review candidates in the last 24 hours._\n${candidateCount} active · ${rangeLabel}`;
   return {
-    text: `⭐ Review Intelligence — ${dateLabel} — no candidates`,
+    text: `⭐ Review Intelligence — ${dateLabel} — nothing recommended`,
     blocks: [
       { type: 'header', text: { type: 'plain_text', text: `⭐ Review Intelligence — ${dateLabel}`, emoji: true } },
-      { type: 'section', text: { type: 'mrkdwn', text: `_No high-confidence review candidates in the last 24 hours._\n${rangeLabel}` } },
+      { type: 'section', text: { type: 'mrkdwn', text: note } },
     ],
   };
 }
@@ -2994,13 +2997,22 @@ async function runReviewIntelligenceReport() {
     `\n[4/5] Persisting ${opportunities.length} qualified opportunit(ies) + creating trackable links...`
   );
 
+  // Surface only the very best (high score + High confidence). Trackable links
+  // are minted only for these — no need to create links we won't act on.
+  const minConfRank = reviewConfidenceRank(REVIEW_REPORT_MIN_CONFIDENCE);
+  const reportItems = opportunities
+    .filter(
+      (o) => o.review_score >= REVIEW_REPORT_MIN_SCORE && reviewConfidenceRank(o.confidence) <= minConfRank
+    )
+    .slice(0, REVIEW_REPORT_LIMIT);
+  const surfaced = new Set(reportItems);
+
   let firm = null;
   try {
     firm = await firmStore.getDefaultFirm();
   } catch { /* fall back to no firm */ }
   const publicBase = reviewPublicBase(firm);
   const requestsOn = reviewRequests.isConfigured();
-  let sentCount = 0;
 
   if (!reviewStoreConfigured() && !requestsOn) {
     console.log('  Skipped (set GOOGLE_REVIEW_OPPORTUNITIES_SHEET_ID / GOOGLE_REVIEW_SHEET_ID + Google OAuth to persist).');
@@ -3008,6 +3020,7 @@ async function runReviewIntelligenceReport() {
 
   for (const o of opportunities) {
     let oppId = '';
+    // Record every qualified opportunity (analytics), but only mint a link for surfaced ones.
     if (reviewStoreConfigured()) {
       try {
         const res = await upsertReviewOpportunity({
@@ -3018,14 +3031,13 @@ async function runReviewIntelligenceReport() {
           reasoning: o.reasoning,
         });
         oppId = res.id || '';
-        console.log(`  ${o.clientName} (case ${o.caseId || '—'}): ${res.action}`);
+        console.log(`  ${o.clientName} (case ${o.caseId || '—'}): ${res.action}${surfaced.has(o) ? ' [surfaced]' : ''}`);
       } catch (err) {
         console.warn(`  ${o.clientName}: opportunity store failed — ${err.message}`);
       }
     }
 
-    // Create a trackable review link (idempotent per opportunity).
-    if (requestsOn) {
+    if (requestsOn && surfaced.has(o)) {
       try {
         const rr = await reviewRequests.createReviewRequest({
           firmId: firm?.id || '',
@@ -3040,22 +3052,13 @@ async function runReviewIntelligenceReport() {
           o.reviewToken = rr.token;
           o.reviewRequestId = rr.id;
           o.reviewLink = publicBase ? `${publicBase}/r/${rr.token}` : `/r/${rr.token}`;
-          // NOTE: no text is sent here. Sending is approval-gated — staff approve
-          // in Slack (✅ / reply) or from the analytics page, which triggers the send.
+          // No text is sent here — sending is approval-gated (Slack ✅/reply or analytics page).
         }
       } catch (err) {
         console.warn(`  ${o.clientName}: review link failed — ${err.message}`);
       }
     }
   }
-
-  // Report only the highest-confidence opportunities.
-  const minConfRank = reviewConfidenceRank(REVIEW_REPORT_MIN_CONFIDENCE);
-  const reportItems = opportunities
-    .filter(
-      (o) => o.review_score >= REVIEW_REPORT_MIN_SCORE && reviewConfidenceRank(o.confidence) <= minConfRank
-    )
-    .slice(0, REVIEW_REPORT_LIMIT);
 
   console.log(
     `\n[5/5] Posting daily Slack report to #${REVIEW_SLACK_CHANNEL} (${reportItems.length} shown; ${disqualifiedCount} disqualified)...`
