@@ -619,7 +619,17 @@ function startManualTriggerServer(opts) {
           return;
         }
         try {
-          const r = await quoSend.sendSms({ to, content: message });
+          // Resolve template tokens so a one-off doubles as a true preview of a
+          // real review text. {link} points at a demo review page (any unknown
+          // token renders the default landing page), using the branded base URL
+          // when configured and falling back to the request host otherwise.
+          const firm = await firmStore.getDefaultFirm();
+          const previewLink = `${publicBaseUrl(req, firm)}/r/preview`;
+          const content = message
+            .replace(/\{first\}/g, 'there')
+            .replace(/\{firm\}/g, (firm.firm_name || 'our firm').trim())
+            .replace(/\{link\}/g, previewLink);
+          const r = await quoSend.sendSms({ to, content });
           sendJson(res, 200, { ok: true, sentTo: quoSend.toE164(to), id: r.id });
         } catch (err) {
           sendJson(res, 502, { error: err.message });
