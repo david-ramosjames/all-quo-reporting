@@ -105,6 +105,13 @@ const REVIEW_MIN_SCORE = clampInt(process.env.REVIEW_MIN_SCORE, 60, 0, 100);
 const REVIEW_REPORT_MIN_SCORE = clampInt(process.env.REVIEW_REPORT_MIN_SCORE, 90, 0, 100);
 const REVIEW_REPORT_MIN_CONFIDENCE = (process.env.REVIEW_REPORT_MIN_CONFIDENCE || 'High').trim();
 const REVIEW_REPORT_LIMIT = clampInt(process.env.REVIEW_REPORT_LIMIT, 10, 1, 50);
+/**
+ * When nothing clears the bar, still surface the single best positive candidate
+ * (flagged as below the bar) so staff always have something to consider.
+ * Set REVIEW_REPORT_ALWAYS_SHOW_BEST=false to keep the old "nothing today" behavior.
+ */
+const REVIEW_REPORT_ALWAYS_SHOW_BEST =
+  String(process.env.REVIEW_REPORT_ALWAYS_SHOW_BEST ?? 'true').trim().toLowerCase() !== 'false';
 /** Token budget for the per-client review-scoring JSON call. */
 const OPENAI_REVIEW_MAX_TOKENS = clampInt(process.env.OPENAI_REVIEW_MAX_COMPLETION_TOKENS, 4096, 512, 32000);
 
@@ -2823,12 +2830,15 @@ const REVIEW_APPROVE_EMOJI = (process.env.REVIEW_APPROVE_EMOJI || 'white_check_m
 
 /** Intro / summary message posted before the per-candidate cards. */
 function buildReviewIntroMessage(meta) {
-  const { rangeLabel, dateLabel, candidateCount, qualifiedCount, reportedCount, canApprove } = meta;
+  const { rangeLabel, dateLabel, candidateCount, qualifiedCount, reportedCount, fallbackBest, canApprove } = meta;
   const approveHint = canApprove
     ? `React :${REVIEW_APPROVE_EMOJI}: (or reply *approve*) on a card to text that client their review link.`
     : '_Approval-to-send is off until the review store + Quo sending are configured._';
+  const contextText = fallbackBest
+    ? `No one cleared the bar (score ≥ ${REVIEW_REPORT_MIN_SCORE} + High) — showing today's *best positive moment* instead.  ·  Active in last 24h: *${candidateCount}*  ·  Positive: *${qualifiedCount}*  ·  ${rangeLabel}`
+    : `Active in last 24h: *${candidateCount}*  ·  Qualified: *${qualifiedCount}*  ·  Showing top *${reportedCount}*  ·  ${rangeLabel}`;
   return {
-    text: `⭐ Review Intelligence — ${dateLabel} — ${reportedCount} candidate(s)`,
+    text: `⭐ Review Intelligence — ${dateLabel} — ${fallbackBest ? "best positive moment (below the bar)" : `${reportedCount} candidate(s)`}`,
     blocks: [
       { type: 'header', text: { type: 'plain_text', text: `⭐ Review Intelligence — ${dateLabel}`, emoji: true } },
       {
@@ -2836,7 +2846,7 @@ function buildReviewIntroMessage(meta) {
         elements: [
           {
             type: 'mrkdwn',
-            text: `Active in last 24h: *${candidateCount}*  ·  Qualified: *${qualifiedCount}*  ·  Showing top *${reportedCount}*  ·  ${rangeLabel}`,
+            text: contextText,
           },
         ],
       },
@@ -2871,8 +2881,12 @@ function buildReviewCandidateMessage(o, idx) {
     : o.reviewRequestId
       ? '\n_No client phone on file — send the link manually._'
       : '';
+  const belowBarLine = o.belowBar
+    ? `⚠️ _Below the usual bar (score ≥ ${REVIEW_REPORT_MIN_SCORE} + High) — surfaced as today's best positive moment. Use your judgment before sending._\n`
+    : '';
   const text =
     `*${idx + 1}. ${name}*  ·  ${caseCell}\n` +
+    belowBarLine +
     `Score: *${o.review_score}/100*   ·   Confidence: ${reviewConfidenceEmoji(o.confidence)} *${o.confidence}*\n` +
     `*Why they were selected:*\n${reasons || '• Positive signals across recent conversations.'}` +
     linkLine + approveLine;
@@ -3000,11 +3014,21 @@ async function runReviewIntelligenceReport() {
   // Surface only the very best (high score + High confidence). Trackable links
   // are minted only for these — no need to create links we won't act on.
   const minConfRank = reviewConfidenceRank(REVIEW_REPORT_MIN_CONFIDENCE);
-  const reportItems = opportunities
+  let reportItems = opportunities
     .filter(
       (o) => o.review_score >= REVIEW_REPORT_MIN_SCORE && reviewConfidenceRank(o.confidence) <= minConfRank
     )
     .slice(0, REVIEW_REPORT_LIMIT);
+
+  // Fallback: if nobody cleared the bar but there are still positive candidates,
+  // surface just the single best one (flagged below-bar) so the daily report is
+  // never empty-handed when there's a reasonable option.
+  let fallbackBest = false;
+  if (reportItems.length === 0 && REVIEW_REPORT_ALWAYS_SHOW_BEST && opportunities.length > 0) {
+    opportunities[0].belowBar = true;
+    reportItems = [opportunities[0]];
+    fallbackBest = true;
+  }
   const surfaced = new Set(reportItems);
 
   let firm = null;
@@ -3070,6 +3094,7 @@ async function runReviewIntelligenceReport() {
     candidateCount: candidates.length,
     qualifiedCount: opportunities.length,
     reportedCount: reportItems.length,
+    fallbackBest,
     canApprove: requestsOn && quoSend.isConfigured(),
   };
 
