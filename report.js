@@ -1585,116 +1585,183 @@ async function generateDailyLeadReportAnalysis(
 
 // ── Email ─────────────────────────────────────────────────────────────────────
 
+/**
+ * Line-based Markdown → email-safe HTML. Handles headings, ordered/unordered
+ * lists, GitHub-style tables (with a separator row), blockquotes, and inline
+ * bold/links/code. Block-by-block parsing avoids the ordering pitfalls of the
+ * old chained global-regex approach (stray <br>s, orphaned <p> tags, tables
+ * broken by the newline pass).
+ */
 function markdownToHtml(md) {
-  return md
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
-      '<a href="$2" style="color:#0f766e;font-weight:700;text-decoration:none;border-bottom:1px solid #99f6e4" target="_blank">$1</a>'
-    )
-    .replace(
-      /^## (.+)$/gm,
-      '<h2 style="color:#0f172a;margin:28px 0 10px;font-size:15px;letter-spacing:.04em;text-transform:uppercase;border-bottom:1px solid #e2e8f0;padding-bottom:6px;font-weight:800">$1</h2>'
-    )
-    .replace(
-      /^### (.+)$/gm,
-      '<h3 style="color:#1e293b;margin:14px 0 6px;font-size:15px;font-weight:700">$1</h3>'
-    )
-    .replace(/\*\*(.+?)\*\*/g,   '<strong>$1</strong>')
-    .replace(/^(\d+)\. (.+)$/gm, '<li style="margin:5px 0;line-height:1.5">$2</li>')
-    .replace(/^[-•] (.+)$/gm,    '<li style="margin:5px 0;line-height:1.5">$1</li>')
-    .replace(/(<li[^>]*>[\s\S]*?<\/li>\n?)+/g, (m) =>
-      `<ul style="margin:8px 0 12px;padding-left:20px">${m}</ul>`)
-    .replace(/\|(.+)\|/g, (row) => {
-      const cells = row.split('|').filter(Boolean);
-      const isHeader = cells.some((c) => /^\s*-+\s*$/.test(c));
-      if (isHeader) return '';
-      const tag = cells[0]?.trim().match(/^[A-Z]/) ? 'th' : 'td';
-      return '<tr>' + cells.map((c) =>
-        `<${tag} style="padding:7px 10px;border:1px solid #e2e8f0;text-align:left;vertical-align:top;line-height:1.45">${c.trim()}</${tag}>`
-      ).join('') + '</tr>';
-    })
-    .replace(/(<tr>[\s\S]*?<\/tr>\n?)+/g, (m) =>
-      `<table style="border-collapse:collapse;width:100%;margin:12px 0;font-size:13px;background:#fff;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">${m}</table>`)
-    .replace(/\n{2,}/g, '</p><p style="margin:10px 0;line-height:1.65">')
-    .replace(/\n/g, '<br>');
+  const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const inline = (s) =>
+    esc(s)
+      .replace(/\[([^\]]+)\]\((https?:\/\/[^)]+)\)/g,
+        '<a href="$2" style="color:#0d9488;font-weight:600;text-decoration:none;border-bottom:1px solid #99f6e4" target="_blank">$1</a>')
+      .replace(/\*\*(.+?)\*\*/g, '<strong style="color:#0A1C40">$1</strong>')
+      .replace(/`([^`]+)`/g, '<code style="background:#f1f5f9;padding:1px 5px;border-radius:4px;font-size:13px">$1</code>');
+
+  const lines = String(md).replace(/\r\n/g, '\n').split('\n');
+  const isTableSep = (l) => l != null && l.includes('-') && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(l);
+  const rowCells = (l) => l.replace(/^\s*\|/, '').replace(/\|\s*$/, '').split('|').map((c) => c.trim());
+  const startsBlock = (l) =>
+    /^\s*(#{1,3})\s+/.test(l) || /^\s*[-*•]\s+/.test(l) || /^\s*\d+\.\s+/.test(l) || /^\s*>\s?/.test(l);
+
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+
+    let m;
+    if ((m = line.match(/^\s*###\s+(.+)$/))) {
+      out.push(`<h3 style="color:#1e293b;margin:20px 0 6px;font-size:15px;font-weight:700">${inline(m[1])}</h3>`);
+      i++; continue;
+    }
+    if ((m = line.match(/^\s*#{1,2}\s+(.+)$/))) {
+      out.push(`<h2 style="color:#0A1C40;margin:26px 0 12px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;font-weight:800;border-bottom:2px solid #0d9488;padding-bottom:6px">${inline(m[1])}</h2>`);
+      i++; continue;
+    }
+
+    // Table — current line has cells and the next line is a --- separator.
+    if (line.includes('|') && isTableSep(lines[i + 1])) {
+      const header = rowCells(line);
+      i += 2;
+      const body = [];
+      while (i < lines.length && lines[i].trim() && lines[i].includes('|')) {
+        body.push(rowCells(lines[i])); i++;
+      }
+      const thead = '<tr>' + header.map((c) =>
+        `<th style="padding:9px 12px;background:#0A1C40;color:#fff;text-align:left;font-size:12px;font-weight:700;letter-spacing:.02em">${inline(c)}</th>`).join('') + '</tr>';
+      const tbody = body.map((r, ri) =>
+        `<tr style="background:${ri % 2 ? '#f8fafc' : '#ffffff'}">` +
+        r.map((c) => `<td style="padding:8px 12px;border-top:1px solid #e2e8f0;font-size:13px;vertical-align:top;line-height:1.5;color:#334155">${inline(c)}</td>`).join('') +
+        '</tr>').join('');
+      out.push(`<table role="presentation" cellspacing="0" cellpadding="0" style="border-collapse:separate;border-spacing:0;width:100%;margin:14px 0;border:1px solid #e2e8f0;border-radius:8px;overflow:hidden">${thead}${tbody}</table>`);
+      continue;
+    }
+
+    if (/^\s*[-*•]\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*[-*•]\s+/.test(lines[i])) {
+        items.push(inline(lines[i].replace(/^\s*[-*•]\s+/, ''))); i++;
+      }
+      out.push(`<ul style="margin:10px 0 14px;padding-left:22px">${items.map((it) => `<li style="margin:5px 0;line-height:1.55">${it}</li>`).join('')}</ul>`);
+      continue;
+    }
+
+    if (/^\s*\d+\.\s+/.test(line)) {
+      const items = [];
+      while (i < lines.length && /^\s*\d+\.\s+/.test(lines[i])) {
+        items.push(inline(lines[i].replace(/^\s*\d+\.\s+/, ''))); i++;
+      }
+      out.push(`<ol style="margin:10px 0 14px;padding-left:22px">${items.map((it) => `<li style="margin:5px 0;line-height:1.55">${it}</li>`).join('')}</ol>`);
+      continue;
+    }
+
+    if (/^\s*>\s?/.test(line)) {
+      const quote = [];
+      while (i < lines.length && /^\s*>\s?/.test(lines[i])) {
+        quote.push(inline(lines[i].replace(/^\s*>\s?/, ''))); i++;
+      }
+      out.push(`<blockquote style="margin:12px 0;padding:10px 16px;border-left:3px solid #0d9488;background:#f0fdfa;color:#334155;border-radius:0 6px 6px 0">${quote.join('<br>')}</blockquote>`);
+      continue;
+    }
+
+    const para = [];
+    while (
+      i < lines.length && lines[i].trim() && !startsBlock(lines[i]) &&
+      !(lines[i].includes('|') && isTableSep(lines[i + 1]))
+    ) {
+      para.push(inline(lines[i])); i++;
+    }
+    out.push(`<p style="margin:10px 0;line-height:1.7;font-size:14px">${para.join('<br>')}</p>`);
+  }
+  return out.join('\n');
+}
+
+/** One stat tile — inline-block so a row of tiles wraps gracefully on mobile. */
+function emailStatTile(label, value, sub, c) {
+  const v = String(value == null ? '—' : value);
+  const valueSize = v.length > 7 ? 16 : 26;
+  return `<div style="display:inline-block;width:150px;vertical-align:top;margin:5px;padding:14px 10px;background:${c.bg};border:1px solid ${c.border};border-radius:10px;text-align:center;box-sizing:border-box">
+    <div style="font-size:10px;color:${c.label};text-transform:uppercase;letter-spacing:.6px;font-weight:700">${label}</div>
+    <div style="font-size:${valueSize}px;font-weight:800;color:${c.value};margin:5px 0 3px;line-height:1.1">${v}</div>
+    <div style="font-size:10px;color:#94a3b8">${sub}</div>
+  </div>`;
 }
 
 function buildEmailHtml(analysis, stats, dateLabel) {
   const totalMinHr = stats.totalMinutes >= 60
     ? `${Math.floor(stats.totalMinutes / 60)}h ${stats.totalMinutes % 60}m`
     : `${stats.totalMinutes}m`;
-  const title = '📌 Daily Intake & Lead Report';
-  const emojiBar = '#0d9488';
+  const title = 'Daily Intake &amp; Lead Report';
 
   const sheetShown =
     stats.sheetRows != null && Number.isFinite(stats.sheetRows)
       ? String(stats.sheetRows)
       : '—';
 
-  const metricsRow = `<table style="width:100%;border-collapse:collapse">
-      <tr>
-        <td style="padding:12px 14px;background:#f0fdfa;border-radius:6px;text-align:center;border:1px solid #99f6e4">
-          <div style="font-size:11px;color:#0f766e;text-transform:uppercase;letter-spacing:.5px;font-weight:bold">Total calls</div>
-          <div style="font-size:26px;font-weight:bold;color:#134e4a">${stats.totalFetched}</div>
-          <div style="font-size:11px;color:#666">Quo window</div>
-        </td>
-        <td style="width:10px"></td>
-        <td style="padding:12px 14px;background:#fffbeb;border-radius:6px;text-align:center;border:1px solid #fde68a">
-          <div style="font-size:11px;color:#b45309;text-transform:uppercase;letter-spacing:.5px;font-weight:bold">Transcripts analyzed</div>
-          <div style="font-size:26px;font-weight:bold;color:#78350f">${stats.totalSaved}</div>
-          <div style="font-size:11px;color:#666">with summaries/transcripts</div>
-        </td>
-        <td style="width:10px"></td>
-        <td style="padding:12px 14px;background:#faf5ff;border-radius:6px;text-align:center;border:1px solid #e9d5ff">
-          <div style="font-size:11px;color:#6b21a8;text-transform:uppercase;letter-spacing:.5px;font-weight:bold">Talk time</div>
-          <div style="font-size:26px;font-weight:bold;color:#581c87">${totalMinHr}</div>
-          <div style="font-size:11px;color:#666">connected minutes</div>
-        </td>
-      </tr>
-      <tr><td style="height:10px"></td></tr>
-      <tr>
-        <td style="padding:12px 14px;background:#fff7ed;border-radius:6px;text-align:center;border:1px solid #fed7aa">
-          <div style="font-size:11px;color:#9a3412;text-transform:uppercase;letter-spacing:.5px;font-weight:bold">Slack lead messages</div>
-          <div style="font-size:26px;font-weight:bold;color:#7c2d12">${stats.slackMessages ?? '—'}</div>
-          <div style="font-size:11px;color:#666">#lead-calls in window</div>
-        </td>
-        <td style="width:10px"></td>
-        <td style="padding:12px 14px;background:#eef2ff;border-radius:6px;text-align:center;border:1px solid #c7d2fe">
-          <div style="font-size:11px;color:#3730a3;text-transform:uppercase;letter-spacing:.5px;font-weight:bold">Pipeline rows</div>
-          <div style="font-size:26px;font-weight:bold;color:#581c87">${sheetShown}</div>
-          <div style="font-size:11px;color:#666">pipeline rows</div>
-        </td>
-        <td style="width:10px"></td>
-        <td style="padding:12px 14px;background:#f8fafc;border-radius:6px;text-align:center;border:1px solid #e2e8f0">
-          <div style="font-size:11px;color:#0f172a;text-transform:uppercase;letter-spacing:.5px;font-weight:bold">Window</div>
-          <div style="font-size:18px;font-weight:bold;color:#0f172a">${dateLabel}</div>
-          <div style="font-size:11px;color:#666">daily snapshot</div>
-        </td>
-      </tr>
-    </table>`;
+  const tiles = [
+    ['Total calls', stats.totalFetched, 'Quo window', { bg: '#f0fdfa', border: '#99f6e4', label: '#0f766e', value: '#134e4a' }],
+    ['Transcripts', stats.totalSaved, 'with summaries', { bg: '#fffbeb', border: '#fde68a', label: '#b45309', value: '#78350f' }],
+    ['Talk time', totalMinHr, 'connected min', { bg: '#faf5ff', border: '#e9d5ff', label: '#6b21a8', value: '#581c87' }],
+    ['Slack leads', stats.slackMessages ?? '—', '#lead-calls', { bg: '#fff7ed', border: '#fed7aa', label: '#9a3412', value: '#7c2d12' }],
+    ['Pipeline rows', sheetShown, 'lead pipeline', { bg: '#eef2ff', border: '#c7d2fe', label: '#3730a3', value: '#3730a3' }],
+    ['Window', dateLabel, 'daily snapshot', { bg: '#f1f5f9', border: '#e2e8f0', label: '#475569', value: '#0f172a' }],
+  ].map(([l, v, s, c]) => emailStatTile(l, v, s, c)).join('');
 
+  // font-size:0 collapses the whitespace between inline-block tiles.
+  const metricsRow = `<div style="font-size:0;text-align:center">${tiles}</div>`;
+
+  const preheader = `${stats.totalFetched} calls · ${stats.totalSaved} transcripts · ${totalMinHr} talk time · ${stats.slackMessages ?? '—'} Slack leads — ${dateLabel}`;
   const footerNote = `Quo transcript CSV attached &nbsp;·&nbsp; Weekly client sentiment is emailed separately &nbsp;·&nbsp; Generated ${new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' })}`;
+  const body = analysis.trim()
+    ? markdownToHtml(analysis)
+    : '<p style="margin:10px 0;line-height:1.7;font-size:14px"><em>(No analysis body — check console warning from OpenAI step.)</em></p>';
 
   return `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"></head>
-<body style="font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Arial,sans-serif;max-width:760px;margin:0 auto;padding:24px;color:#1f2937;background:#f3f6fb">
-  <div style="background:#1a1a2e;color:#fff;padding:24px 32px;border-radius:8px 8px 0 0">
-    <h1 style="margin:0;font-size:22px;letter-spacing:.2px;font-weight:800">${title}</h1>
-    <p style="margin:8px 0 0;opacity:.86;font-size:13px">${COMPANY_NAME} · ${dateLabel}</p>
-  </div>
-  <div style="background:#fff;padding:16px 32px 12px;border:1px solid #e0e0e0;border-top:3px solid ${emojiBar}">
-    ${metricsRow}
-  </div>
-  <div style="background:#fff;padding:16px 32px 32px;border:1px solid #e0e0e0;border-top:none;border-radius:0 0 8px 8px;line-height:1.68">
-    <div style="margin:0 0 14px;padding:10px 12px;border:1px solid #dbeafe;background:#f8fbff;border-radius:8px;color:#334155;font-size:13px">
-      Executive + operational intake brief across <strong>Quo</strong>, <strong>Slack</strong>, and <strong>Google Sheets</strong>.
-    </div>
-    <div style="margin:0;font-size:14px">${analysis.trim() ? markdownToHtml(analysis) : '<p><em>(No analysis body — check console warning from OpenAI step.)</em></p>'}</div>
-  </div>
-  <p style="font-size:11px;color:#94a3b8;text-align:center;margin-top:16px">
-    ${footerNote}
-  </p>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light only">
+</head>
+<body style="margin:0;padding:0;background:#eef2f8;-webkit-text-size-adjust:100%">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#eef2f8;font-size:1px;line-height:1px">${preheader}</div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eef2f8">
+    <tr>
+      <td align="center" style="padding:24px 12px">
+        <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="width:600px;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937">
+          <tr>
+            <td style="background:#0A1C40;padding:26px 30px;border-radius:12px 12px 0 0">
+              <div style="font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#5eead4">${COMPANY_NAME}</div>
+              <h1 style="margin:6px 0 0;font-size:23px;font-weight:800;color:#ffffff;letter-spacing:.2px">📌 ${title}</h1>
+              <p style="margin:6px 0 0;font-size:13px;color:#a9b8d6">${dateLabel}</p>
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#ffffff;padding:18px 22px 8px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;border-top:3px solid #0d9488">
+              ${metricsRow}
+            </td>
+          </tr>
+          <tr>
+            <td style="background:#ffffff;padding:8px 30px 30px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;border-bottom:1px solid #e2e8f0;border-radius:0 0 12px 12px">
+              <div style="margin:6px 0 18px;padding:11px 14px;border-left:3px solid #0d9488;background:#f0fdfa;border-radius:0 8px 8px 0;color:#334155;font-size:13px;line-height:1.55">
+                Executive &amp; operational intake brief across <strong style="color:#0A1C40">Quo</strong>, <strong style="color:#0A1C40">Slack</strong>, and <strong style="color:#0A1C40">Google Sheets</strong>.
+              </div>
+              ${body}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:16px 20px;text-align:center;font-size:11px;color:#94a3b8;line-height:1.6">
+              ${footerNote}
+            </td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
 </body>
 </html>`;
 }
