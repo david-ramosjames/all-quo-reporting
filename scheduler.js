@@ -7,6 +7,7 @@ const {
   runMonthlyNewsletterInsightsReport,
   runMissedClientCallReport,
   runReviewIntelligenceReport,
+  runForAllFirms,
 } = require('./report');
 
 // Daily: previous calendar day — Daily Intake & Lead Report + Quo CSV (Slack + sheet).
@@ -65,7 +66,7 @@ cron.schedule(
     const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
     console.log(`\n[${ts}] Cron triggered — daily intake & lead report + Quo CSV...`);
     try {
-      await runDailyReport();
+      await runForAllFirms(runDailyReport);
     } catch (err) {
       console.error(`[${ts}] Daily report failed:`, err.message);
     }
@@ -79,7 +80,7 @@ cron.schedule(
     const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
     console.log(`\n[${ts}] Cron triggered — weekly client sentiment (7-day window)...`);
     try {
-      await runWeeklyClientSentimentReport();
+      await runForAllFirms(runWeeklyClientSentimentReport);
     } catch (err) {
       console.error(`[${ts}] Weekly sentiment failed:`, err.message);
     }
@@ -93,7 +94,7 @@ cron.schedule(
     const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
     console.log(`\n[${ts}] Cron triggered — monthly client newsletter content (30-day window)...`);
     try {
-      await runMonthlyNewsletterInsightsReport();
+      await runForAllFirms(runMonthlyNewsletterInsightsReport);
     } catch (err) {
       console.error(`[${ts}] Monthly newsletter job failed:`, err.message);
     }
@@ -107,7 +108,7 @@ cron.schedule(
     const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
     console.log(`\n[${ts}] Cron triggered — missed client call report (trailing 24h)...`);
     try {
-      await runMissedClientCallReport();
+      await runForAllFirms(runMissedClientCallReport);
     } catch (err) {
       console.error(`[${ts}] Missed client call report failed:`, err.message);
     }
@@ -121,7 +122,7 @@ cron.schedule(
     const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
     console.log(`\n[${ts}] Cron triggered — Review Intelligence (trailing 24h)...`);
     try {
-      await runReviewIntelligenceReport();
+      await runForAllFirms(runReviewIntelligenceReport);
     } catch (err) {
       console.error(`[${ts}] Review Intelligence report failed:`, err.message);
     }
@@ -201,14 +202,16 @@ if (process.env.DISABLE_MANUAL_TRIGGER_UI === 'true' || process.env.DISABLE_MANU
 } else {
   const { startManualTriggerServer } = require('./manualTriggers');
   const port = parseInt(process.env.PORT || '8787', 10);
+  // Manual triggers run per firm too. `options.firmId` (from the dashboard)
+  // scopes a run to one firm for testing; otherwise all active firms run.
   startManualTriggerServer({
     port,
     runners: {
-      daily: runDailyReport,
-      weekly: runWeeklyClientSentimentReport,
-      monthly: runMonthlyNewsletterInsightsReport,
-      missed: runMissedClientCallReport,
-      review: runReviewIntelligenceReport,
+      daily: (opts) => runForAllFirms(runDailyReport, opts),
+      weekly: (opts) => runForAllFirms(runWeeklyClientSentimentReport, opts),
+      monthly: (opts) => runForAllFirms(runMonthlyNewsletterInsightsReport, opts),
+      missed: (opts) => runForAllFirms(runMissedClientCallReport, opts),
+      review: (opts) => runForAllFirms(runReviewIntelligenceReport, opts),
     },
   });
 }

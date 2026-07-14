@@ -44,6 +44,30 @@ CREATE TABLE IF NOT EXISTS firm_settings (
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now()
 );
+-- Per-firm reporting config (added incrementally; ADD COLUMN IF NOT EXISTS is a
+-- safe self-migration on existing databases).
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS quo_api_key text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS quo_phone_numbers text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS quo_send_from text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS email_from text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS report_email_to text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS missed_calls_email_to text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS slack_bot_token text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS slack_channel text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS review_slack_channel text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS sheets_id text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS sheets_range text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS case_roster_id text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS case_roster_range text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS weekly_sentiment_sheet_id text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS weekly_sentiment_range text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS negative_sentiment_sheet_id text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS negative_sentiment_range text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS latest_sentiment_sheet_id text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS latest_sentiment_range text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS review_sheet_id text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS review_opportunities_sheet_id text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS active boolean DEFAULT true;
 CREATE TABLE IF NOT EXISTS review_requests (
   id uuid PRIMARY KEY,
   token text UNIQUE NOT NULL,
@@ -124,32 +148,45 @@ async function loadFirms() {
   return rows.map(mapRow);
 }
 
+/**
+ * Columns an upsert may set, beyond id/created_at/updated_at. On UPDATE we
+ * COALESCE(EXCLUDED, existing) so the contract is:
+ *   undefined/null → keep the stored value (used to preserve secrets left blank)
+ *   '' → clear the field
+ *   value → set it
+ */
+const FIRM_UPSERT_COLUMNS = [
+  'firm_name', 'review_domain', 'google_review_url', 'call_phone_number',
+  'text_phone_number', 'review_page_settings_json',
+  'quo_api_key', 'quo_phone_numbers', 'quo_send_from',
+  'email_from', 'report_email_to', 'missed_calls_email_to',
+  'slack_bot_token', 'slack_channel', 'review_slack_channel',
+  'sheets_id', 'sheets_range', 'case_roster_id', 'case_roster_range',
+  'weekly_sentiment_sheet_id', 'weekly_sentiment_range',
+  'negative_sentiment_sheet_id', 'negative_sentiment_range',
+  'latest_sentiment_sheet_id', 'latest_sentiment_range',
+  'review_sheet_id', 'review_opportunities_sheet_id', 'active',
+];
+
 async function upsertFirm(f) {
+  // id = $1, created_at = $2, then one param per FIRM_UPSERT_COLUMNS.
+  const cols = FIRM_UPSERT_COLUMNS;
+  const values = [f.id, f.created_at || null, ...cols.map((c) => (f[c] === undefined ? null : f[c]))];
+  const insertCols = ['id', 'created_at', ...cols, 'updated_at'];
+  const insertPlaceholders = ['$1', 'COALESCE($2, now())', ...cols.map((_, i) => `$${i + 3}`), 'now()'];
+  const updates = cols.map((c) => `${c}=COALESCE(EXCLUDED.${c}, firm_settings.${c})`).concat('updated_at=now()');
   await query(
-    `INSERT INTO firm_settings
-       (id, firm_name, review_domain, google_review_url, call_phone_number,
-        text_phone_number, review_page_settings_json, created_at, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7, COALESCE($8, now()), now())
-     ON CONFLICT (id) DO UPDATE SET
-       firm_name=EXCLUDED.firm_name,
-       review_domain=EXCLUDED.review_domain,
-       google_review_url=EXCLUDED.google_review_url,
-       call_phone_number=EXCLUDED.call_phone_number,
-       text_phone_number=EXCLUDED.text_phone_number,
-       review_page_settings_json=EXCLUDED.review_page_settings_json,
-       updated_at=now()`,
-    [
-      f.id,
-      f.firm_name || '',
-      f.review_domain || '',
-      f.google_review_url || '',
-      f.call_phone_number || '',
-      f.text_phone_number || '',
-      f.review_page_settings_json || '',
-      f.created_at || null,
-    ]
+    `INSERT INTO firm_settings (${insertCols.join(', ')})
+     VALUES (${insertPlaceholders.join(', ')})
+     ON CONFLICT (id) DO UPDATE SET ${updates.join(', ')}`,
+    values
   );
   return true;
+}
+
+async function deleteFirm(id) {
+  const { rowCount } = await query('DELETE FROM firm_settings WHERE id=$1', [String(id)]);
+  return rowCount > 0;
 }
 
 // ── review_requests ─────────────────────────────────────────────────────────
@@ -316,6 +353,7 @@ module.exports = {
   query,
   loadFirms,
   upsertFirm,
+  deleteFirm,
   createRequest,
   getByToken,
   findByOpportunityId,

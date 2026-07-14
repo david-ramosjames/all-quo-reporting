@@ -9,6 +9,7 @@ const { renderFaqPage } = require('./faqPage');
 const firmStore = require('./firmStore');
 const reviewRequests = require('./reviewRequests');
 const { renderAnalyticsPage } = require('./analyticsPage');
+const { parseFirmForm, renderFirmsListPage, renderFirmEditorPage } = require('./firmsPage');
 const quoSend = require('./quoSend');
 const slackEvents = require('./slackEvents');
 
@@ -198,7 +199,7 @@ function buildIndexHtml(message, email) {
       <button type="button" data-job="missed">Run missed client call report (trailing 24h · clients only)</button>
       <button type="button" data-job="review">Run Review Intelligence (trailing 24h · Google review candidates → Slack)</button>
     </div>
-    <p class="hint">Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a> · what does this all do? <a href="/faq" style="color:#60a5fa">/faq</a></p>
+    <p class="hint">Firms &amp; per-firm config: <a href="/review/firms" style="color:#60a5fa">/review/firms</a> · Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a> · what does this all do? <a href="/faq" style="color:#60a5fa">/faq</a></p>
     <p class="hint">Jobs run in the background so the browser does not time out. Only one job at a time.</p>
     <div id="status"></div>
   </div>
@@ -522,6 +523,68 @@ function startManualTriggerServer(opts) {
         return;
       }
 
+      // ── Firm management (per-firm reporting config) — Google-gated ──────────
+      if (req.method === 'GET' && path === '/review/firms') {
+        if (!authOn) { sendHtml(res, 200, buildLockedHtml('Firm management')); return; }
+        const session = reviewAuth.getSession(req);
+        if (!session) { reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '', '/review/firms'); return; }
+        const firms = await firmStore.loadFirms();
+        sendHtml(res, 200, renderFirmsListPage(firms, {
+          email: session.email,
+          dbEnabled: firmStore.canManageFirms(),
+        }));
+        return;
+      }
+
+      if (req.method === 'GET' && path === '/review/firms/edit') {
+        if (!authOn) { sendHtml(res, 200, buildLockedHtml('Firm editor')); return; }
+        const session = reviewAuth.getSession(req);
+        if (!session) { reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '', '/review/firms'); return; }
+        const id = url.searchParams.get('id') || 'new';
+        const firm = id && id !== 'new' ? await firmStore.getFirmById(id) : null;
+        if (id !== 'new' && !firm) {
+          sendHtml(res, 404, renderFirmsListPage(await firmStore.loadFirms(), {
+            email: session.email, message: `Firm "${id}" not found.`, isError: true, dbEnabled: firmStore.canManageFirms(),
+          }));
+          return;
+        }
+        sendHtml(res, 200, renderFirmEditorPage(firm, { email: session.email }));
+        return;
+      }
+
+      if (req.method === 'POST' && path === '/review/firms/save') {
+        if (!authOn) { sendJson(res, 503, { error: 'Locked.' }); return; }
+        const session = reviewAuth.getSession(req);
+        if (!session) { sendJson(res, 401, { error: 'Sign in required.' }); return; }
+        let form;
+        try { form = await parseFormBody(req); } catch { sendJson(res, 400, { error: 'Bad form.' }); return; }
+        const id = String(form.id || '').trim();
+        const patch = parseFirmForm(form);
+        const result = id
+          ? await firmStore.saveFirm(id, patch)
+          : await firmStore.createFirm(patch);
+        const firms = await firmStore.loadFirms();
+        const msg = result.ok
+          ? `Saved firm "${patch.firm_name || result.id || id}".`
+          : `Save failed: ${result.error || 'unknown error'}`;
+        sendHtml(res, result.ok ? 200 : 500, renderFirmsListPage(firms, {
+          email: session.email, message: msg, isError: !result.ok, dbEnabled: firmStore.canManageFirms(),
+        }));
+        return;
+      }
+
+      if (req.method === 'POST' && path === '/review/firms/delete') {
+        if (!authOn) { sendJson(res, 503, { error: 'Locked.' }); return; }
+        const session = reviewAuth.getSession(req);
+        if (!session) { sendJson(res, 401, { error: 'Sign in required.' }); return; }
+        let form;
+        try { form = await parseFormBody(req); } catch { sendJson(res, 400, { error: 'Bad form.' }); return; }
+        const result = await firmStore.deleteFirm(String(form.id || '').trim());
+        if (!result.ok) { sendJson(res, 400, { error: result.error || 'Delete failed.' }); return; }
+        sendJson(res, 200, { ok: true });
+        return;
+      }
+
       // Review-link analytics dashboard — gated by the same Google sign-in.
       if (req.method === 'GET' && path === '/review/analytics') {
         if (!authOn) {
@@ -573,11 +636,12 @@ function startManualTriggerServer(opts) {
             sendJson(res, 409, { error: 'This request was cancelled and can’t be sent.' });
             return;
           }
-          if (!quoSend.isConfigured()) {
-            sendJson(res, 503, { error: 'Quo send not configured (QUO_API_KEY + QUO_SEND_FROM).' });
+          const firm = (await firmStore.getFirmById(reqRec.firm_id)) || (await firmStore.getDefaultFirm());
+          const fctx = firmStore.reportConfigForFirm(firm);
+          if (!quoSend.isConfigured({ apiKey: fctx.quoApiKey, from: fctx.quoSendFrom })) {
+            sendJson(res, 503, { error: 'Quo send not configured for this firm (Quo API key + send-from line).' });
             return;
           }
-          const firm = (await firmStore.getFirmById(reqRec.firm_id)) || (await firmStore.getDefaultFirm());
           const cfg = firmStore.landingConfigForFirm(firm);
           const link = `${publicBaseUrl(req, firm)}/r/${reqRec.token}`;
           const text = quoSend.buildReviewSmsText({
@@ -586,7 +650,7 @@ function startManualTriggerServer(opts) {
             link,
             template: cfg.smsTemplate,
           });
-          await quoSend.sendSms({ to: reqRec.client_phone, content: text });
+          await quoSend.sendSms({ to: reqRec.client_phone, content: text, apiKey: fctx.quoApiKey, from: fctx.quoSendFrom });
           await reviewRequests.markSent(reqRec.id);
           sendJson(res, 200, { ok: true, sentTo: reqRec.client_phone, link });
         } catch (err) {
@@ -637,8 +701,13 @@ function startManualTriggerServer(opts) {
         }
         const to = String(form.to || '').trim();
         const message = String(form.message || '').trim();
-        if (!quoSend.isConfigured()) {
-          sendJson(res, 503, { error: 'Quo send not configured (QUO_API_KEY + QUO_SEND_FROM).' });
+        // Optional firmId picks which firm's Quo line to send the test from.
+        const oneOffFirm = form.firmId
+          ? (await firmStore.getFirmById(form.firmId)) || (await firmStore.getDefaultFirm())
+          : await firmStore.getDefaultFirm();
+        const oneOffCtx = firmStore.reportConfigForFirm(oneOffFirm);
+        if (!quoSend.isConfigured({ apiKey: oneOffCtx.quoApiKey, from: oneOffCtx.quoSendFrom })) {
+          sendJson(res, 503, { error: 'Quo send not configured for this firm (Quo API key + send-from line).' });
           return;
         }
         if (!quoSend.toE164(to)) {
@@ -654,13 +723,12 @@ function startManualTriggerServer(opts) {
           // real review text. {link} points at a demo review page (any unknown
           // token renders the default landing page), using the branded base URL
           // when configured and falling back to the request host otherwise.
-          const firm = await firmStore.getDefaultFirm();
-          const previewLink = `${publicBaseUrl(req, firm)}/r/preview`;
+          const previewLink = `${publicBaseUrl(req, oneOffFirm)}/r/preview`;
           const content = message
             .replace(/\{first\}/g, 'there')
-            .replace(/\{firm\}/g, (firm.firm_name || 'our firm').trim())
+            .replace(/\{firm\}/g, (oneOffFirm.firm_name || 'our firm').trim())
             .replace(/\{link\}/g, previewLink);
-          const r = await quoSend.sendSms({ to, content });
+          const r = await quoSend.sendSms({ to, content, apiKey: oneOffCtx.quoApiKey, from: oneOffCtx.quoSendFrom });
           sendJson(res, 200, { ok: true, sentTo: quoSend.toE164(to), id: r.id });
         } catch (err) {
           sendJson(res, 502, { error: err.message });
@@ -727,6 +795,10 @@ function startManualTriggerServer(opts) {
           return;
         }
         const options = {};
+        // Optional: scope a manual run to a single firm (else all active firms).
+        if (rawOptions.firmId && String(rawOptions.firmId).trim()) {
+          options.firmId = String(rawOptions.firmId).trim();
+        }
         if (job === 'weekly') {
           const days = parseInt(rawOptions.days, 10);
           if (!Number.isFinite(days) || days < 1 || days > 180) {

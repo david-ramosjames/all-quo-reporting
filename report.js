@@ -153,6 +153,49 @@ const EMAIL_CONFIGURED = Boolean(
   process.env.GOOGLE_REFRESH_TOKEN,
 );
 
+// ── Per-firm reporting context ────────────────────────────────────────────────
+// Each run executes inside a firm context so the Quo key, phone lines, email
+// recipients, Slack channels, company name, and sheet IDs come from that firm.
+// AsyncLocalStorage carries it safely through awaits and across concurrent job
+// runs (e.g. the daily + missed crons both fire at 07:00). When no context is
+// active, firmCtx() resolves to the env-derived defaults — identical to before.
+const { AsyncLocalStorage } = require('async_hooks');
+const firmCtxStore = new AsyncLocalStorage();
+function firmCtx() {
+  return firmCtxStore.getStore() || firmStore.reportConfigForFirm(null);
+}
+
+/**
+ * Run a job once per active firm, each inside its own firm context. Per-firm
+ * errors are caught so one firm can't abort the others. `opts.firmId` scopes the
+ * run to a single firm (used by the manual trigger for testing).
+ */
+async function runForAllFirms(jobFn, opts = {}) {
+  const firms = await firmStore.loadActiveFirms();
+  const list = opts.firmId ? firms.filter((f) => f.id === opts.firmId) : firms;
+  if (opts.firmId && !list.length) {
+    console.warn(`  No active firm with id "${opts.firmId}" — nothing to run.`);
+    return { firms: [], results: [] };
+  }
+  const results = [];
+  for (const firm of list) {
+    const ctx = firmStore.reportConfigForFirm(firm);
+    if (list.length > 1) console.log(`\n${'━'.repeat(52)}\n▶ Firm: ${ctx.firmName} (${ctx.id})\n${'━'.repeat(52)}`);
+    // eslint-disable-next-line no-await-in-loop
+    const r = await firmCtxStore.run(ctx, async () => {
+      try {
+        const out = await jobFn(opts);
+        return { firmId: ctx.id, ok: true, result: out };
+      } catch (err) {
+        console.error(`  [firm ${ctx.id}] job failed: ${err.message}`);
+        return { firmId: ctx.id, ok: false, error: err.message };
+      }
+    });
+    results.push(r);
+  }
+  return { firms: list.map((f) => f.id), results };
+}
+
 // ── Date helpers ──────────────────────────────────────────────────────────────
 
 /**
@@ -618,7 +661,7 @@ async function analyzeWeeklyClientBundleWithLlm(clientKey, items, rangeLabel, at
   const phone = (items.find((i) => i.phone)?.phone || '').trim();
   const bundleMd = buildCommunicationBundleMarkdown(items);
   const prompt = buildWeeklyClientBundleSentimentPrompt({
-    COMPANY_NAME,
+    COMPANY_NAME: firmCtx().firmName,
     clientName: clientKey,
     phone,
     rangeLabel,
@@ -766,7 +809,7 @@ async function analyzeMonthlyBatchCalls(calls, transcriptMaxChars, attempt = 1) 
     link: call.link,
     transcriptMaxChars,
   }));
-  const prompt = buildMonthlyBatchExtractionPrompt({ COMPANY_NAME, items });
+  const prompt = buildMonthlyBatchExtractionPrompt({ COMPANY_NAME: firmCtx().firmName, items });
   const extraRetry =
     attempt > 1
       ? `\n\nReply with only one JSON object: { "extractions": [ ... ] } with extractions.length === ${calls.length}, in Item order. Each element must include all seven keys as arrays of strings (use [] when empty).`
@@ -817,7 +860,7 @@ async function analyzeMonthlyBatchCalls(calls, transcriptMaxChars, attempt = 1) 
 
 async function analyzeOneTranscriptMonthly(call, callSegment, attempt = 1) {
   const prompt = buildMonthlyTranscriptExtractionPrompt({
-    COMPANY_NAME,
+    COMPANY_NAME: firmCtx().firmName,
     callSegment,
     line: call.line,
     timestamp: formatTimestamp(call.timestamp),
@@ -933,7 +976,7 @@ async function generateMonthlyNewsletterEmailMarkdown(
   rawMd
 ) {
   const prompt = buildMonthlyNewsletterAggregationPrompt({
-    COMPANY_NAME,
+    COMPANY_NAME: firmCtx().firmName,
     rangeLabel,
     transcriptCount,
     clientTranscriptCount: clientCount,
@@ -958,7 +1001,7 @@ function buildMonthlyInsightsEmailHtml(markdownBody, rangeLabel) {
 <body style="font-family:Georgia,serif;max-width:700px;margin:0 auto;padding:24px;color:#333;background:#f5f5f5">
   <div style="background:#1a1a2e;color:#fff;padding:24px 32px;border-radius:8px 8px 0 0">
     <h1 style="margin:0;font-size:20px;letter-spacing:.3px">Monthly client newsletter content ideas</h1>
-    <p style="margin:6px 0 0;opacity:.85;font-size:13px">${COMPANY_NAME} · ${rangeLabel}</p>
+    <p style="margin:6px 0 0;opacity:.85;font-size:13px">${firmCtx().firmName} · ${rangeLabel}</p>
   </div>
   <div style="background:#fff;padding:16px 32px 32px;border:1px solid #e0e0e0;border-top:3px solid #0d9488;border-radius:0 0 8px 8px;line-height:1.75">
     ${inner}
@@ -1487,7 +1530,7 @@ function buildWeeklyNegativeSentimentEmailHtml(rangeLabel, rollups) {
 <body style="font-family:${bodyFont};max-width:700px;margin:0 auto;padding:24px;color:#27272a;background:#f5f5f5">
   <div style="background:#1a1a2e;color:#fff;padding:24px 32px;border-radius:8px 8px 0 0">
     <h1 style="margin:0;font-size:20px;letter-spacing:.3px">Weekly client negative sentiment</h1>
-    <p style="margin:6px 0 0;opacity:.85;font-size:13px">${COMPANY_NAME} · ${escapeHtml(rangeLabel)}</p>
+    <p style="margin:6px 0 0;opacity:.85;font-size:13px">${firmCtx().firmName} · ${escapeHtml(rangeLabel)}</p>
   </div>
   <div style="background:#fff;padding:16px 32px 32px;border:1px solid #e0e0e0;border-top:3px solid #7c3aed;border-radius:0 0 8px 8px;line-height:1.75;font-family:${bodyFont};font-size:14px">
     ${inner}
@@ -1567,7 +1610,7 @@ async function generateDailyLeadReportAnalysis(
   sheetRowCount
 ) {
   const prompt = generateDailyLeadReportPrompt({
-    COMPANY_NAME,
+    COMPANY_NAME: firmCtx().firmName,
     dateLabel: formatDateLabel(createdAfter),
     dayOfWeek: formatDayOfWeek(createdAfter),
     reportRangeLabel,
@@ -1735,7 +1778,7 @@ function buildEmailHtml(analysis, stats, dateLabel) {
         <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="width:600px;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937">
           <tr>
             <td style="background:#0A1C40;padding:26px 30px;border-radius:12px 12px 0 0">
-              <div style="font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#5eead4">${COMPANY_NAME}</div>
+              <div style="font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#5eead4">${firmCtx().firmName}</div>
               <h1 style="margin:6px 0 0;font-size:23px;font-weight:800;color:#ffffff;letter-spacing:.2px">📌 ${title}</h1>
               <p style="margin:6px 0 0;font-size:13px;color:#a9b8d6">${dateLabel}</p>
             </td>
@@ -1766,10 +1809,10 @@ function buildEmailHtml(analysis, stats, dateLabel) {
 </html>`;
 }
 
-async function sendEmail({ htmlBody, plainText, subject, attachments = [], to }) {
-  const recipients = (Array.isArray(to) && to.length ? to : EMAIL_TO).join(', ');
+async function sendEmail({ htmlBody, plainText, subject, attachments = [], to, from }) {
+  const recipients = (Array.isArray(to) && to.length ? to : firmCtx().emailTo).join(', ');
   const mail = {
-    from: EMAIL_FROM,
+    from: from || firmCtx().emailFrom || EMAIL_FROM,
     to: recipients,
     subject,
     text: plainText,
@@ -1819,6 +1862,8 @@ async function runMonthlyNewsletterInsightsReport() {
 
   console.log('\n[1/4] Fetching Quo calls (30-day window, summary-first)...\n');
   const { callData, totalFetched, totalSaved } = await runExport({
+    apiKey: firmCtx().quoApiKey,
+    phoneNumbersFilter: firmCtx().quoPhoneNumbers,
     createdAfter,
     createdBefore,
     monthlyNewsletter: true,
@@ -1923,10 +1968,10 @@ async function runMonthlyNewsletterInsightsReport() {
   }
   console.log('  Done.');
 
-  const subject = 'Monthly client newsletter content ideas (from call themes)';
+  const subject = `${firmCtx().firmName} — Monthly client newsletter content ideas (from call themes)`;
   const html = buildMonthlyInsightsEmailHtml(bodyMd, rangeLabel);
 
-  if (!EMAIL_TO.length || !EMAIL_CONFIGURED) {
+  if (!firmCtx().emailTo.length || !EMAIL_CONFIGURED) {
     console.log('\n  Email not configured — printing monthly insights body:\n');
     console.log(bodyMd);
   } else {
@@ -1936,7 +1981,7 @@ async function runMonthlyNewsletterInsightsReport() {
       subject,
       attachments: [],
     });
-    console.log(`\n  Sent monthly insights to: ${EMAIL_TO.join(', ')}`);
+    console.log(`\n  Sent monthly insights to: ${firmCtx().emailTo.join(', ')}`);
   }
 
   console.log(`\n${'═'.repeat(52)}`);
@@ -2010,11 +2055,11 @@ function rollupToWeeklySheetRow(r, createdAfter, createdBefore, rangeLabel, publ
 }
 
 function weeklyNegativeSnapshotSpreadsheetId() {
-  return GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_SHEET_ID || GOOGLE_WEEKLY_SENTIMENT_SHEET_ID;
+  return firmCtx().sheets.negativeSentimentId || firmCtx().sheets.weeklySentimentId;
 }
 
 function weeklyNegativeSnapshotRangeInput() {
-  return GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_RANGE || 'Negative Sentiment';
+  return firmCtx().sheets.negativeSentimentRange || 'Negative Sentiment';
 }
 
 function rollupToNegativeSnapshotSheetRow(r, cohortKey, runCreatedAfter, runCreatedBefore, runRangeLabel, publishedAtLocal) {
@@ -2030,11 +2075,11 @@ function rollupToNegativeSnapshotSheetRow(r, cohortKey, runCreatedAfter, runCrea
 }
 
 function latestSentimentSpreadsheetId() {
-  return GOOGLE_LATEST_SENTIMENT_SHEET_ID || GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_SHEET_ID || GOOGLE_WEEKLY_SENTIMENT_SHEET_ID;
+  return firmCtx().sheets.latestSentimentId || firmCtx().sheets.negativeSentimentId || firmCtx().sheets.weeklySentimentId;
 }
 
 function latestSentimentRangeInput() {
-  return GOOGLE_LATEST_SENTIMENT_RANGE || 'All Latest Sentiment';
+  return firmCtx().sheets.latestSentimentRange || 'All Latest Sentiment';
 }
 
 /**
@@ -2277,10 +2322,11 @@ async function loadWeeklyNegativeCarryoverRollups({
     process.env.GOOGLE_CLIENT_ID &&
     process.env.GOOGLE_CLIENT_SECRET &&
     process.env.GOOGLE_REFRESH_TOKEN;
-  if (!GOOGLE_WEEKLY_SENTIMENT_SHEET_ID || !hasOAuth) return [];
+  const weeklySentimentId = firmCtx().sheets.weeklySentimentId;
+  if (!weeklySentimentId || !hasOAuth) return [];
 
-  const rangeForSheets = normalizeWeeklySentimentSheetRange(GOOGLE_WEEKLY_SENTIMENT_RANGE);
-  const appendAnchorA1 = await resolveAppendAnchorA1(GOOGLE_WEEKLY_SENTIMENT_SHEET_ID, rangeForSheets);
+  const rangeForSheets = normalizeWeeklySentimentSheetRange(firmCtx().sheets.weeklySentimentRange);
+  const appendAnchorA1 = await resolveAppendAnchorA1(weeklySentimentId, rangeForSheets);
   const prefix = appendAnchorA1.slice(0, Math.max(0, appendAnchorA1.lastIndexOf('!')));
   const lastCol = weeklySheetColLetter0Based(WEEKLY_SENTIMENT_SHEET_HEADER.length - 1);
   const scanRows = Math.min(
@@ -2288,7 +2334,7 @@ async function loadWeeklyNegativeCarryoverRollups({
     Math.max(500, parseInt(process.env.GOOGLE_WEEKLY_SENTIMENT_SCAN_MAX_ROWS || '8000', 10) || 8000)
   );
   const existing = await fetchSheetData(
-    GOOGLE_WEEKLY_SENTIMENT_SHEET_ID,
+    weeklySentimentId,
     `${prefix}!A2:${lastCol}${scanRows + 1}`
   );
 
@@ -2362,6 +2408,8 @@ async function runWeeklyClientSentimentReport(opts = {}) {
 
   console.log(`\n[1/4] Fetching Quo calls + SMS (${days}-day window)...\n`);
   const { callData, totalFetched, totalSaved } = await runExport({
+    apiKey: firmCtx().quoApiKey,
+    phoneNumbersFilter: firmCtx().quoPhoneNumbers,
     createdAfter,
     createdBefore,
     weeklyCommunications: true,
@@ -2409,7 +2457,7 @@ async function runWeeklyClientSentimentReport(opts = {}) {
   console.log('\n[4/4] Building weekly email (tables only)...');
   const rollups = buildAllClientRollups(rows);
 
-  if (GOOGLE_SHEETS_CASE_ROSTER_ID) {
+  if (firmCtx().sheets.caseRosterId) {
     const hasOAuth =
       process.env.GOOGLE_CLIENT_ID &&
       process.env.GOOGLE_CLIENT_SECRET &&
@@ -2417,8 +2465,8 @@ async function runWeeklyClientSentimentReport(opts = {}) {
     if (hasOAuth) {
       try {
         const rosterRows = await fetchSheetData(
-          GOOGLE_SHEETS_CASE_ROSTER_ID,
-          GOOGLE_SHEETS_CASE_ROSTER_RANGE
+          firmCtx().sheets.caseRosterId,
+          firmCtx().sheets.caseRosterRange
         );
         const rosterMap = rawRowsToCaseRosterMap(rosterRows);
         enrichRollupsWithCaseRoster(rollups, rosterMap);
@@ -2428,16 +2476,16 @@ async function runWeeklyClientSentimentReport(opts = {}) {
       }
     } else {
       console.warn(
-        '  GOOGLE_SHEETS_CASE_ROSTER_ID is set but Google OAuth env vars are incomplete — attorney/paralegal columns omitted.'
+        '  Case roster sheet is set but Google OAuth env vars are incomplete — attorney/paralegal columns omitted.'
       );
     }
   }
 
-  if (!onlyLatest && GOOGLE_WEEKLY_SENTIMENT_SHEET_ID) {
+  if (!onlyLatest && firmCtx().sheets.weeklySentimentId) {
     try {
       await syncWeeklySentimentToGoogleSheets({
-        spreadsheetId: GOOGLE_WEEKLY_SENTIMENT_SHEET_ID,
-        rangeInput: GOOGLE_WEEKLY_SENTIMENT_RANGE,
+        spreadsheetId: firmCtx().sheets.weeklySentimentId,
+        rangeInput: firmCtx().sheets.weeklySentimentRange,
         createdAfter,
         createdBefore,
         rangeLabel,
@@ -2449,7 +2497,7 @@ async function runWeeklyClientSentimentReport(opts = {}) {
   }
 
   let carryoverNegatives = [];
-  if (!onlyLatest && GOOGLE_WEEKLY_SENTIMENT_SHEET_ID && OPENAI_API_KEY) {
+  if (!onlyLatest && firmCtx().sheets.weeklySentimentId && OPENAI_API_KEY) {
     try {
       carryoverNegatives = await loadWeeklyNegativeCarryoverRollups({
         createdAfter,
@@ -2495,10 +2543,10 @@ async function runWeeklyClientSentimentReport(opts = {}) {
   if (onlyLatest) {
     console.log('\n  Latest-only mode: skipping email send.');
   } else {
-    const subject = `Weekly Client Negative Sentiment - ${rangeLabel}`;
+    const subject = `${firmCtx().firmName} — Weekly Client Negative Sentiment - ${rangeLabel}`;
     const html = buildWeeklyNegativeSentimentEmailHtml(rangeLabel, emailRollups);
 
-    if (!EMAIL_TO.length || !EMAIL_CONFIGURED) {
+    if (!firmCtx().emailTo.length || !EMAIL_CONFIGURED) {
       console.log('\n  Email not configured — printing weekly sentiment body:\n');
       console.log(bodyMd);
     } else {
@@ -2508,7 +2556,7 @@ async function runWeeklyClientSentimentReport(opts = {}) {
         subject,
         attachments: [],
       });
-      console.log(`\n  Sent weekly sentiment report to: ${EMAIL_TO.join(', ')}`);
+      console.log(`\n  Sent weekly sentiment report to: ${firmCtx().emailTo.join(', ')}`);
     }
   }
 
@@ -2638,16 +2686,20 @@ async function runMissedClientCallReport() {
 
   console.log('\n[1/3] Fetching Quo calls (all lines, all statuses, trailing 24h)...');
   const { callData } = await runExport({
+    apiKey: firmCtx().quoApiKey,
     createdAfter,
     createdBefore,
     weeklyCommunications: true,
     includeMessages: false,
     fetchTranscriptForWeekly: false,
-    // Pull every line in the workspace — resolving calls often happen on a
+    // Pull every line the firm owns — resolving calls often happen on a
     // different line (e.g. miss on RJL Outbound, callback via RJL Main Line,
-    // client retry into RJL Transfers). Filtering to QUO_PHONE_NUMBERS here
-    // would drop those and produce false-positive flags.
-    phoneNumbersFilter: [],
+    // client retry into RJL Transfers). An empty filter = all lines in this
+    // firm's Quo workspace. For the env-only default firm we keep [] (all
+    // lines) exactly as before; a configured firm scopes to its own lines so
+    // firms sharing one Quo key don't cross-contaminate (list ALL of a firm's
+    // lines in its phone-numbers field for accurate resolution).
+    phoneNumbersFilter: firmCtx().synthetic ? [] : firmCtx().quoPhoneNumbers,
   });
 
   // Group EVERY call in the window by phone last-10 first, so resolving calls
@@ -2660,7 +2712,7 @@ async function runMissedClientCallReport() {
 
   /** @type {Map<string, { leadAttorney?: string, paralegal?: string }>} */
   let rosterMap = new Map();
-  if (GOOGLE_SHEETS_CASE_ROSTER_ID && allCalls.length) {
+  if (firmCtx().sheets.caseRosterId && allCalls.length) {
     const hasOAuth =
       process.env.GOOGLE_CLIENT_ID &&
       process.env.GOOGLE_CLIENT_SECRET &&
@@ -2668,8 +2720,8 @@ async function runMissedClientCallReport() {
     if (hasOAuth) {
       try {
         const rosterRows = await fetchSheetData(
-          GOOGLE_SHEETS_CASE_ROSTER_ID,
-          GOOGLE_SHEETS_CASE_ROSTER_RANGE
+          firmCtx().sheets.caseRosterId,
+          firmCtx().sheets.caseRosterRange
         );
         rosterMap = rawRowsToCaseRosterMap(rosterRows);
         console.log(`  Case roster sheet: ${rosterMap.size} row(s) indexed for attorney/paralegal.`);
@@ -2678,7 +2730,7 @@ async function runMissedClientCallReport() {
       }
     } else {
       console.warn(
-        '  GOOGLE_SHEETS_CASE_ROSTER_ID is set but Google OAuth env vars are incomplete — attorney/paralegal columns omitted.'
+        '  Case roster sheet is set but Google OAuth env vars are incomplete — attorney/paralegal columns omitted.'
       );
     }
   }
@@ -2753,14 +2805,14 @@ async function runMissedClientCallReport() {
   }
 
   const subject = outstanding.length
-    ? `Missed Client Call Report — ${outstanding.length} to call back`
-    : 'Missed Client Call Report — all clear';
+    ? `${firmCtx().firmName} — Missed Client Call Report — ${outstanding.length} to call back`
+    : `${firmCtx().firmName} — Missed Client Call Report — all clear`;
   const html = buildMissedClientCallEmailHtml(rangeLabel, outstanding);
   const plainText = outstanding.length
     ? `Missed Client Call Report\nWindow: ${rangeLabel}\n\n${buildMissedClientCallTable(outstanding)}\n`
     : `Missed Client Call Report\nWindow: ${rangeLabel}\n\nNo outstanding missed client calls in the last 24 hours.\n`;
 
-  const recipients = MISSED_CLIENT_CALLS_EMAIL_TO.length ? MISSED_CLIENT_CALLS_EMAIL_TO : EMAIL_TO;
+  const recipients = firmCtx().missedEmailTo.length ? firmCtx().missedEmailTo : firmCtx().emailTo;
   if (!recipients.length || !EMAIL_CONFIGURED) {
     console.log('\n  Email not configured (set MISSED_CLIENT_CALLS_EMAIL_TO or EMAIL_TO + Gmail OAuth) — printing report:\n');
     console.log(plainText);
@@ -2853,7 +2905,7 @@ async function analyzeReviewOpportunityWithLlm(clientKey, items, rangeLabel, sen
   const phone = (items.find((i) => i.phone)?.phone || '').trim();
   const bundleMd = buildCommunicationBundleMarkdown(items);
   const prompt = buildReviewOpportunityPrompt({
-    COMPANY_NAME,
+    COMPANY_NAME: firmCtx().firmName,
     clientName: clientKey,
     caseId,
     phone,
@@ -2990,6 +3042,8 @@ async function runReviewIntelligenceReport() {
 
   console.log(`\n[1/5] Fetching Quo calls + SMS (${REVIEW_JOURNEY_DAYS}-day journey window)...\n`);
   const { callData } = await runExport({
+    apiKey: firmCtx().quoApiKey,
+    phoneNumbersFilter: firmCtx().quoPhoneNumbers,
     createdAfter,
     createdBefore,
     weeklyCommunications: true,
@@ -3100,7 +3154,7 @@ async function runReviewIntelligenceReport() {
 
   let firm = null;
   try {
-    firm = await firmStore.getDefaultFirm();
+    firm = (await firmStore.getFirmById(firmCtx().id)) || (await firmStore.getDefaultFirm());
   } catch { /* fall back to no firm */ }
   const publicBase = reviewPublicBase(firm);
   const requestsOn = reviewRequests.isConfigured();
@@ -3131,7 +3185,7 @@ async function runReviewIntelligenceReport() {
     if (requestsOn && surfaced.has(o)) {
       try {
         const rr = await reviewRequests.createReviewRequest({
-          firmId: firm?.id || '',
+          firmId: firmCtx().id,
           caseId: o.caseId,
           clientName: o.clientName,
           clientFirstName: o.clientName.split(/\s+/)[0] || '',
@@ -3151,8 +3205,10 @@ async function runReviewIntelligenceReport() {
     }
   }
 
+  const slackToken = firmCtx().slackBotToken;
+  const reviewChannel = firmCtx().reviewSlackChannel;
   console.log(
-    `\n[5/5] Posting daily Slack report to #${REVIEW_SLACK_CHANNEL} (${reportItems.length} shown; ${disqualifiedCount} disqualified)...`
+    `\n[5/5] Posting daily Slack report to #${reviewChannel} (${reportItems.length} shown; ${disqualifiedCount} disqualified)...`
   );
 
   const meta = {
@@ -3165,7 +3221,7 @@ async function runReviewIntelligenceReport() {
     canApprove: requestsOn && quoSend.isConfigured(),
   };
 
-  if (!SLACK_BOT_TOKEN) {
+  if (!slackToken) {
     console.log('  Slack not configured (SLACK_BOT_TOKEN) — printing report:\n');
     const intro = reportItems.length ? buildReviewIntroMessage(meta) : buildReviewEmptyMessage(meta);
     console.log(intro.text);
@@ -3173,22 +3229,22 @@ async function runReviewIntelligenceReport() {
   } else {
     try {
       const intro = reportItems.length ? buildReviewIntroMessage(meta) : buildReviewEmptyMessage(meta);
-      await postSlackMessage({ token: SLACK_BOT_TOKEN, channel: REVIEW_SLACK_CHANNEL, text: intro.text, blocks: intro.blocks });
+      await postSlackMessage({ token: slackToken, channel: reviewChannel, text: intro.text, blocks: intro.blocks });
 
       // One message per candidate → its ts maps back to the request for ✅ approval.
       for (let i = 0; i < reportItems.length; i++) {
         const o = reportItems[i];
         const msg = buildReviewCandidateMessage(o, i);
-        const posted = await postSlackMessage({ token: SLACK_BOT_TOKEN, channel: REVIEW_SLACK_CHANNEL, text: msg.text, blocks: msg.blocks });
+        const posted = await postSlackMessage({ token: slackToken, channel: reviewChannel, text: msg.text, blocks: msg.blocks });
         if (o.reviewRequestId && posted?.ts) {
           try {
-            await reviewRequests.setSlackMessage(o.reviewRequestId, posted.channel || REVIEW_SLACK_CHANNEL, posted.ts);
+            await reviewRequests.setSlackMessage(o.reviewRequestId, posted.channel || reviewChannel, posted.ts);
           } catch (err) {
             console.warn(`  Could not map Slack message for ${o.clientName}: ${err.message}`);
           }
         }
       }
-      console.log(`  Posted intro + ${reportItems.length} candidate message(s) to #${REVIEW_SLACK_CHANNEL}.`);
+      console.log(`  Posted intro + ${reportItems.length} candidate message(s) to #${reviewChannel}.`);
     } catch (err) {
       console.warn(`  Slack post failed: ${err.message}`);
     }
@@ -3222,6 +3278,8 @@ async function runDailyReport() {
   // 1. Fetch calls (same calendar window as Slack)
   console.log('\n[1/6] Fetching calls...\n');
   const { csvLines, callData, totalFetched, totalSaved } = await runExport({
+    apiKey: firmCtx().quoApiKey,
+    phoneNumbersFilter: firmCtx().quoPhoneNumbers,
     createdAfter,
     createdBefore,
   });
@@ -3244,13 +3302,15 @@ async function runDailyReport() {
   console.log(`  ${csvFilename} (${totalFetched} calls fetched, ${totalSaved} transcripts)`);
 
   // 3. Slack — full day, all pages, no message cap; optional threads
-  console.log(`\n[3/6] Fetching #${SLACK_CHANNEL} (same window as calls; threads=${slackThreads})...`);
+  const dailySlackToken = firmCtx().slackBotToken;
+  const dailySlackChannel = firmCtx().slackChannel;
+  console.log(`\n[3/6] Fetching #${dailySlackChannel} (same window as calls; threads=${slackThreads})...`);
   let slackText = '(Slack not configured — set SLACK_BOT_TOKEN to enable.)';
-  if (SLACK_BOT_TOKEN) {
+  if (dailySlackToken) {
     try {
       const slackMessages = await fetchSlackMessages(
-        SLACK_BOT_TOKEN,
-        SLACK_CHANNEL,
+        dailySlackToken,
+        dailySlackChannel,
         createdAfter,
         createdBefore,
         { includeThreads: slackThreads }
@@ -3269,11 +3329,11 @@ async function runDailyReport() {
   // 4. Google Sheets — system of record
   console.log('\n[4/6] Fetching lead pipeline from Google Sheets...');
   let sheetText = '(Google Sheets not configured — set GOOGLE_SHEETS_ID and OAuth; run setup-sheets-auth.js.)';
-  if (GOOGLE_SHEETS_ID) {
+  if (firmCtx().sheets.sheetsId) {
     try {
       const { text, totalRows } = await getLeadPipelineText(
-        GOOGLE_SHEETS_ID,
-        GOOGLE_SHEETS_RANGE,
+        firmCtx().sheets.sheetsId,
+        firmCtx().sheets.sheetsRange,
         undefined,
         { callData, slackText }
       );
@@ -3310,12 +3370,12 @@ async function runDailyReport() {
 
   // 6. Email — Daily Intake & Lead Report + Quo CSV (yesterday)
   console.log('\n[6/6] Sending Daily Intake & Lead Report email (with Quo CSV)...');
-  if (!EMAIL_TO.length || !EMAIL_CONFIGURED) {
+  if (!firmCtx().emailTo.length || !EMAIL_CONFIGURED) {
     console.log('  Email not configured — printing report:\n');
     console.log('\n--- Daily Intake & Lead Report ---\n');
     console.log(leadAnalysis);
   } else {
-    const leadSubject = `Daily Intake & Lead Report — ${dayOfWeek}, ${dateLabel}`;
+    const leadSubject = `${firmCtx().firmName} — Daily Intake & Lead Report — ${dayOfWeek}, ${dateLabel}`;
     const leadHtml = buildEmailHtml(leadAnalysis, stats, dateLabel);
     await sendEmail({
       htmlBody: leadHtml,
@@ -3323,7 +3383,7 @@ async function runDailyReport() {
       subject: leadSubject,
       attachments: [{ filename: path.basename(csvFilename), path: csvFilename }],
     });
-    console.log(`  Sent to: ${EMAIL_TO.join(', ')}`);
+    console.log(`  Sent to: ${firmCtx().emailTo.join(', ')}`);
   }
 
   console.log(`\n${'═'.repeat(52)}`);
@@ -3338,7 +3398,10 @@ if (require.main === module) {
   if (arg === '--monthly' || arg === 'monthly') run = runMonthlyNewsletterInsightsReport;
   if (arg === '--missed' || arg === 'missed') run = runMissedClientCallReport;
   if (arg === '--review' || arg === 'review') run = runReviewIntelligenceReport;
-  run().catch((err) => {
+  // Optional: `node report.js daily --firm <id>` scopes to one firm; otherwise all active firms.
+  const firmFlag = process.argv.indexOf('--firm');
+  const firmId = firmFlag !== -1 ? process.argv[firmFlag + 1] : undefined;
+  runForAllFirms(run, firmId ? { firmId } : {}).catch((err) => {
     console.error('\nError:', err.response?.data || err.message);
     process.exit(1);
   });
@@ -3350,4 +3413,5 @@ module.exports = {
   runMonthlyNewsletterInsightsReport,
   runMissedClientCallReport,
   runReviewIntelligenceReport,
+  runForAllFirms,
 };

@@ -73,8 +73,12 @@ async function approveAndSend({ channel, messageTs, approvedBy }) {
     await reply(channel, messageTs, '⚠️ No client phone on file — send the link manually.');
     return;
   }
-  if (!quoSend.isConfigured()) {
-    await reply(channel, messageTs, '⚠️ Quo sending isn’t configured (QUO_API_KEY + QUO_SEND_FROM).');
+
+  // Resolve the firm up front so we send from that firm's Quo line.
+  const firm = (await firmStore.getFirmById(req.firm_id)) || (await firmStore.getDefaultFirm());
+  const fctx = firmStore.reportConfigForFirm(firm);
+  if (!quoSend.isConfigured({ apiKey: fctx.quoApiKey, from: fctx.quoSendFrom })) {
+    await reply(channel, messageTs, '⚠️ Quo sending isn’t configured for this firm (Quo API key + send-from line).');
     return;
   }
 
@@ -86,7 +90,6 @@ async function approveAndSend({ channel, messageTs, approvedBy }) {
   }
 
   try {
-    const firm = (await firmStore.getFirmById(req.firm_id)) || (await firmStore.getDefaultFirm());
     const cfg = firmStore.landingConfigForFirm(firm);
     const base = reviewPublicBase(firm);
     const link = base ? `${base}/r/${req.token}` : `/r/${req.token}`;
@@ -96,7 +99,7 @@ async function approveAndSend({ channel, messageTs, approvedBy }) {
       link,
       template: cfg.smsTemplate,
     });
-    await quoSend.sendSms({ to: req.client_phone, content: text });
+    await quoSend.sendSms({ to: req.client_phone, content: text, apiKey: fctx.quoApiKey, from: fctx.quoSendFrom });
     await reviewRequests.markSent(req.id);
     await reply(channel, messageTs, `✅ Texted the review link to ${req.client_phone}.`);
   } catch (err) {

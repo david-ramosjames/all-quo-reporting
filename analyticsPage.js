@@ -159,7 +159,7 @@ function renderAnalyticsPage({ stats, requests, publicBase, configured, sendConf
   <div class="wrap">
     <h1>Review link analytics</h1>
     <div class="nav">
-      <a href="/">Manual triggers</a><a href="/review/edit">Edit review page</a><a href="/faq">FAQ</a><a href="/review" target="_blank">Review page ↗</a>
+      <a href="/">Manual triggers</a><a href="/review/firms">Firms</a><a href="/review/edit">Edit review page</a><a href="/faq">FAQ</a><a href="/review" target="_blank">Review page ↗</a>
     </div>
     <div class="runbar">
       <button id="run-review">▶ Run review job now (test)</button>

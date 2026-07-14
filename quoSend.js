@@ -22,9 +22,11 @@ function sendFrom() {
   return (process.env.QUO_SEND_FROM || '').trim();
 }
 
-/** Can we actually send? */
-function isConfigured() {
-  return Boolean(apiKey() && sendFrom());
+/** Can we actually send? Pass a firm's {apiKey, from} to check per-firm config. */
+function isConfigured(opts = {}) {
+  const key = String(opts.apiKey || apiKey()).trim();
+  const from = String(opts.from || sendFrom()).trim();
+  return Boolean(key && from);
 }
 
 /** Normalize a US-ish number to E.164 (+1XXXXXXXXXX). Returns '' if unusable. */
@@ -39,21 +41,24 @@ function toE164(raw) {
 }
 
 /**
- * @param {{ to: string, content: string }} opts
+ * @param {{ to: string, content: string, apiKey?: string, from?: string }} opts
+ *   apiKey/from override the global env config so a specific firm's Quo line
+ *   sends the text. Both default to QUO_API_KEY / QUO_SEND_FROM.
  * @returns {Promise<{ ok: boolean, id?: string }>}
  */
-async function sendSms({ to, content }) {
-  if (!isConfigured()) {
+async function sendSms({ to, content, apiKey: apiKeyOverride, from: fromOverride }) {
+  const key = String(apiKeyOverride || apiKey()).trim();
+  const fromLine = String(fromOverride || sendFrom()).trim();
+  if (!key || !fromLine) {
     throw new Error('Quo send not configured (set QUO_API_KEY and QUO_SEND_FROM).');
   }
   const toE164 = exportedToE164(to);
   if (!toE164) throw new Error(`Invalid destination phone number: "${to}"`);
-  const from = sendFrom();
 
   const res = await axios.post(
     `${API_BASE}/v1/messages`,
-    { from, to: [toE164], content: String(content || '').slice(0, 1500) },
-    { headers: { Authorization: apiKey(), 'Content-Type': 'application/json' }, timeout: 20000 }
+    { from: fromLine, to: [toE164], content: String(content || '').slice(0, 1500) },
+    { headers: { Authorization: key, 'Content-Type': 'application/json' }, timeout: 20000 }
   );
   const id = res.data?.data?.id || res.data?.id;
   return { ok: true, id };
