@@ -2472,7 +2472,7 @@ async function runWeeklyClientSentimentReport(opts = {}) {
           firmCtx().sheets.caseRosterId,
           firmCtx().sheets.caseRosterRange
         );
-        const rosterMap = rawRowsToCaseRosterMap(rosterRows);
+        const rosterMap = rawRowsToCaseRosterMap(rosterRows, firmCtx().sheets.rosterColumns);
         enrichRollupsWithCaseRoster(rollups, rosterMap);
         console.log(`  Case roster sheet: ${rosterMap.size} row(s) indexed for attorney/paralegal.`);
       } catch (err) {
@@ -2728,7 +2728,7 @@ async function runMissedClientCallReport() {
           firmCtx().sheets.caseRosterId,
           firmCtx().sheets.caseRosterRange
         );
-        rosterMap = rawRowsToCaseRosterMap(rosterRows);
+        rosterMap = rawRowsToCaseRosterMap(rosterRows, firmCtx().sheets.rosterColumns);
         console.log(`  Case roster sheet: ${rosterMap.size} row(s) indexed for attorney/paralegal.`);
       } catch (err) {
         console.warn(`  Case roster fetch failed (report still sends without attorney/paralegal): ${err.message}`);
@@ -3340,7 +3340,8 @@ async function runDailyReport() {
         firmCtx().sheets.sheetsId,
         firmCtx().sheets.sheetsRange,
         undefined,
-        { callData, slackText }
+        { callData, slackText },
+        firmCtx().sheets.columns
       );
       sheetText = text;
       stats.sheetRows = totalRows;

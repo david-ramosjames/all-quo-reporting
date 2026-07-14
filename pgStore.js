@@ -69,6 +69,13 @@ ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS latest_sentiment_sheet_id tex
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS latest_sentiment_range text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS review_sheet_id text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS review_opportunities_sheet_id text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS sheets_name_col text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS sheets_phone_col text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS sheets_status_col text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS sheets_consult_col text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS case_roster_case_col text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS case_roster_attorney_col text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS case_roster_paralegal_col text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS active boolean DEFAULT true;
 CREATE TABLE IF NOT EXISTS review_requests (
   id uuid PRIMARY KEY,
@@ -167,7 +174,10 @@ const FIRM_UPSERT_COLUMNS = [
   'weekly_sentiment_sheet_id', 'weekly_sentiment_range',
   'negative_sentiment_sheet_id', 'negative_sentiment_range',
   'latest_sentiment_sheet_id', 'latest_sentiment_range',
-  'review_sheet_id', 'review_opportunities_sheet_id', 'active',
+  'review_sheet_id', 'review_opportunities_sheet_id',
+  'sheets_name_col', 'sheets_phone_col', 'sheets_status_col', 'sheets_consult_col',
+  'case_roster_case_col', 'case_roster_attorney_col', 'case_roster_paralegal_col',
+  'active',
 ];
 
 async function upsertFirm(f) {

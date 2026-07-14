@@ -226,21 +226,24 @@ function columnLettersToIndex(letters) {
   return n - 1;
 }
 
-function sheetMatchColumnsFromEnv() {
+// Optional `cols` (spreadsheet letters) override the env/defaults per firm.
+function sheetMatchColumnsFromEnv(cols) {
+  cols = cols || {};
   return {
-    name:    columnLettersToIndex(process.env.GOOGLE_SHEETS_NAME_COL || 'E'),
-    phone:   columnLettersToIndex(process.env.GOOGLE_SHEETS_PHONE_COL || 'F'),
-    status:  columnLettersToIndex(process.env.GOOGLE_SHEETS_STATUS_COL || 'K'),
-    consult: columnLettersToIndex(process.env.GOOGLE_SHEETS_CONSULT_COL || 'L'),
+    name:    columnLettersToIndex(cols.name || process.env.GOOGLE_SHEETS_NAME_COL || 'E'),
+    phone:   columnLettersToIndex(cols.phone || process.env.GOOGLE_SHEETS_PHONE_COL || 'F'),
+    status:  columnLettersToIndex(cols.status || process.env.GOOGLE_SHEETS_STATUS_COL || 'K'),
+    consult: columnLettersToIndex(cols.consult || process.env.GOOGLE_SHEETS_CONSULT_COL || 'L'),
   };
 }
 
-/** Weekly case roster: matter id + staff (defaults A / C / E). */
-function caseRosterColumnsFromEnv() {
+/** Weekly case roster: matter id + staff (defaults A / C / E). `cols` overrides per firm. */
+function caseRosterColumnsFromEnv(cols) {
+  cols = cols || {};
   return {
-    caseNum: columnLettersToIndex(process.env.GOOGLE_SHEETS_CASE_ROSTER_CASE_COL || 'A'),
-    attorney: columnLettersToIndex(process.env.GOOGLE_SHEETS_CASE_ROSTER_ATTORNEY_COL || 'C'),
-    paralegal: columnLettersToIndex(process.env.GOOGLE_SHEETS_CASE_ROSTER_PARALEGAL_COL || 'E'),
+    caseNum: columnLettersToIndex(cols.caseNum || process.env.GOOGLE_SHEETS_CASE_ROSTER_CASE_COL || 'A'),
+    attorney: columnLettersToIndex(cols.attorney || process.env.GOOGLE_SHEETS_CASE_ROSTER_ATTORNEY_COL || 'C'),
+    paralegal: columnLettersToIndex(cols.paralegal || process.env.GOOGLE_SHEETS_CASE_ROSTER_PARALEGAL_COL || 'E'),
   };
 }
 
@@ -253,11 +256,11 @@ function looksLikeNumericCaseCell(v) {
  * Builds Map(caseNumberString → { leadAttorney, paralegal }) from raw Sheets rows.
  * Skips a leading header row when row 0’s case column is not numeric but row 1’s is.
  */
-function rawRowsToCaseRosterMap(rows) {
+function rawRowsToCaseRosterMap(rows, cols) {
   const map = new Map();
   if (!rows?.length) return map;
 
-  const { caseNum: iC, attorney: iA, paralegal: iP } = caseRosterColumnsFromEnv();
+  const { caseNum: iC, attorney: iA, paralegal: iP } = caseRosterColumnsFromEnv(cols);
   let start = 0;
   if (
     rows.length >= 2 &&
@@ -361,7 +364,7 @@ function sortHeadersForPrompt(headers) {
  * One line per data row using ONLY fixed spreadsheet columns (default E, F, K, L).
  * Avoids header-name confusion entirely.
  */
-function formatSheetFixedColumns(rows, maxRows = Infinity) {
+function formatSheetFixedColumns(rows, maxRows = Infinity, cols) {
   if (!rows?.length || rows.length < 2) return '(No data found in the sheet.)';
 
   const {
@@ -369,7 +372,7 @@ function formatSheetFixedColumns(rows, maxRows = Infinity) {
     phone: iPhone,
     status: iStatus,
     consult: iConsult,
-  } = sheetMatchColumnsFromEnv();
+  } = sheetMatchColumnsFromEnv(cols);
 
   const data = rows
     .slice(1)
@@ -469,7 +472,7 @@ function maxRowsFromEnv() {
  * @param {{ callData?: Array<{ phone?: string, contact?: string }>, slackText?: string }} [reconcile]
  *        When provided, appends code-verified phone/name ↔ sheet row lines for the LLM.
  */
-async function getLeadPipelineText(spreadsheetId, rangeInput, maxRowsOverride, reconcile = {}) {
+async function getLeadPipelineText(spreadsheetId, rangeInput, maxRowsOverride, reconcile = {}, cols) {
   const cap =
     maxRowsOverride !== undefined && maxRowsOverride !== null
       ? maxRowsOverride
@@ -481,10 +484,10 @@ async function getLeadPipelineText(spreadsheetId, rangeInput, maxRowsOverride, r
     rows.slice(1).filter((row) => row.some((c) => String(c ?? '').trim() !== '')).length
   );
 
-  let text = formatSheetFixedColumns(rows, cap);
+  let text = formatSheetFixedColumns(rows, cap, cols);
   const { callData, slackText } = reconcile;
   if (callData !== undefined || slackText !== undefined) {
-    text += '\n\n' + buildAutomatedSheetMatches(callData || [], slackText || '', rows);
+    text += '\n\n' + buildAutomatedSheetMatches(callData || [], slackText || '', rows, cols);
   }
 
   return {

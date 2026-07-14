@@ -56,12 +56,14 @@ function columnLettersToIndex(letters) {
   return n - 1;
 }
 
-function sheetMatchColumnsFromEnv() {
+// Optional `cols` (spreadsheet letters) override the env/defaults per firm.
+function sheetMatchColumnsFromEnv(cols) {
+  cols = cols || {};
   return {
-    name:    columnLettersToIndex(process.env.GOOGLE_SHEETS_NAME_COL || 'E'),
-    phone:   columnLettersToIndex(process.env.GOOGLE_SHEETS_PHONE_COL || 'F'),
-    status:  columnLettersToIndex(process.env.GOOGLE_SHEETS_STATUS_COL || 'K'),
-    consult: columnLettersToIndex(process.env.GOOGLE_SHEETS_CONSULT_COL || 'L'),
+    name:    columnLettersToIndex(cols.name || process.env.GOOGLE_SHEETS_NAME_COL || 'E'),
+    phone:   columnLettersToIndex(cols.phone || process.env.GOOGLE_SHEETS_PHONE_COL || 'F'),
+    status:  columnLettersToIndex(cols.status || process.env.GOOGLE_SHEETS_STATUS_COL || 'K'),
+    consult: columnLettersToIndex(cols.consult || process.env.GOOGLE_SHEETS_CONSULT_COL || 'L'),
   };
 }
 
@@ -110,10 +112,10 @@ function cellPhoneString(cell) {
   return String(cell).trim();
 }
 
-function parseSheetEfkRows(rows) {
+function parseSheetEfkRows(rows, cols) {
   if (!rows?.length || rows.length < 2) return [];
 
-  const { name: iN, phone: iP, status: iS, consult: iC } = sheetMatchColumnsFromEnv();
+  const { name: iN, phone: iP, status: iS, consult: iC } = sheetMatchColumnsFromEnv(cols);
 
   return rows
     .slice(1)
@@ -168,8 +170,8 @@ function tokenOverlapScore(a, b) {
  * @param {string} slackText
  * @param {any[][]} rows raw sheet values including header
  */
-function buildAutomatedSheetMatches(callData, slackText, rows) {
-  const entries = parseSheetEfkRows(rows);
+function buildAutomatedSheetMatches(callData, slackText, rows, cols) {
+  const entries = parseSheetEfkRows(rows, cols);
   if (!entries.length) {
     return (
       'AUTOMATED SHEET LOOKUPS (code-verified):\n' +

@@ -56,6 +56,15 @@ const FIRM_FIELDS = [
   { key: 'latest_sentiment_sheet_id', label: 'All-latest sentiment sheet ID', type: 'text', group: 'Google Sheets' },
   { key: 'latest_sentiment_range', label: 'All-latest sentiment range', type: 'text', group: 'Google Sheets' },
 
+  { key: 'sheets_name_col', label: 'Lead name column', type: 'text', group: 'Lead sheet columns', placeholder: 'E',
+    help: 'Spreadsheet letter of the client-name column in the lead pipeline. Blank = E.' },
+  { key: 'sheets_phone_col', label: 'Lead phone column', type: 'text', group: 'Lead sheet columns', placeholder: 'F', help: 'Blank = F.' },
+  { key: 'sheets_status_col', label: 'Lead status column', type: 'text', group: 'Lead sheet columns', placeholder: 'K', help: 'Blank = K.' },
+  { key: 'sheets_consult_col', label: 'Lead consult column', type: 'text', group: 'Lead sheet columns', placeholder: 'L', help: 'Blank = L.' },
+  { key: 'case_roster_case_col', label: 'Roster case# column', type: 'text', group: 'Lead sheet columns', placeholder: 'A', help: 'Blank = A.' },
+  { key: 'case_roster_attorney_col', label: 'Roster attorney column', type: 'text', group: 'Lead sheet columns', placeholder: 'C', help: 'Blank = C.' },
+  { key: 'case_roster_paralegal_col', label: 'Roster paralegal column', type: 'text', group: 'Lead sheet columns', placeholder: 'E', help: 'Blank = E.' },
+
   { key: 'review_domain', label: 'Branded review domain', type: 'text', group: 'Review', placeholder: 'reviews.example.com' },
   { key: 'google_review_url', label: 'Google review URL', type: 'text', group: 'Review' },
   { key: 'review_sheet_id', label: 'Review store sheet ID', type: 'text', group: 'Review',

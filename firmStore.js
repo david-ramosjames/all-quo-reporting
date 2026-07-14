@@ -133,6 +133,19 @@ function reportConfigForFirm(firm) {
       latestSentimentRange: firstNonEmpty(f.latest_sentiment_range, env.GOOGLE_LATEST_SENTIMENT_RANGE),
       reviewSheetId: firstNonEmpty(f.review_sheet_id, env.GOOGLE_REVIEW_SHEET_ID),
       reviewOpportunitiesSheetId: firstNonEmpty(f.review_opportunities_sheet_id, env.GOOGLE_REVIEW_OPPORTUNITIES_SHEET_ID),
+      // Lead-sheet column layout (spreadsheet letters). Which columns hold the
+      // client name/phone/status/consult so the reconciler reads the right cells.
+      columns: {
+        name: firstNonEmpty(f.sheets_name_col, env.GOOGLE_SHEETS_NAME_COL, 'E'),
+        phone: firstNonEmpty(f.sheets_phone_col, env.GOOGLE_SHEETS_PHONE_COL, 'F'),
+        status: firstNonEmpty(f.sheets_status_col, env.GOOGLE_SHEETS_STATUS_COL, 'K'),
+        consult: firstNonEmpty(f.sheets_consult_col, env.GOOGLE_SHEETS_CONSULT_COL, 'L'),
+      },
+      rosterColumns: {
+        caseNum: firstNonEmpty(f.case_roster_case_col, env.GOOGLE_SHEETS_CASE_ROSTER_CASE_COL, 'A'),
+        attorney: firstNonEmpty(f.case_roster_attorney_col, env.GOOGLE_SHEETS_CASE_ROSTER_ATTORNEY_COL, 'C'),
+        paralegal: firstNonEmpty(f.case_roster_paralegal_col, env.GOOGLE_SHEETS_CASE_ROSTER_PARALEGAL_COL, 'E'),
+      },
     },
   };
 }
