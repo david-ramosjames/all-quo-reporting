@@ -52,6 +52,8 @@ ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS quo_send_from text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS email_from text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS report_email_to text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS missed_calls_email_to text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS weekly_email_to text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS monthly_email_to text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS slack_bot_token text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS slack_channel text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS review_slack_channel text;
@@ -159,7 +161,7 @@ const FIRM_UPSERT_COLUMNS = [
   'firm_name', 'review_domain', 'google_review_url', 'call_phone_number',
   'text_phone_number', 'review_page_settings_json',
   'quo_api_key', 'quo_phone_numbers', 'quo_send_from',
-  'email_from', 'report_email_to', 'missed_calls_email_to',
+  'email_from', 'report_email_to', 'missed_calls_email_to', 'weekly_email_to', 'monthly_email_to',
   'slack_bot_token', 'slack_channel', 'review_slack_channel',
   'sheets_id', 'sheets_range', 'case_roster_id', 'case_roster_range',
   'weekly_sentiment_sheet_id', 'weekly_sentiment_range',

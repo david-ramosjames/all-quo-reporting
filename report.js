@@ -1974,7 +1974,7 @@ async function runMonthlyNewsletterInsightsReport() {
   const subject = `${firmCtx().firmName} — Monthly client newsletter content ideas (from call themes)`;
   const html = buildMonthlyInsightsEmailHtml(bodyMd, rangeLabel);
 
-  if (!firmCtx().emailTo.length || !EMAIL_CONFIGURED) {
+  if (!firmCtx().monthlyEmailTo.length || !EMAIL_CONFIGURED) {
     console.log('\n  Email not configured — printing monthly insights body:\n');
     console.log(bodyMd);
   } else {
@@ -1983,8 +1983,9 @@ async function runMonthlyNewsletterInsightsReport() {
       plainText: bodyMd,
       subject,
       attachments: [],
+      to: firmCtx().monthlyEmailTo,
     });
-    console.log(`\n  Sent monthly insights to: ${firmCtx().emailTo.join(', ')}`);
+    console.log(`\n  Sent monthly insights to: ${firmCtx().monthlyEmailTo.join(', ')}`);
   }
 
   console.log(`\n${'═'.repeat(52)}`);
@@ -2549,7 +2550,7 @@ async function runWeeklyClientSentimentReport(opts = {}) {
     const subject = `${firmCtx().firmName} — Weekly Client Negative Sentiment - ${rangeLabel}`;
     const html = buildWeeklyNegativeSentimentEmailHtml(rangeLabel, emailRollups);
 
-    if (!firmCtx().emailTo.length || !EMAIL_CONFIGURED) {
+    if (!firmCtx().weeklyEmailTo.length || !EMAIL_CONFIGURED) {
       console.log('\n  Email not configured — printing weekly sentiment body:\n');
       console.log(bodyMd);
     } else {
@@ -2558,8 +2559,9 @@ async function runWeeklyClientSentimentReport(opts = {}) {
         plainText: bodyMd,
         subject,
         attachments: [],
+        to: firmCtx().weeklyEmailTo,
       });
-      console.log(`\n  Sent weekly sentiment report to: ${firmCtx().emailTo.join(', ')}`);
+      console.log(`\n  Sent weekly sentiment report to: ${firmCtx().weeklyEmailTo.join(', ')}`);
     }
   }
 
@@ -2815,7 +2817,7 @@ async function runMissedClientCallReport() {
     ? `Missed Client Call Report\nWindow: ${rangeLabel}\n\n${buildMissedClientCallTable(outstanding)}\n`
     : `Missed Client Call Report\nWindow: ${rangeLabel}\n\nNo outstanding missed client calls in the last 24 hours.\n`;
 
-  const recipients = firmCtx().missedEmailTo.length ? firmCtx().missedEmailTo : firmCtx().emailTo;
+  const recipients = firmCtx().missedEmailTo;
   if (!recipients.length || !EMAIL_CONFIGURED) {
     console.log('\n  Email not configured (set MISSED_CLIENT_CALLS_EMAIL_TO or EMAIL_TO + Gmail OAuth) — printing report:\n');
     console.log(plainText);

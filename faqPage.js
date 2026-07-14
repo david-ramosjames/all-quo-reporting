@@ -108,6 +108,7 @@ const FAQ = [
 function renderFaqPage() {
   const linkCards = [
     { href: '/', title: 'Manual triggers', sub: 'Run a report now', lock: true },
+    { href: '/review/firms', title: 'Firms', sub: 'Add &amp; configure firms', lock: true },
     { href: '/review/analytics', title: 'Review analytics', sub: 'Link opens &amp; clicks', lock: true },
     { href: '/review/edit', title: 'Edit review page', sub: 'Change copy &amp; branding', lock: true },
     { href: '/review', title: 'Review page', sub: 'What clients see', lock: false },
@@ -207,7 +208,7 @@ function renderFaqPage() {
     ${faqItems}
 
     <footer>
-      Manual runs: <a class="inline" href="/">/</a> · Review page: <a class="inline" href="/review">/review</a> · Edit page: <a class="inline" href="/review/edit">/review/edit</a> · Health: <a class="inline" href="/health">/health</a>
+      Manual runs: <a class="inline" href="/">/</a> · Firms: <a class="inline" href="/review/firms">/review/firms</a> · Review page: <a class="inline" href="/review">/review</a> · Edit page: <a class="inline" href="/review/edit">/review/edit</a> · Health: <a class="inline" href="/health">/health</a>
     </footer>
   </div>
 </body>

@@ -88,6 +88,11 @@ function firstNonEmpty(...vals) {
   return '';
 }
 
+/** Parse the first non-empty comma-list among the candidates into an array. */
+function firstList(...vals) {
+  return parseList(firstNonEmpty(...vals));
+}
+
 /**
  * Normalized per-firm reporting context used by the jobs. Every field falls
  * back to the matching env constant when the firm column is blank, so a
@@ -106,10 +111,12 @@ function reportConfigForFirm(firm) {
     quoPhoneNumbers: f.quo_phone_numbers ? parseList(f.quo_phone_numbers) : parseList(env.QUO_PHONE_NUMBERS),
     quoSendFrom: firstNonEmpty(f.quo_send_from, env.QUO_SEND_FROM),
     emailFrom: firstNonEmpty(f.email_from, env.EMAIL_FROM),
+    // Default report recipients (also the daily-report list). Per-report-type
+    // lists below fall back to this default, then to the env EMAIL_TO.
     emailTo: f.report_email_to ? parseList(f.report_email_to) : parseList(env.EMAIL_TO),
-    missedEmailTo: f.missed_calls_email_to
-      ? parseList(f.missed_calls_email_to)
-      : parseList(env.MISSED_CLIENT_CALLS_EMAIL_TO),
+    weeklyEmailTo: firstList(f.weekly_email_to, f.report_email_to, env.EMAIL_TO),
+    monthlyEmailTo: firstList(f.monthly_email_to, f.report_email_to, env.EMAIL_TO),
+    missedEmailTo: firstList(f.missed_calls_email_to, env.MISSED_CLIENT_CALLS_EMAIL_TO, f.report_email_to, env.EMAIL_TO),
     slackBotToken: firstNonEmpty(f.slack_bot_token, env.SLACK_BOT_TOKEN),
     slackChannel: firstNonEmpty(f.slack_channel, env.SLACK_CHANNEL, 'lead-calls'),
     reviewSlackChannel: firstNonEmpty(f.review_slack_channel, env.REVIEW_SLACK_CHANNEL, 'review-opportunities'),
