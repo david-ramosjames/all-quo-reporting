@@ -1723,15 +1723,15 @@ function markdownToHtml(md) {
   return out.join('\n');
 }
 
-/** One stat tile — inline-block so a row of tiles wraps gracefully on mobile. */
-function emailStatTile(label, value, sub, c) {
+/** A small stat chip (one of the four metrics beside the hero number). */
+function emailStatChip(value, label) {
   const v = String(value == null ? '—' : value);
-  const valueSize = v.length > 7 ? 16 : 26;
-  return `<div style="display:inline-block;width:150px;vertical-align:top;margin:5px;padding:14px 10px;background:${c.bg};border:1px solid ${c.border};border-radius:10px;text-align:center;box-sizing:border-box">
-    <div style="font-size:10px;color:${c.label};text-transform:uppercase;letter-spacing:.6px;font-weight:700">${label}</div>
-    <div style="font-size:${valueSize}px;font-weight:800;color:${c.value};margin:5px 0 3px;line-height:1.1">${v}</div>
-    <div style="font-size:10px;color:#94a3b8">${sub}</div>
-  </div>`;
+  return `<td width="25%" style="padding:0 5px" valign="top">
+    <div style="background:#0e2f57;border:1px solid #1c477d;border-radius:10px;padding:12px 6px;text-align:center">
+      <div style="font-size:19px;font-weight:800;color:#ffffff;line-height:1.1">${v}</div>
+      <div style="font-size:9px;color:#8fb0d8;text-transform:uppercase;letter-spacing:.5px;margin-top:3px">${label}</div>
+    </div>
+  </td>`;
 }
 
 function buildEmailHtml(analysis, stats, dateLabel) {
@@ -1745,17 +1745,12 @@ function buildEmailHtml(analysis, stats, dateLabel) {
       ? String(stats.sheetRows)
       : '—';
 
-  const tiles = [
-    ['Total calls', stats.totalFetched, 'Quo window', { bg: '#f0fdfa', border: '#99f6e4', label: '#0f766e', value: '#134e4a' }],
-    ['Transcripts', stats.totalSaved, 'with summaries', { bg: '#fffbeb', border: '#fde68a', label: '#b45309', value: '#78350f' }],
-    ['Talk time', totalMinHr, 'connected min', { bg: '#faf5ff', border: '#e9d5ff', label: '#6b21a8', value: '#581c87' }],
-    ['Slack leads', stats.slackMessages ?? '—', '#lead-calls', { bg: '#fff7ed', border: '#fed7aa', label: '#9a3412', value: '#7c2d12' }],
-    ['Pipeline rows', sheetShown, 'lead pipeline', { bg: '#eef2ff', border: '#c7d2fe', label: '#3730a3', value: '#3730a3' }],
-    ['Window', dateLabel, 'daily snapshot', { bg: '#f1f5f9', border: '#e2e8f0', label: '#475569', value: '#0f172a' }],
-  ].map(([l, v, s, c]) => emailStatTile(l, v, s, c)).join('');
-
-  // font-size:0 collapses the whitespace between inline-block tiles.
-  const metricsRow = `<div style="font-size:0;text-align:center">${tiles}</div>`;
+  const chips = [
+    emailStatChip(stats.totalSaved, 'Transcripts'),
+    emailStatChip(totalMinHr, 'Talk time'),
+    emailStatChip(stats.slackMessages ?? '—', 'Slack leads'),
+    emailStatChip(sheetShown, 'Pipeline'),
+  ].join('');
 
   const preheader = `${stats.totalFetched} calls · ${stats.totalSaved} transcripts · ${totalMinHr} talk time · ${stats.slackMessages ?? '—'} Slack leads — ${dateLabel}`;
   const footerNote = `Quo transcript CSV attached &nbsp;·&nbsp; Weekly client sentiment is emailed separately &nbsp;·&nbsp; Generated ${new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' })}`;
@@ -1770,34 +1765,42 @@ function buildEmailHtml(analysis, stats, dateLabel) {
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light only">
 </head>
-<body style="margin:0;padding:0;background:#eef2f8;-webkit-text-size-adjust:100%">
-  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#eef2f8;font-size:1px;line-height:1px">${preheader}</div>
-  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#eef2f8">
+<body style="margin:0;padding:0;background:#0A1C40;-webkit-text-size-adjust:100%">
+  <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:#0A1C40;font-size:1px;line-height:1px">${preheader}</div>
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background:#0A1C40">
     <tr>
-      <td align="center" style="padding:24px 12px">
-        <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="width:600px;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937">
+      <td align="center" style="padding:0 0 26px">
+        <table role="presentation" width="600" cellspacing="0" cellpadding="0" style="width:600px;max-width:100%;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif">
           <tr>
-            <td style="background:#0A1C40;padding:26px 30px;border-radius:12px 12px 0 0">
+            <td style="padding:30px 30px 22px">
               <div style="font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:#5eead4">${firmCtx().firmName}</div>
-              <h1 style="margin:6px 0 0;font-size:23px;font-weight:800;color:#ffffff;letter-spacing:.2px">📌 ${title}</h1>
-              <p style="margin:6px 0 0;font-size:13px;color:#a9b8d6">${dateLabel}</p>
+              <div style="font-size:25px;font-weight:800;color:#ffffff;margin-top:6px;letter-spacing:.2px">📌 ${title}</div>
+              <div style="font-size:13px;color:#a9b8d6;margin-top:4px">${dateLabel}</div>
+              <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="margin-top:20px">
+                <tr>
+                  <td width="40%" valign="top" style="padding-right:10px">
+                    <div style="background:#0d8f86;background:linear-gradient(135deg,#12b3a6,#0d8f86);border-radius:14px;padding:18px">
+                      <div style="font-size:38px;font-weight:800;color:#ffffff;line-height:1">${stats.totalFetched}</div>
+                      <div style="font-size:12px;color:#d6fff8;margin-top:4px">calls handled today</div>
+                    </div>
+                  </td>
+                  <td width="60%" valign="top">
+                    <table role="presentation" width="100%" cellspacing="0" cellpadding="0"><tr>${chips}</tr></table>
+                  </td>
+                </tr>
+              </table>
             </td>
           </tr>
           <tr>
-            <td style="background:#ffffff;padding:18px 22px 8px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;border-top:3px solid #0d9488">
-              ${metricsRow}
-            </td>
-          </tr>
-          <tr>
-            <td style="background:#ffffff;padding:8px 30px 30px;border-left:1px solid #e2e8f0;border-right:1px solid #e2e8f0;border-bottom:1px solid #e2e8f0;border-radius:0 0 12px 12px">
-              <div style="margin:6px 0 18px;padding:11px 14px;border-left:3px solid #0d9488;background:#f0fdfa;border-radius:0 8px 8px 0;color:#334155;font-size:13px;line-height:1.55">
+            <td style="background:#ffffff;border-radius:16px;padding:22px 30px 30px;color:#374a63">
+              <div style="margin:0 0 18px;padding:11px 14px;border-left:3px solid #12b3a6;background:#f0fdfa;border-radius:0 8px 8px 0;color:#334155;font-size:13px;line-height:1.55">
                 Executive &amp; operational intake brief across <strong style="color:#0A1C40">Quo</strong>, <strong style="color:#0A1C40">Slack</strong>, and <strong style="color:#0A1C40">Google Sheets</strong>.
               </div>
               ${body}
             </td>
           </tr>
           <tr>
-            <td style="padding:16px 20px;text-align:center;font-size:11px;color:#94a3b8;line-height:1.6">
+            <td style="padding:16px 20px;text-align:center;font-size:11px;color:#7f92b5;line-height:1.6">
               ${footerNote}
             </td>
           </tr>
