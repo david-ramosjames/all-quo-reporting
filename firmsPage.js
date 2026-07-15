@@ -66,7 +66,11 @@ const FIRM_FIELDS = [
   { key: 'case_roster_paralegal_col', label: 'Roster paralegal column', type: 'text', group: 'Lead sheet columns', placeholder: 'E', help: 'Blank = E.' },
 
   { key: 'review_domain', label: 'Branded review domain', type: 'text', group: 'Review', placeholder: 'reviews.example.com' },
-  { key: 'google_review_url', label: 'Google review URL', type: 'text', group: 'Review' },
+  { key: 'google_review_url', label: 'Google review URL', type: 'text', group: 'Review',
+    help: 'Shown on the branded page and used for a direct "Send Google" text.' },
+  { key: 'facebook_review_url', label: 'Facebook review URL', type: 'text', group: 'Review', help: 'Optional. Enables the Facebook button/direct send.' },
+  { key: 'apple_review_url', label: 'Apple Maps review URL', type: 'text', group: 'Review', help: 'Optional. Enables the Apple button/direct send.' },
+  { key: 'yelp_review_url', label: 'Yelp review URL', type: 'text', group: 'Review', help: 'Optional. Enables the Yelp button/direct send.' },
   { key: 'review_sheet_id', label: 'Review store sheet ID', type: 'text', group: 'Review',
     help: 'Only used when Postgres is off; review data is otherwise firm-scoped in the DB.' },
   { key: 'review_opportunities_sheet_id', label: 'Review opportunities sheet ID', type: 'text', group: 'Review' },

@@ -3014,8 +3014,29 @@ function buildReviewEmptyMessage(meta) {
   };
 }
 
+/**
+ * Action buttons for a review card: Send branded page, Send <platform> (one per
+ * configured platform), and Do not send. Clicking one texts the client the right
+ * link via the /slack/interactivity handler. Returned as a Block Kit actions
+ * block, or null when approval-to-send isn't available.
+ */
+function buildReviewActionButtons(o, opts = {}) {
+  if (!opts.canApprove || !o.reviewRequestId || !o.reviewToken) return null;
+  const btn = (label, dest, style) => ({
+    type: 'button',
+    action_id: 'review_dest',
+    text: { type: 'plain_text', text: label, emoji: true },
+    value: JSON.stringify({ t: o.reviewToken, d: dest }),
+    ...(style ? { style } : {}),
+  });
+  const elements = [btn('Send branded page', 'branded', 'primary')];
+  for (const p of opts.platforms || []) elements.push(btn(`Send ${p.label}`, p.key));
+  elements.push(btn('Do not send', 'cancel', 'danger'));
+  return { type: 'actions', elements };
+}
+
 /** One self-contained message per candidate, so a ✅ reaction maps to that client. */
-function buildReviewCandidateMessage(o, idx) {
+function buildReviewCandidateMessage(o, idx, opts = {}) {
   const name = o.clientName || o.clientKey;
   const caseCell = o.caseId ? `Case *${o.caseId}*` : '_no case #_';
   const reasons = (o.reasoning.length ? o.reasoning : o.positive_signals).map((r) => `• ${r}`).join('\n');
@@ -3035,9 +3056,12 @@ function buildReviewCandidateMessage(o, idx) {
     `Score: *${o.review_score}/100*   ·   Confidence: ${reviewConfidenceEmoji(o.confidence)} *${o.confidence}*\n` +
     `*Why they were selected:*\n${reasons || '• Positive signals across recent conversations.'}` +
     linkLine + approveLine;
+  const blocks = [{ type: 'section', text: { type: 'mrkdwn', text } }];
+  const actions = buildReviewActionButtons(o, opts);
+  if (actions) blocks.push(actions);
   return {
     text: `${idx + 1}. ${name} — review candidate (${o.review_score}/100)`,
-    blocks: [{ type: 'section', text: { type: 'mrkdwn', text } }],
+    blocks,
   };
 }
 
@@ -3251,6 +3275,7 @@ async function runReviewIntelligenceReport() {
     `\n[5/5] Posting daily Slack report to #${reviewChannel} (${reportItems.length} shown; ${disqualifiedCount} disqualified)...`
   );
 
+  const canApprove = requestsOn && quoSend.isConfigured({ apiKey: firmCtx().quoApiKey, from: firmCtx().quoSendFrom });
   const meta = {
     rangeLabel,
     dateLabel,
@@ -3259,8 +3284,18 @@ async function runReviewIntelligenceReport() {
     ongoingCount: ongoingPool.length,
     disbursementCount: disbursementPool.length,
     reportedCount: reportItems.length,
-    canApprove: requestsOn && quoSend.isConfigured(),
+    canApprove,
   };
+
+  // Which direct-platform buttons to show — only platforms this firm has a URL for.
+  const reviewCfg = firmStore.landingConfigForFirm(firm);
+  const availablePlatforms = [
+    { key: 'google', label: 'Google', urlKey: 'googleReviewUrl' },
+    { key: 'facebook', label: 'Facebook', urlKey: 'facebookReviewUrl' },
+    { key: 'apple', label: 'Apple', urlKey: 'appleReviewUrl' },
+    { key: 'yelp', label: 'Yelp', urlKey: 'yelpReviewUrl' },
+  ].filter((p) => /^https?:\/\//i.test(String(reviewCfg[p.urlKey] || '').trim()));
+  const cardOpts = { canApprove, platforms: availablePlatforms };
 
   if (!slackToken) {
     console.log('  Slack not configured (SLACK_BOT_TOKEN) — printing report:\n');
@@ -3270,7 +3305,7 @@ async function runReviewIntelligenceReport() {
       console.log(buildReviewIntroMessage(meta).text);
       for (const b of buckets) {
         console.log('\n' + buildReviewSectionHeader(b).text);
-        b.sel.items.forEach((o, i) => console.log(buildReviewCandidateMessage(o, i).text + (o.reviewLink ? `  ${o.reviewLink}` : '')));
+        b.sel.items.forEach((o, i) => console.log(buildReviewCandidateMessage(o, i, cardOpts).text + (o.reviewLink ? `  ${o.reviewLink}` : '')));
       }
     }
   } else {
@@ -3288,7 +3323,7 @@ async function runReviewIntelligenceReport() {
           await postSlackMessage({ token: slackToken, channel: reviewChannel, text: header.text, blocks: header.blocks });
           for (let i = 0; i < b.sel.items.length; i++) {
             const o = b.sel.items[i];
-            const msg = buildReviewCandidateMessage(o, i);
+            const msg = buildReviewCandidateMessage(o, i, cardOpts);
             const posted = await postSlackMessage({ token: slackToken, channel: reviewChannel, text: msg.text, blocks: msg.blocks });
             if (o.reviewRequestId && posted?.ts) {
               try {

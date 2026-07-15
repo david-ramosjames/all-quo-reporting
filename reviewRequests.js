@@ -26,21 +26,32 @@ const REQUEST_HEADER = [
   'slack_channel', 'slack_message_ts', 'approved_at', 'approved_by',
   'sent_at', 'opened_at', 'last_opened_at', 'open_count',
   'google_clicked_at', 'last_google_clicked_at', 'google_click_count',
+  'facebook_clicked_at', 'last_facebook_clicked_at', 'facebook_click_count',
+  'apple_clicked_at', 'last_apple_clicked_at', 'apple_click_count',
+  'yelp_clicked_at', 'last_yelp_clicked_at', 'yelp_click_count',
   'text_clicked_at', 'last_text_clicked_at', 'text_click_count',
   'call_clicked_at', 'last_call_clicked_at', 'call_click_count',
-  'created_at', 'updated_at',
+  'review_destination', 'created_at', 'updated_at',
 ];
 
 const EVENT_HEADER = ['id', 'review_request_id', 'event_type', 'user_agent', 'ip_hash', 'referrer', 'created_at'];
 
-const EVENT_TYPES = new Set(['page_opened', 'google_clicked', 'text_clicked', 'call_clicked']);
+const EVENT_TYPES = new Set([
+  'page_opened', 'google_clicked', 'facebook_clicked', 'apple_clicked', 'yelp_clicked', 'text_clicked', 'call_clicked',
+]);
 
 const EVENT_FIELD_MAP = {
   page_opened: { count: 'open_count', firstAt: 'opened_at', lastAt: 'last_opened_at' },
   google_clicked: { count: 'google_click_count', firstAt: 'google_clicked_at', lastAt: 'last_google_clicked_at' },
+  facebook_clicked: { count: 'facebook_click_count', firstAt: 'facebook_clicked_at', lastAt: 'last_facebook_clicked_at' },
+  apple_clicked: { count: 'apple_click_count', firstAt: 'apple_clicked_at', lastAt: 'last_apple_clicked_at' },
+  yelp_clicked: { count: 'yelp_click_count', firstAt: 'yelp_clicked_at', lastAt: 'last_yelp_clicked_at' },
   text_clicked: { count: 'text_click_count', firstAt: 'text_clicked_at', lastAt: 'last_text_clicked_at' },
   call_clicked: { count: 'call_click_count', firstAt: 'call_clicked_at', lastAt: 'last_call_clicked_at' },
 };
+
+/** Review-link click event types (a subset of EVENT_TYPES). */
+const CLICK_EVENT_TYPES = new Set(['google_clicked', 'facebook_clicked', 'apple_clicked', 'yelp_clicked']);
 
 const TOKEN_ALPHABET = '23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz';
 const TOKEN_LEN = Math.min(24, Math.max(8, parseInt(process.env.REVIEW_TOKEN_LENGTH || '10', 10) || 10));
@@ -219,7 +230,7 @@ async function recordEvent(token, eventType, meta = {}) {
   updated[map.lastAt] = now;
   updated.updated_at = now;
   if (eventType === 'page_opened' && ['created', 'sent', 'approved'].includes(req.status)) updated.status = 'opened';
-  else if (eventType === 'google_clicked') updated.status = 'google_clicked';
+  else if (CLICK_EVENT_TYPES.has(eventType)) updated.status = eventType;
 
   try {
     if (req._row) await db.updateObjectRow(REQUESTS_TAB, REQUEST_HEADER, req._row, updated);
@@ -276,8 +287,8 @@ async function cancelRequest(idOrToken) {
   return { ...r, status: 'cancelled' };
 }
 
-async function markSent(idOrToken) {
-  if (pg.isEnabled()) return Boolean(await pg.markSent(idOrToken));
+async function markSent(idOrToken, destination) {
+  if (pg.isEnabled()) return Boolean(await pg.markSent(idOrToken, destination));
   if (!db.isConfigured()) return false;
   const rows = await sheetAll(true);
   const r = rows.find((x) => x.id === idOrToken || x.token === idOrToken);
@@ -287,6 +298,7 @@ async function markSent(idOrToken) {
     ...r,
     status: 'sent',
     sent_at: r.sent_at || now,
+    review_destination: destination || r.review_destination || '',
     updated_at: now,
   });
   return true;

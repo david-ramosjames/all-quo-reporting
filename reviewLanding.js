@@ -42,6 +42,10 @@ const DEFAULT_CONFIG = {
     'Most people find us during one of the most stressful moments of their lives. Your review helps injured Texans feel confident they’re choosing a law firm they can trust.',
   buttonText: 'Leave a Google Review',
   googleReviewUrl: '',
+  // Additional review platforms — a button appears for each one that has a URL.
+  facebookReviewUrl: '',
+  appleReviewUrl: '',
+  yelpReviewUrl: '',
   helperText: 'Takes about 60 seconds',
   // Laura section
   showLaura: true,
@@ -89,6 +93,9 @@ const FIELD_DEFS = [
   { key: 'body', label: 'Body copy', type: 'textarea', group: 'Main content' },
   { key: 'buttonText', label: 'Google review button text', type: 'text', group: 'Main content' },
   { key: 'googleReviewUrl', label: 'Google review URL', type: 'url', group: 'Main content' },
+  { key: 'facebookReviewUrl', label: 'Facebook review URL', type: 'url', group: 'Main content' },
+  { key: 'appleReviewUrl', label: 'Apple Maps review URL', type: 'url', group: 'Main content' },
+  { key: 'yelpReviewUrl', label: 'Yelp review URL', type: 'url', group: 'Main content' },
   { key: 'helperText', label: 'Helper text under button', type: 'text', group: 'Main content' },
   // Laura section
   { key: 'showLaura', label: 'Show Laura section', type: 'bool', group: 'Laura section' },
@@ -126,6 +133,9 @@ const ENV_OVERRIDES = {
   body: 'REVIEW_PAGE_BODY',
   buttonText: 'REVIEW_PAGE_BUTTON_TEXT',
   googleReviewUrl: 'REVIEW_GOOGLE_URL',
+  facebookReviewUrl: 'REVIEW_FACEBOOK_URL',
+  appleReviewUrl: 'REVIEW_APPLE_URL',
+  yelpReviewUrl: 'REVIEW_YELP_URL',
   helperText: 'REVIEW_PAGE_HELPER',
   lauraImageUrl: 'REVIEW_PAGE_LAURA_IMAGE',
   textNumber: 'REVIEW_PAGE_TEXT_NUMBER',
@@ -306,13 +316,28 @@ function renderReviewLandingPage(configOverride, opts = {}) {
   const trackingBase = opts.trackingBase ? String(opts.trackingBase).replace(/\/+$/, '') : '';
   const tracking = Boolean(trackingBase);
 
-  const urlRaw = String(cfg.googleReviewUrl || '').trim();
-  const hasUrl = /^https?:\/\//i.test(urlRaw);
-  const btnHref = tracking ? `${escapeAttr(trackingBase)}/google` : hasUrl ? escapeAttr(urlRaw) : '#';
-  const btnActive = tracking || hasUrl;
-  const disabledNote = btnActive
+  // Review CTAs: one button per configured platform (Google primary, the others
+  // secondary). In tracking mode each points at the internal /r/<token>/<platform>
+  // route (records the click, then redirects); otherwise straight to the URL.
+  const REVIEW_PLATFORMS = [
+    { key: 'google', urlKey: 'googleReviewUrl', label: cfg.buttonText || 'Leave a Google Review', icon: GOOGLE_G_SVG, primary: true },
+    { key: 'facebook', urlKey: 'facebookReviewUrl', label: 'Review us on Facebook', icon: '' },
+    { key: 'apple', urlKey: 'appleReviewUrl', label: 'Review us on Apple Maps', icon: '' },
+    { key: 'yelp', urlKey: 'yelpReviewUrl', label: 'Review us on Yelp', icon: '' },
+  ];
+  const reviewButtons = REVIEW_PLATFORMS.map((p) => {
+    const raw = String(cfg[p.urlKey] || '').trim();
+    if (!/^https?:\/\//i.test(raw)) return '';
+    const href = tracking ? `${escapeAttr(trackingBase)}/${p.key}` : escapeAttr(raw);
+    return `<a class="${p.primary ? 'cta' : 'cta secondary'}" href="${href}" rel="noopener">${p.icon}${escapeHtml(p.label)}</a>`;
+  }).filter(Boolean).join('');
+  const hasAnyPlatform = reviewButtons.length > 0;
+  const ctaBlock = hasAnyPlatform
+    ? `<div class="cta-group">${reviewButtons}</div>`
+    : `<a class="cta" href="#" aria-disabled="true" rel="noopener">${GOOGLE_G_SVG}${escapeHtml(cfg.buttonText)}</a>`;
+  const disabledNote = hasAnyPlatform
     ? ''
-    : '<p class="config-note">Set the Google Review URL in the admin to activate this button.</p>';
+    : '<p class="config-note">Set at least one review URL (Google / Facebook / Apple / Yelp) in the admin to activate.</p>';
 
   const logo = String(cfg.logoUrl || '').trim();
   const logoBlock = logo
@@ -416,6 +441,10 @@ function renderReviewLandingPage(configOverride, opts = {}) {
     .cta:active { transform: translateY(1px); }
     .cta:hover { filter: brightness(1.05); }
     .cta[aria-disabled="true"] { opacity: .5; pointer-events: none; box-shadow: none; }
+    .cta-group { display: flex; flex-direction: column; gap: 12px; }
+    .cta.secondary { background: transparent; color: var(--ink); box-shadow: none;
+      border: 1.5px solid ${shade(cta, -6)}55; font-size: 16px; padding: 14px 20px; }
+    .cta.secondary:hover { filter: none; background: ${shade(cta, 40)}14; }
     .helper { font-size: 13.5px; color: var(--muted); margin: 12px 0 0; }
     .config-note { margin: 12px 0 0; font-size: 13px; color: #b4560a; background: #fff6ea; border: 1px solid #f3d6ac; border-radius: 8px; padding: 8px 10px; }
     .laura { margin: 2px 0 4px; }
@@ -453,7 +482,7 @@ function renderReviewLandingPage(configOverride, opts = {}) {
     <div class="stars" aria-hidden="true">★★★★★</div>
     <h1>${nl2br(headline)}</h1>
     <p class="body">${nl2br(cfg.body)}</p>
-    <a class="cta" href="${btnHref}"${btnActive ? '' : ' aria-disabled="true"'} rel="noopener">${GOOGLE_G_SVG}${escapeHtml(cfg.buttonText)}</a>
+    ${ctaBlock}
     ${cfg.helperText ? `<p class="helper">${escapeHtml(cfg.helperText)}</p>` : ''}
     ${disabledNote}
     ${helpBlock}

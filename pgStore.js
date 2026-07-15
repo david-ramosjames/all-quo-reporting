@@ -69,6 +69,9 @@ ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS latest_sentiment_sheet_id tex
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS latest_sentiment_range text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS review_sheet_id text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS review_opportunities_sheet_id text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS facebook_review_url text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS apple_review_url text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS yelp_review_url text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS sheets_name_col text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS sheets_phone_col text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS sheets_status_col text;
@@ -109,6 +112,18 @@ CREATE TABLE IF NOT EXISTS review_requests (
   created_at timestamptz DEFAULT now(),
   updated_at timestamptz DEFAULT now()
 );
+-- Per-platform review-link click tracking + which destination was sent
+-- (self-migration for existing databases; new columns only).
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS facebook_clicked_at timestamptz;
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS last_facebook_clicked_at timestamptz;
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS facebook_click_count integer DEFAULT 0;
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS apple_clicked_at timestamptz;
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS last_apple_clicked_at timestamptz;
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS apple_click_count integer DEFAULT 0;
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS yelp_clicked_at timestamptz;
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS last_yelp_clicked_at timestamptz;
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS yelp_click_count integer DEFAULT 0;
+ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS review_destination text;
 CREATE INDEX IF NOT EXISTS idx_review_requests_token ON review_requests (token);
 CREATE INDEX IF NOT EXISTS idx_review_requests_slackts ON review_requests (slack_message_ts);
 CREATE INDEX IF NOT EXISTS idx_review_requests_opp ON review_requests (review_opportunity_id);
@@ -175,6 +190,7 @@ const FIRM_UPSERT_COLUMNS = [
   'negative_sentiment_sheet_id', 'negative_sentiment_range',
   'latest_sentiment_sheet_id', 'latest_sentiment_range',
   'review_sheet_id', 'review_opportunities_sheet_id',
+  'facebook_review_url', 'apple_review_url', 'yelp_review_url',
   'sheets_name_col', 'sheets_phone_col', 'sheets_status_col', 'sheets_consult_col',
   'case_roster_case_col', 'case_roster_attorney_col', 'case_roster_paralegal_col',
   'active',
@@ -258,6 +274,9 @@ async function setSlackMessage(id, channel, ts) {
 const EVENT_COLS = {
   page_opened: ['open_count', 'opened_at', 'last_opened_at'],
   google_clicked: ['google_click_count', 'google_clicked_at', 'last_google_clicked_at'],
+  facebook_clicked: ['facebook_click_count', 'facebook_clicked_at', 'last_facebook_clicked_at'],
+  apple_clicked: ['apple_click_count', 'apple_clicked_at', 'last_apple_clicked_at'],
+  yelp_clicked: ['yelp_click_count', 'yelp_clicked_at', 'last_yelp_clicked_at'],
   text_clicked: ['text_click_count', 'text_clicked_at', 'last_text_clicked_at'],
   call_clicked: ['call_click_count', 'call_clicked_at', 'last_call_clicked_at'],
 };
@@ -273,7 +292,7 @@ async function recordEvent(token, eventType, meta = {}) {
        ${lastCol} = now(),
        status = CASE
          WHEN $2 = 'page_opened' AND status IN ('created','sent','approved') THEN 'opened'
-         WHEN $2 = 'google_clicked' THEN 'google_clicked'
+         WHEN $2 IN ('google_clicked','facebook_clicked','apple_clicked','yelp_clicked') THEN $2
          ELSE status END,
        updated_at = now()
      WHERE token = $1
@@ -313,13 +332,14 @@ async function cancelRequest(idOrToken) {
   return rows[0] ? mapRow(rows[0]) : null;
 }
 
-async function markSent(idOrToken) {
+async function markSent(idOrToken, destination) {
   const { rows } = await query(
     `UPDATE review_requests
-       SET status='sent', sent_at=COALESCE(sent_at, now()), updated_at=now()
+       SET status='sent', sent_at=COALESCE(sent_at, now()),
+           review_destination=COALESCE($2, review_destination), updated_at=now()
      WHERE id::text=$1 OR token=$1
      RETURNING *`,
-    [String(idOrToken)]
+    [String(idOrToken), destination || null]
   );
   return rows[0] ? mapRow(rows[0]) : null;
 }

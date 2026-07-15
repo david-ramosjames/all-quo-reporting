@@ -95,10 +95,19 @@ function publicBaseUrl(req, firm) {
   return `${proto}://${host}`;
 }
 
+/** Review-platform action → the firm's configured URL key. */
+const REVIEW_PLATFORM_URL_KEYS = {
+  google: 'googleReviewUrl',
+  facebook: 'facebookReviewUrl',
+  apple: 'appleReviewUrl',
+  yelp: 'yelpReviewUrl',
+};
+
 /** Real destination for a click route, from the firm's effective config. */
 function clickDestination(action, cfg) {
-  if (action === 'google') {
-    const u = String(cfg.googleReviewUrl || '').trim();
+  const urlKey = REVIEW_PLATFORM_URL_KEYS[action];
+  if (urlKey) {
+    const u = String(cfg[urlKey] || '').trim();
     return /^https?:\/\//i.test(u) ? u : '';
   }
   if (action === 'text') {
@@ -380,6 +389,33 @@ function startManualTriggerServer(opts) {
         return;
       }
 
+      // Slack Interactivity — review-card buttons (block_actions). Same signature
+      // gate as events; body is form-encoded with a `payload` JSON field. ACK fast,
+      // then send in the background so we stay within Slack's 3s window.
+      if (req.method === 'POST' && path === '/slack/interactivity') {
+        const raw = await readRawBody(req);
+        if (!slackEvents.isEnabled()) {
+          sendJson(res, 200, { ok: true });
+          return;
+        }
+        if (!slackEvents.verifySignature(raw, req.headers['x-slack-request-timestamp'], req.headers['x-slack-signature'])) {
+          sendJson(res, 401, { error: 'bad signature' });
+          return;
+        }
+        let payload;
+        try {
+          payload = JSON.parse(new URLSearchParams(raw).get('payload') || '{}');
+        } catch {
+          sendJson(res, 400, { error: 'bad payload' });
+          return;
+        }
+        sendJson(res, 200, { ok: true });
+        setImmediate(() =>
+          slackEvents.handleInteraction(payload).catch((e) => console.warn('[slack interactivity]', e.message))
+        );
+        return;
+      }
+
       // FAQ / overview of everything this server does — gated like the dashboard.
       if (req.method === 'GET' && (path === '/faq' || path === '/about')) {
         if (!reviewAuth.isAuthEnabled()) {
@@ -411,7 +447,7 @@ function startManualTriggerServer(opts) {
 
       // Public trackable review link:  /r/:token  (and click routes below).
       // No case number or client name in the URL — only the opaque token.
-      const rMatch = path.match(/^\/r\/([A-Za-z0-9_-]{4,64})(?:\/(google|text|call))?$/);
+      const rMatch = path.match(/^\/r\/([A-Za-z0-9_-]{4,64})(?:\/(google|facebook|apple|yelp|text|call))?$/);
       if (req.method === 'GET' && rMatch) {
         const token = rMatch[1];
         const action = rMatch[2];
@@ -438,8 +474,10 @@ function startManualTriggerServer(opts) {
           }
 
           // Click route: record then redirect to the real destination.
-          const eventType =
-            action === 'google' ? 'google_clicked' : action === 'text' ? 'text_clicked' : 'call_clicked';
+          // Review-platform actions (google/facebook/apple/yelp) → <platform>_clicked.
+          const eventType = REVIEW_PLATFORM_URL_KEYS[action]
+            ? `${action}_clicked`
+            : action === 'text' ? 'text_clicked' : 'call_clicked';
           const request = await reviewRequests.recordEvent(token, eventType, meta).catch(() => null);
           const firm = request
             ? (await firmStore.getFirmById(request.firm_id)) || (await firmStore.getDefaultFirm())

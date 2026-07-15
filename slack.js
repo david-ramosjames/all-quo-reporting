@@ -219,4 +219,25 @@ async function postSlackMessage({ token, channel, text, blocks, threadTs }) {
   return { ok: Boolean(res.ok), ts: res.ts, channel: res.channel };
 }
 
-module.exports = { fetchSlackMessages, formatSlackForPrompt, postSlackMessage, resolveChannelId };
+/**
+ * Updates an existing message in place (chat.update) — used to replace a review
+ * card's action buttons with a "Sent ✓" confirmation after a button is clicked.
+ * @param {object} opts
+ * @param {string} opts.token, opts.channel (ID or name), opts.ts, opts.text, [opts.blocks]
+ */
+async function updateSlackMessage({ token, channel, ts, text, blocks }) {
+  if (!token) throw new Error('updateSlackMessage: missing Slack bot token.');
+  if (!channel || !ts) throw new Error('updateSlackMessage: missing channel or ts.');
+  const client = new WebClient(token);
+  const looksLikeId = /^[CG][A-Z0-9]{6,}$/.test(String(channel).trim());
+  const channelId = looksLikeId ? String(channel).trim() : await resolveChannelId(client, channel);
+  const res = await client.chat.update({
+    channel: channelId,
+    ts,
+    text: text || ' ',
+    blocks: blocks && blocks.length ? blocks : undefined,
+  });
+  return { ok: Boolean(res.ok), ts: res.ts, channel: res.channel };
+}
+
+module.exports = { fetchSlackMessages, formatSlackForPrompt, postSlackMessage, updateSlackMessage, resolveChannelId };

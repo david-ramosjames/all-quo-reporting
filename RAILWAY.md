@@ -75,7 +75,16 @@ The daily Slack post shows one message per review candidate. Approving one texts
 3. **OAuth & Permissions** → add scopes **`reactions:read`**, **`channels:history`**, **`chat:write`**; reinstall the app.
 4. Set env: **`SLACK_SIGNING_SECRET`** (Slack app → Basic Information), **`QUO_SEND_FROM`** (your Quo line, E.164 or PN id). Optionally `REVIEW_APPROVE_EMOJI` (default `white_check_mark`).
 
-Then: a ✅ reaction (or a threaded **approve** reply) on a candidate message texts the client once (idempotent), and the bot replies in-thread to confirm. Staff can also send from **`/review/analytics`**. Nothing is ever sent automatically.
+Then: a ✅ reaction (or a threaded **approve** reply) on a candidate message texts the client the **branded review page** once (idempotent), and the bot replies in-thread to confirm. Staff can also send from **`/review/analytics`**. Nothing is ever sent automatically.
+
+## 5d. Slack review buttons (Interactivity)
+
+Each review candidate card also shows buttons — **Send branded page**, **Send Google / Facebook / Apple / Yelp** (only platforms with a URL set on the firm), and **Do not send** — that text the client the matching link with no copy/paste. To enable the buttons:
+
+1. In your Slack app → **Interactivity & Shortcuts** → turn **On**, set the **Request URL** to `https://<your-domain>/slack/interactivity`.
+2. That's it — it reuses the same **`SLACK_SIGNING_SECRET`** and **`chat:write`** scope as above (add `chat:write` if you haven't). No new events to subscribe to.
+
+Per firm, set the platform URLs in **`/review/firms`** (Review section): Google / Facebook / Apple / Yelp. A **direct** send texts a branded short link (`/r/<token>/<platform>`) that redirects straight to that platform — one click for the client, and the click is still tracked. **Send branded page** texts the landing page where the client picks a platform. Until the Interactivity Request URL is set, the buttons are simply inert (the ✅ reaction still works).
 
 ## 6. Costs & behavior
 

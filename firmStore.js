@@ -71,6 +71,9 @@ function landingConfigForFirm(firm) {
   }
   if (firm) {
     if (firm.google_review_url) cfg.googleReviewUrl = firm.google_review_url;
+    if (firm.facebook_review_url) cfg.facebookReviewUrl = firm.facebook_review_url;
+    if (firm.apple_review_url) cfg.appleReviewUrl = firm.apple_review_url;
+    if (firm.yelp_review_url) cfg.yelpReviewUrl = firm.yelp_review_url;
     if (firm.call_phone_number) cfg.callNumber = firm.call_phone_number;
     if (firm.text_phone_number) cfg.textNumber = firm.text_phone_number;
   }
