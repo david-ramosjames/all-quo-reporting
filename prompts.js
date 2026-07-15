@@ -496,6 +496,7 @@ Respond with **valid JSON only** (no markdown fences). Shape:
   "review_score": number,            // integer 0-100, the Review Opportunity Score
   "confidence": "High" | "Medium" | "Low",
   "qualified": boolean,              // true only if this client should be asked for a review now
+  "case_stage": "disbursement" | "ongoing",  // see rule below
   "positive_signals": string[],      // short phrases naming the positive signals you actually observed
   "disqualifiers": string[],         // short phrases for any negative/disqualifying signals (empty if none)
   "reasoning": string[]              // 2-5 concrete bullet points, in plain English, citing evidence — this is shown to staff
@@ -513,6 +514,10 @@ Rules:
     - **Below 55:** weak, unclear, or disqualified.
   - **Do not inflate a score just because there are no negatives** — the absence of complaints is not the same as a strong positive experience.
 - **confidence**: "High" when the client's positive experience is explicit, genuine, and unambiguous (a STRONG signal) with zero negatives — this can be at **any** stage. "Medium" when positive but softer, partial, or mostly routine cooperation. "Low" when unsure. Routine courtesy or procedural cooperation alone is not "High".
+- **case_stage**: classify what point in the case this positive moment comes from — this is used to rank money/closure clients separately from active-case clients, so be accurate and do NOT let it change the score:
+  - **"disbursement"** → the positive moment is driven by **money or the end of the case**: settlement funds distributed/disbursed, a settlement check is ready / picked up / on its way, or the case has **closed / resolved / settled**.
+  - **"ongoing"** → **any other** stage while the matter is still active (a delighted intake, mid-case reassurance, gratitude to staff, relief) where money has **not** been disbursed and the case is **not** closed.
+  - When unsure, default to **"ongoing"**.
 - **qualified**: must be false whenever "disqualifiers" is non-empty.
 - **positive_signals** / **disqualifiers**: name only signals you truly saw in the journey. Do not pad.
 - **reasoning**: each bullet a **complete sentence** ending in a period. Ground every bullet in the journey (e.g. "Settlement funds were distributed on the call dated ...", "Client thanked the legal assistant twice by text."). This text is posted to staff, so make it specific and skimmable. Never fabricate.

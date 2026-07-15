@@ -2895,10 +2895,17 @@ function parseReviewOpportunityJson(rawText) {
         ? [String(v).trim()].filter(Boolean)
         : [];
 
+  // Disbursement (money/closure) vs ongoing (active case). Defaults to ongoing
+  // so we never mislabel an active-case client as a money client.
+  const case_stage = String(obj.case_stage || '').trim().toLowerCase() === 'disbursement'
+    ? 'disbursement'
+    : 'ongoing';
+
   return {
     review_score,
     confidence,
     qualified: obj.qualified === true,
+    case_stage,
     positive_signals: toList(obj.positive_signals, 12),
     disqualifiers: toList(obj.disqualifiers, 12),
     reasoning: toList(obj.reasoning, 8),
@@ -2952,30 +2959,43 @@ function sentimentDisqualifies(sentiment) {
 /** Emoji staff react with to approve texting the client (configurable). */
 const REVIEW_APPROVE_EMOJI = (process.env.REVIEW_APPROVE_EMOJI || 'white_check_mark').replace(/:/g, '').trim();
 
-/** Intro / summary message posted before the per-candidate cards. */
+/** Intro / summary message posted before the per-bucket sections. */
 function buildReviewIntroMessage(meta) {
-  const { rangeLabel, dateLabel, candidateCount, qualifiedCount, reportedCount, fallbackBest, canApprove } = meta;
+  const { rangeLabel, dateLabel, candidateCount, qualifiedCount, ongoingCount, disbursementCount, reportedCount, canApprove } = meta;
   const approveHint = canApprove
     ? `React :${REVIEW_APPROVE_EMOJI}: (or reply *approve*) on a card to text that client their review link.`
     : '_Approval-to-send is off until the review store + Quo sending are configured._';
-  const contextText = fallbackBest
-    ? `No one cleared the bar (score ≥ ${REVIEW_REPORT_MIN_SCORE} + High) — showing today's *best positive moment* instead.  ·  Active in last 24h: *${candidateCount}*  ·  Positive: *${qualifiedCount}*  ·  ${rangeLabel}`
-    : `Active in last 24h: *${candidateCount}*  ·  Qualified: *${qualifiedCount}*  ·  Showing top *${reportedCount}*  ·  ${rangeLabel}`;
+  const contextText =
+    `Active in last 24h: *${candidateCount}*  ·  Positive: *${qualifiedCount}* ` +
+    `(ongoing *${ongoingCount}* · disbursement *${disbursementCount}*)  ·  Showing *${reportedCount}*  ·  ${rangeLabel}`;
   return {
-    text: `⭐ Review Intelligence — ${dateLabel} — ${fallbackBest ? "best positive moment (below the bar)" : `${reportedCount} candidate(s)`}`,
+    text: `⭐ Review Intelligence — ${dateLabel} — ${reportedCount} candidate(s)`,
     blocks: [
       { type: 'header', text: { type: 'plain_text', text: `⭐ Review Intelligence — ${dateLabel}`, emoji: true } },
-      {
-        type: 'context',
-        elements: [
-          {
-            type: 'mrkdwn',
-            text: contextText,
-          },
-        ],
-      },
-      { type: 'section', text: { type: 'mrkdwn', text: approveHint } },
+      { type: 'context', elements: [{ type: 'mrkdwn', text: contextText }] },
+      { type: 'section', text: { type: 'mrkdwn', text: `${approveHint}\n_Money/closure clients are ranked separately from active-case clients so they don't crowd out ongoing-case reviews._` } },
+    ],
+  };
+}
+
+/** Header for one bucket section (ongoing vs disbursement). */
+function buildReviewSectionHeader(bucket) {
+  const { title, sel, poolCount } = bucket;
+  let note;
+  if (!sel.items.length) {
+    note = poolCount
+      ? `_${poolCount} positive, but none this bucket today._`
+      : '_None today._';
+  } else if (sel.fallbackBest) {
+    note = `_No one cleared the bar (score ≥ ${REVIEW_REPORT_MIN_SCORE} + High) — showing this bucket's best positive moment._`;
+  } else {
+    note = `_${sel.items.length} cleared the bar (score ≥ ${REVIEW_REPORT_MIN_SCORE} + High)._`;
+  }
+  return {
+    text: `${title} — ${sel.items.length} shown`,
+    blocks: [
       { type: 'divider' },
+      { type: 'section', text: { type: 'mrkdwn', text: `*${title}*\n${note}` } },
     ],
   };
 }
@@ -3006,10 +3026,11 @@ function buildReviewCandidateMessage(o, idx) {
       ? '\n_No client phone on file — send the link manually._'
       : '';
   const belowBarLine = o.belowBar
-    ? `⚠️ _Below the usual bar (score ≥ ${REVIEW_REPORT_MIN_SCORE} + High) — surfaced as today's best positive moment. Use your judgment before sending._\n`
+    ? `⚠️ _Below the usual bar (score ≥ ${REVIEW_REPORT_MIN_SCORE} + High) — surfaced as this bucket's best positive moment. Use your judgment before sending._\n`
     : '';
+  const bucketTag = o.bucket === 'disbursement' ? '💰 Disbursement/closure' : '🟢 Ongoing case';
   const text =
-    `*${idx + 1}. ${name}*  ·  ${caseCell}\n` +
+    `*${idx + 1}. ${name}*  ·  ${caseCell}  ·  ${bucketTag}\n` +
     belowBarLine +
     `Score: *${o.review_score}/100*   ·   Confidence: ${reviewConfidenceEmoji(o.confidence)} *${o.confidence}*\n` +
     `*Why they were selected:*\n${reasons || '• Positive signals across recent conversations.'}` +
@@ -3137,24 +3158,38 @@ async function runReviewIntelligenceReport() {
     `\n[4/5] Persisting ${opportunities.length} qualified opportunit(ies) + creating trackable links...`
   );
 
-  // Surface only the very best (high score + High confidence). Trackable links
-  // are minted only for these — no need to create links we won't act on.
+  // Disbursement (money/closure) clients naturally skew very positive, so they'd
+  // dominate a single ranking. Score them in a SEPARATE pool from ongoing-case
+  // clients. Each pool surfaces its own threshold hits (score ≥ bar + High); a
+  // pool with no hit still surfaces its single best (flagged below-bar), so
+  // ongoing-case clients are always represented even on a big disbursement day.
   const minConfRank = reviewConfidenceRank(REVIEW_REPORT_MIN_CONFIDENCE);
-  let reportItems = opportunities
-    .filter(
-      (o) => o.review_score >= REVIEW_REPORT_MIN_SCORE && reviewConfidenceRank(o.confidence) <= minConfRank
-    )
-    .slice(0, REVIEW_REPORT_LIMIT);
+  const clearsBar = (o) => o.review_score >= REVIEW_REPORT_MIN_SCORE && reviewConfidenceRank(o.confidence) <= minConfRank;
 
-  // Fallback: if nobody cleared the bar but there are still positive candidates,
-  // surface just the single best one (flagged below-bar) so the daily report is
-  // never empty-handed when there's a reasonable option.
-  let fallbackBest = false;
-  if (reportItems.length === 0 && REVIEW_REPORT_ALWAYS_SHOW_BEST && opportunities.length > 0) {
-    opportunities[0].belowBar = true;
-    reportItems = [opportunities[0]];
-    fallbackBest = true;
-  }
+  const selectBucket = (pool) => {
+    const hits = pool.filter(clearsBar).slice(0, REVIEW_REPORT_LIMIT);
+    if (hits.length) return { items: hits, fallbackBest: false };
+    if (REVIEW_REPORT_ALWAYS_SHOW_BEST && pool.length) {
+      pool[0].belowBar = true;
+      return { items: [pool[0]], fallbackBest: true };
+    }
+    return { items: [], fallbackBest: false };
+  };
+
+  // opportunities is already sorted best-first, so each filtered pool is too.
+  const ongoingPool = opportunities.filter((o) => o.case_stage !== 'disbursement');
+  const disbursementPool = opportunities.filter((o) => o.case_stage === 'disbursement');
+  const ongoingSel = selectBucket(ongoingPool);
+  const disbursementSel = selectBucket(disbursementPool);
+  ongoingSel.items.forEach((o) => { o.bucket = 'ongoing'; });
+  disbursementSel.items.forEach((o) => { o.bucket = 'disbursement'; });
+
+  // Ongoing first so money clients never sit at the very top of the report.
+  const buckets = [
+    { key: 'ongoing', title: '🟢 Ongoing-case candidates', sel: ongoingSel, poolCount: ongoingPool.length },
+    { key: 'disbursement', title: '💰 Disbursement / closure candidates', sel: disbursementSel, poolCount: disbursementPool.length },
+  ];
+  const reportItems = buckets.flatMap((b) => b.sel.items);
   const surfaced = new Set(reportItems);
 
   let firm = null;
@@ -3221,35 +3256,51 @@ async function runReviewIntelligenceReport() {
     dateLabel,
     candidateCount: candidates.length,
     qualifiedCount: opportunities.length,
+    ongoingCount: ongoingPool.length,
+    disbursementCount: disbursementPool.length,
     reportedCount: reportItems.length,
-    fallbackBest,
     canApprove: requestsOn && quoSend.isConfigured(),
   };
 
   if (!slackToken) {
     console.log('  Slack not configured (SLACK_BOT_TOKEN) — printing report:\n');
-    const intro = reportItems.length ? buildReviewIntroMessage(meta) : buildReviewEmptyMessage(meta);
-    console.log(intro.text);
-    reportItems.forEach((o, i) => console.log(buildReviewCandidateMessage(o, i).text + (o.reviewLink ? `  ${o.reviewLink}` : '')));
+    if (!reportItems.length) {
+      console.log(buildReviewEmptyMessage(meta).text);
+    } else {
+      console.log(buildReviewIntroMessage(meta).text);
+      for (const b of buckets) {
+        console.log('\n' + buildReviewSectionHeader(b).text);
+        b.sel.items.forEach((o, i) => console.log(buildReviewCandidateMessage(o, i).text + (o.reviewLink ? `  ${o.reviewLink}` : '')));
+      }
+    }
   } else {
     try {
-      const intro = reportItems.length ? buildReviewIntroMessage(meta) : buildReviewEmptyMessage(meta);
-      await postSlackMessage({ token: slackToken, channel: reviewChannel, text: intro.text, blocks: intro.blocks });
-
-      // One message per candidate → its ts maps back to the request for ✅ approval.
-      for (let i = 0; i < reportItems.length; i++) {
-        const o = reportItems[i];
-        const msg = buildReviewCandidateMessage(o, i);
-        const posted = await postSlackMessage({ token: slackToken, channel: reviewChannel, text: msg.text, blocks: msg.blocks });
-        if (o.reviewRequestId && posted?.ts) {
-          try {
-            await reviewRequests.setSlackMessage(o.reviewRequestId, posted.channel || reviewChannel, posted.ts);
-          } catch (err) {
-            console.warn(`  Could not map Slack message for ${o.clientName}: ${err.message}`);
+      if (!reportItems.length) {
+        const empty = buildReviewEmptyMessage(meta);
+        await postSlackMessage({ token: slackToken, channel: reviewChannel, text: empty.text, blocks: empty.blocks });
+      } else {
+        const intro = buildReviewIntroMessage(meta);
+        await postSlackMessage({ token: slackToken, channel: reviewChannel, text: intro.text, blocks: intro.blocks });
+        // Each bucket: a section header, then one message per candidate (its ts
+        // maps back to the review request for ✅ approval).
+        for (const b of buckets) {
+          const header = buildReviewSectionHeader(b);
+          await postSlackMessage({ token: slackToken, channel: reviewChannel, text: header.text, blocks: header.blocks });
+          for (let i = 0; i < b.sel.items.length; i++) {
+            const o = b.sel.items[i];
+            const msg = buildReviewCandidateMessage(o, i);
+            const posted = await postSlackMessage({ token: slackToken, channel: reviewChannel, text: msg.text, blocks: msg.blocks });
+            if (o.reviewRequestId && posted?.ts) {
+              try {
+                await reviewRequests.setSlackMessage(o.reviewRequestId, posted.channel || reviewChannel, posted.ts);
+              } catch (err) {
+                console.warn(`  Could not map Slack message for ${o.clientName}: ${err.message}`);
+              }
+            }
           }
         }
       }
-      console.log(`  Posted intro + ${reportItems.length} candidate message(s) to #${reviewChannel}.`);
+      console.log(`  Posted ${reportItems.length} candidate message(s) across 2 buckets to #${reviewChannel}.`);
     } catch (err) {
       console.warn(`  Slack post failed: ${err.message}`);
     }
