@@ -350,13 +350,19 @@ function renderReviewLandingPage(configOverride, opts = {}) {
 
   const showLaura = coerceBool(cfg.showLaura, true);
   const lauraImg = String(cfg.lauraImageUrl || '').trim();
+  // Laura sits high on the page (just under the headline, where the body used to
+  // be), so no leading divider here.
   const lauraBlock = showLaura
-    ? `<div class="divider"></div>
-        <section class="laura">
+    ? `<section class="laura">
         ${lauraImg ? `<img class="laura-img" src="${escapeAttr(lauraImg)}" alt="Laura Ramos"/>` : ''}
         <p class="laura-quote">${nl2br(cfg.lauraQuote)}</p>
         <p class="laura-attr">${escapeHtml(cfg.lauraAttribution)}</p>
       </section>`
+    : '';
+
+  // The body copy moves down beneath the support section, with a divider above it.
+  const bottomBody = String(cfg.body || '').trim()
+    ? `<div class="divider"></div><p class="body">${nl2br(cfg.body)}</p>`
     : '';
 
   const textHref = telHref(cfg.textNumber);
@@ -415,14 +421,14 @@ function renderReviewLandingPage(configOverride, opts = {}) {
       -webkit-font-smoothing: antialiased;
     }
     .header { text-align: center; margin: 8px 0 22px; color: #fff; }
-    .logo-img { max-height: 54px; max-width: 240px; width: auto; }
+    .logo-img { max-height: 62px; max-width: 276px; width: auto; }
     .logo-word { display: inline-flex; flex-direction: column; align-items: center; gap: 6px; }
     .logo-mark {
-      font-family: Georgia, "Times New Roman", serif; font-size: 34px; font-weight: 700;
+      font-family: Georgia, "Times New Roman", serif; font-size: 39px; font-weight: 700;
       letter-spacing: 1px; line-height: 1; color: #fff;
-      border: 2px solid rgba(255,255,255,.55); border-radius: 8px; padding: 6px 12px;
+      border: 2px solid rgba(255,255,255,.55); border-radius: 8px; padding: 7px 14px;
     }
-    .logo-name { font-family: Georgia, serif; font-size: 12.5px; letter-spacing: 3px; color: #eaf0ff; }
+    .logo-name { font-family: Georgia, serif; font-size: 14.5px; letter-spacing: 3px; color: #eaf0ff; }
     .avail { margin-top: 12px; font-size: 12px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); }
     .card {
       background: var(--card); width: 100%; max-width: 30rem; border-radius: 24px;
@@ -481,12 +487,12 @@ function renderReviewLandingPage(configOverride, opts = {}) {
   <main class="card">
     <div class="stars" aria-hidden="true">★★★★★</div>
     <h1>${nl2br(headline)}</h1>
-    <p class="body">${nl2br(cfg.body)}</p>
+    ${lauraBlock}
     ${ctaBlock}
     ${cfg.helperText ? `<p class="helper">${escapeHtml(cfg.helperText)}</p>` : ''}
     ${disabledNote}
     ${helpBlock}
-    ${lauraBlock}
+    ${bottomBody}
   </main>
   <footer class="footer">${nl2br(cfg.footer)}</footer>
 </body>
