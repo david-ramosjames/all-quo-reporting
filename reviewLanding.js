@@ -46,6 +46,9 @@ const DEFAULT_CONFIG = {
   facebookReviewUrl: '',
   appleReviewUrl: '',
   yelpReviewUrl: '',
+  // Button order (comma-separated). The FIRST configured one is the primary —
+  // shown in the button colour with the helper text as its subtitle.
+  reviewButtonOrder: 'google,facebook,apple,yelp',
   helperText: 'Takes about 60 seconds',
   // Laura section
   showLaura: true,
@@ -96,6 +99,7 @@ const FIELD_DEFS = [
   { key: 'facebookReviewUrl', label: 'Facebook review URL', type: 'url', group: 'Main content' },
   { key: 'appleReviewUrl', label: 'Apple Maps review URL', type: 'url', group: 'Main content' },
   { key: 'yelpReviewUrl', label: 'Yelp review URL', type: 'url', group: 'Main content' },
+  { key: 'reviewButtonOrder', label: 'Button order — comma-separated (google, facebook, apple, yelp); first = primary, shown in color', type: 'text', group: 'Main content' },
   { key: 'helperText', label: 'Helper text under button', type: 'text', group: 'Main content' },
   // Laura section
   { key: 'showLaura', label: 'Show Laura section', type: 'bool', group: 'Laura section' },
@@ -319,19 +323,33 @@ function renderReviewLandingPage(configOverride, opts = {}) {
   // Review CTAs: one button per configured platform (Google primary, the others
   // secondary). In tracking mode each points at the internal /r/<token>/<platform>
   // route (records the click, then redirects); otherwise straight to the URL.
-  const REVIEW_PLATFORMS = [
-    { key: 'google', urlKey: 'googleReviewUrl', label: cfg.buttonText || 'Leave a Google Review', icon: GOOGLE_G_SVG, primary: true },
-    { key: 'facebook', urlKey: 'facebookReviewUrl', label: 'Review us on Facebook', icon: '' },
-    { key: 'apple', urlKey: 'appleReviewUrl', label: 'Review us on Apple Maps', icon: '' },
-    { key: 'yelp', urlKey: 'yelpReviewUrl', label: 'Review us on Yelp', icon: '' },
-  ];
-  const reviewButtons = REVIEW_PLATFORMS.map((p) => {
+  const PLATFORM_META = {
+    google: { urlKey: 'googleReviewUrl', label: cfg.buttonText || 'Leave a Google Review', icon: GOOGLE_G_SVG },
+    facebook: { urlKey: 'facebookReviewUrl', label: 'Review us on Facebook', icon: '' },
+    apple: { urlKey: 'appleReviewUrl', label: 'Review us on Apple Maps', icon: '' },
+    yelp: { urlKey: 'yelpReviewUrl', label: 'Review us on Yelp', icon: '' },
+  };
+  // Admin-controlled order; the first configured platform is the primary button.
+  const seenKeys = new Set();
+  const orderedKeys = String(cfg.reviewButtonOrder || 'google,facebook,apple,yelp')
+    .split(',').map((s) => s.trim().toLowerCase())
+    .filter((k) => PLATFORM_META[k] && !seenKeys.has(k) && seenKeys.add(k));
+  const configuredKeys = orderedKeys.filter(
+    (k) => /^https?:\/\//i.test(String(cfg[PLATFORM_META[k].urlKey] || '').trim())
+  );
+  const helperSub = String(cfg.helperText || '').trim();
+  const reviewButtons = configuredKeys.map((k, i) => {
+    const p = PLATFORM_META[k];
     const raw = String(cfg[p.urlKey] || '').trim();
-    if (!/^https?:\/\//i.test(raw)) return '';
-    const href = tracking ? `${escapeAttr(trackingBase)}/${p.key}` : escapeAttr(raw);
-    return `<a class="${p.primary ? 'cta' : 'cta secondary'}" href="${href}" rel="noopener">${p.icon}${escapeHtml(p.label)}</a>`;
-  }).filter(Boolean).join('');
-  const hasAnyPlatform = reviewButtons.length > 0;
+    const href = tracking ? `${escapeAttr(trackingBase)}/${k}` : escapeAttr(raw);
+    if (i === 0) {
+      // Primary: coloured, larger, with the helper text as a subtitle line.
+      const sub = helperSub ? `<span class="cta-sub">${escapeHtml(helperSub)}</span>` : '';
+      return `<a class="cta has-sub" href="${href}" rel="noopener"><span class="cta-label">${p.icon}${escapeHtml(p.label)}</span>${sub}</a>`;
+    }
+    return `<a class="cta secondary" href="${href}" rel="noopener">${p.icon}${escapeHtml(p.label)}</a>`;
+  }).join('');
+  const hasAnyPlatform = configuredKeys.length > 0;
   const ctaBlock = hasAnyPlatform
     ? `<div class="cta-group">${reviewButtons}</div>`
     : `<a class="cta" href="#" aria-disabled="true" rel="noopener">${GOOGLE_G_SVG}${escapeHtml(cfg.buttonText)}</a>`;
@@ -448,6 +466,9 @@ function renderReviewLandingPage(configOverride, opts = {}) {
     .cta:hover { filter: brightness(1.05); }
     .cta[aria-disabled="true"] { opacity: .5; pointer-events: none; box-shadow: none; }
     .cta-group { display: flex; flex-direction: column; gap: 12px; }
+    .cta.has-sub { flex-direction: column; gap: 3px; padding-top: 15px; padding-bottom: 15px; }
+    .cta .cta-label { display: inline-flex; align-items: center; justify-content: center; gap: 8px; }
+    .cta .cta-sub { font-size: 12.5px; font-weight: 500; opacity: .9; }
     .cta.secondary { background: transparent; color: var(--ink); box-shadow: none;
       border: 1.5px solid ${shade(cta, -6)}55; font-size: 16px; padding: 14px 20px; }
     .cta.secondary:hover { filter: none; background: ${shade(cta, 40)}14; }
@@ -489,7 +510,6 @@ function renderReviewLandingPage(configOverride, opts = {}) {
     <h1>${nl2br(headline)}</h1>
     ${lauraBlock}
     ${ctaBlock}
-    ${cfg.helperText ? `<p class="helper">${escapeHtml(cfg.helperText)}</p>` : ''}
     ${disabledNote}
     ${helpBlock}
     ${bottomBody}
