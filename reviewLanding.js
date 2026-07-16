@@ -290,6 +290,15 @@ const GOOGLE_G_SVG =
   '<path fill="#EA4335" d="M24 10.75c3.23 0 6.13 1.11 8.41 3.29l6.31-6.31C34.91 4.18 29.93 2 24 2 15.4 2 7.96 6.93 4.34 14.12l7.35 5.7c1.73-5.2 6.58-9.07 12.31-9.07z"/>' +
   '</svg>';
 
+// Brand marks for the other review platforms, matched to the Google icon's size/style.
+const ICON_ATTRS = 'width="20" height="20" viewBox="0 0 24 24" aria-hidden="true" style="vertical-align:-4px;margin-right:10px"';
+const FACEBOOK_SVG =
+  `<svg ${ICON_ATTRS}><path fill="#1877F2" d="M24 12.073c0-6.627-5.373-12-12-12s-12 5.373-12 12c0 5.99 4.388 10.954 10.125 11.854v-8.385H7.078v-3.47h3.047V9.43c0-3.007 1.792-4.669 4.533-4.669 1.312 0 2.686.235 2.686.235v2.953H15.83c-1.491 0-1.956.925-1.956 1.874v2.25h3.328l-.532 3.47h-2.796v8.385C19.612 23.027 24 18.062 24 12.073z"/></svg>`;
+const APPLE_SVG =
+  `<svg ${ICON_ATTRS}><path fill="#000000" d="M17.05 12.536c-.03-3.017 2.47-4.463 2.582-4.535-1.406-2.056-3.594-2.338-4.373-2.37-1.861-.189-3.635 1.098-4.58 1.098-.944 0-2.401-1.07-3.95-1.042-2.033.03-3.907 1.182-4.951 3.003-2.11 3.663-.54 9.085 1.51 12.06 1.003 1.456 2.198 3.09 3.766 3.032 1.51-.06 2.08-.977 3.905-.977 1.826 0 2.34.977 3.937.947 1.625-.027 2.653-1.485 3.647-2.945 1.148-1.688 1.62-3.323 1.65-3.407-.036-.015-3.166-1.216-3.198-4.864zM14.09 4.36c.834-1.01 1.397-2.416 1.243-3.815-1.202.048-2.657.8-3.518 1.81-.772.895-1.448 2.324-1.267 3.696 1.34.104 2.708-.68 3.542-1.69z"/></svg>`;
+const YELP_SVG =
+  `<svg ${ICON_ATTRS}><path fill="#D32323" d="M20.16 12.594l-4.995 1.433c-.96.276-1.74-.8-1.176-1.63l2.905-4.308a.792.792 0 0 1 1.062-.222 8.638 8.638 0 0 1 2.906 3.57.79.79 0 0 1-.702 1.157zm-2.352 5.946l-4.215-2.048c-.955-.464-.594-1.913.445-1.825l5.078.375a.786.786 0 0 1 .719.767 8.638 8.638 0 0 1-1.16 4.405.79.79 0 0 1-.867-.673zm-6.577-1.848l.006 5.085a.79.79 0 0 1-.888.79 8.638 8.638 0 0 1-4.19-1.758.79.79 0 0 1 .016-1.24l3.87-3.027c.75-.587 1.836-.037 1.836.148zm-3.9-3.174l-4.87-1.634a.79.79 0 0 1-.5-1.02 8.638 8.638 0 0 1 2.42-3.72.79.79 0 0 1 1.19.147l2.816 4.227c.578.867-.216 2.005-1.056 1.733zm2.99-2.995L7.474 5.09a.79.79 0 0 1 .372-1.17A8.638 8.638 0 0 1 12.32 3.3a.79.79 0 0 1 .78.8l-.16 6.145c-.024.998-1.278 1.404-1.83.593z"/></svg>`;
+
 /**
  * Renders the public, mobile-first landing page.
  * @param {object} [configOverride]
@@ -325,9 +334,9 @@ function renderReviewLandingPage(configOverride, opts = {}) {
   // route (records the click, then redirects); otherwise straight to the URL.
   const PLATFORM_META = {
     google: { urlKey: 'googleReviewUrl', label: cfg.buttonText || 'Leave a Google Review', icon: GOOGLE_G_SVG },
-    facebook: { urlKey: 'facebookReviewUrl', label: 'Review us on Facebook', icon: '' },
-    apple: { urlKey: 'appleReviewUrl', label: 'Review us on Apple Maps', icon: '' },
-    yelp: { urlKey: 'yelpReviewUrl', label: 'Review us on Yelp', icon: '' },
+    facebook: { urlKey: 'facebookReviewUrl', label: 'Review us on Facebook', icon: FACEBOOK_SVG },
+    apple: { urlKey: 'appleReviewUrl', label: 'Review us on Apple Maps', icon: APPLE_SVG },
+    yelp: { urlKey: 'yelpReviewUrl', label: 'Review us on Yelp', icon: YELP_SVG },
   };
   // Admin-controlled order; the first configured platform is the primary button.
   const seenKeys = new Set();
