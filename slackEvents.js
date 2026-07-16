@@ -160,7 +160,7 @@ async function approveAndSend(args) {
 async function handleInteraction(payload) {
   if (!payload || payload.type !== 'block_actions') return;
   const action = (payload.actions || [])[0];
-  if (!action || action.action_id !== 'review_dest') return;
+  if (!action || !String(action.action_id || '').startsWith('review_dest')) return;
   let value = {};
   try { value = JSON.parse(action.value || '{}'); } catch { value = {}; }
   const destination = value.d;

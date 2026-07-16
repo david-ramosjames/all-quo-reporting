@@ -3022,9 +3022,11 @@ function buildReviewEmptyMessage(meta) {
  */
 function buildReviewActionButtons(o, opts = {}) {
   if (!opts.canApprove || !o.reviewRequestId || !o.reviewToken) return null;
+  // action_id must be unique among the buttons in a message, or Slack rejects
+  // the whole post — so suffix it with the destination.
   const btn = (label, dest, style) => ({
     type: 'button',
-    action_id: 'review_dest',
+    action_id: `review_dest:${dest}`,
     text: { type: 'plain_text', text: label, emoji: true },
     value: JSON.stringify({ t: o.reviewToken, d: dest }),
     ...(style ? { style } : {}),
@@ -3323,14 +3325,15 @@ async function runReviewIntelligenceReport() {
           await postSlackMessage({ token: slackToken, channel: reviewChannel, text: header.text, blocks: header.blocks });
           for (let i = 0; i < b.sel.items.length; i++) {
             const o = b.sel.items[i];
-            const msg = buildReviewCandidateMessage(o, i, cardOpts);
-            const posted = await postSlackMessage({ token: slackToken, channel: reviewChannel, text: msg.text, blocks: msg.blocks });
-            if (o.reviewRequestId && posted?.ts) {
-              try {
+            // One card failing must not abort the rest of the report.
+            try {
+              const msg = buildReviewCandidateMessage(o, i, cardOpts);
+              const posted = await postSlackMessage({ token: slackToken, channel: reviewChannel, text: msg.text, blocks: msg.blocks });
+              if (o.reviewRequestId && posted?.ts) {
                 await reviewRequests.setSlackMessage(o.reviewRequestId, posted.channel || reviewChannel, posted.ts);
-              } catch (err) {
-                console.warn(`  Could not map Slack message for ${o.clientName}: ${err.message}`);
               }
+            } catch (err) {
+              console.warn(`  Could not post/map card for ${o.clientName}: ${err.message}`);
             }
           }
         }
