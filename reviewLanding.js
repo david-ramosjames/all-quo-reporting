@@ -559,6 +559,16 @@ function renderReviewLandingEditor(message, opts = {}) {
     ? `<p class="msg ${/fail|invalid|disabled|not set/i.test(message) ? 'err' : 'ok'}">${escapeHtml(message)}</p>`
     : '';
 
+  // Firm selector — each firm has its own review-page branding.
+  const firms = Array.isArray(opts.firms) ? opts.firms : [];
+  const firmId = opts.firmId || '';
+  const firmSelector = firms.length > 1
+    ? `<div class="field" style="max-width:22rem"><label>Editing which firm's page</label>
+        <select onchange="if(this.value)location.href='/review/edit?firm='+encodeURIComponent(this.value)">
+          ${firms.map((f) => `<option value="${escapeAttr(f.id)}"${f.id === firmId ? ' selected' : ''}>${escapeHtml(f.firm_name || f.id)}</option>`).join('')}
+        </select></div>`
+    : '';
+
   const groups = [];
   const seen = new Set();
   for (const f of FIELD_DEFS) {
@@ -619,9 +629,11 @@ function renderReviewLandingEditor(message, opts = {}) {
 </head>
 <body>
   <h1>Review page — admin editor</h1>
-  <p><a href="/review" target="_blank">Open live page ↗</a> · only Google reviews in V1.</p>
+  <p><a href="/review" target="_blank">Open live page ↗</a> · <a href="/review/firms">Manage firms</a></p>
+  ${firmSelector}
   ${msg}
   <form method="POST" action="/review/edit">
+    <input type="hidden" name="firmId" value="${escapeAttr(firmId)}"/>
     <div class="bar">
       <button type="submit">Save changes</button>
       <div class="tokenbox">

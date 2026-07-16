@@ -542,8 +542,13 @@ function startManualTriggerServer(opts) {
           reviewAuth.sendGate(res, reviewAuth.renderAuthGate, req, 200, '', '/review/edit');
           return;
         }
-        const cfg = firmStore.landingConfigForFirm(await firmStore.getDefaultFirm());
-        sendHtml(res, 200, renderReviewLandingEditor('', { authMode: 'google', email: session.email, config: cfg }));
+        const firms = await firmStore.loadFirms();
+        const requested = url.searchParams.get('firm') || '';
+        const firm = (requested && await firmStore.getFirmById(requested)) || await firmStore.getDefaultFirm();
+        const cfg = firmStore.landingConfigForFirm(firm);
+        sendHtml(res, 200, renderReviewLandingEditor('', {
+          authMode: 'google', email: session.email, config: cfg, firms, firmId: firm.id,
+        }));
         return;
       }
 
@@ -564,18 +569,21 @@ function startManualTriggerServer(opts) {
           sendHtml(res, 400, renderReviewLandingEditor('Could not read form.', { authMode: 'google', email: session.email }));
           return;
         }
-        const { token: _t, ...patch } = form; // unknown keys are ignored downstream
-        const result = await firmStore.saveDefaultFirmPageSettings(patch);
-        const cfg = firmStore.landingConfigForFirm(await firmStore.getDefaultFirm());
+        const { token: _t, firmId: postedFirmId, ...patch } = form; // unknown keys ignored downstream
+        const targetId = String(postedFirmId || '').trim() || firmStore.DEFAULT_FIRM_ID;
+        const result = await firmStore.saveFirmPageSettings(targetId, patch);
+        const firms = await firmStore.loadFirms();
+        const firm = (await firmStore.getFirmById(targetId)) || await firmStore.getDefaultFirm();
+        const cfg = firmStore.landingConfigForFirm(firm);
         const okMsg = result.storage === 'file'
           ? 'Saved to local file (set DATABASE_URL or a review sheet to persist across redeploys). View it at /review.'
-          : `Saved to ${result.storage} (persists across redeploys). View it at /review.`;
+          : `Saved “${firm.firm_name || firm.id}” to ${result.storage} (persists across redeploys). View it at /review.`;
         sendHtml(
           res,
           result.ok ? 200 : 500,
           renderReviewLandingEditor(
             result.ok ? okMsg : `Save failed: ${result.error || 'unknown error'}`,
-            { authMode: 'google', email: session.email, config: cfg }
+            { authMode: 'google', email: session.email, config: cfg, firms, firmId: firm.id }
           )
         );
         return;
@@ -831,6 +839,15 @@ function startManualTriggerServer(opts) {
 
       // Manual-trigger dashboard — gated by the same Google sign-in.
       if (req.method === 'GET' && path === '/') {
+        // On a firm's branded review domain, "/" serves that firm's public review
+        // page — not the Google-gated admin dashboard (which lives on the app's
+        // own domain). Admin routes stay gated regardless of host.
+        const brandedFirm = await firmStore.matchFirmByHost(req.headers.host);
+        if (brandedFirm) {
+          const cfg = firmStore.landingConfigForFirm(brandedFirm);
+          sendHtml(res, 200, renderReviewLandingPage(cfg, {}));
+          return;
+        }
         if (!authOn) {
           sendHtml(res, 200, buildLockedHtml('The manual-trigger dashboard'));
           return;

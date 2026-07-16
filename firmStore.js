@@ -223,11 +223,28 @@ async function getFirmByHost(host) {
 }
 
 /**
- * Durably save the default firm's page settings from an editor patch.
- * Falls back to the review-landing.json file when Sheets isn't configured.
- * @returns {Promise<{ ok: boolean, storage: 'sheet'|'file', error?: string }>}
+ * Returns the firm whose branded review_domain exactly matches this host, or
+ * null (no default fallback). Used to detect that a request arrived on a firm's
+ * branded review domain — those should serve the public review page, not admin.
  */
-async function saveDefaultFirmPageSettings(patch) {
+async function matchFirmByHost(host) {
+  const h = normalizeHost(host);
+  if (!h) return null;
+  const firms = await loadFirms();
+  const hit = firms.find((f) => normalizeHost(f.review_domain) && normalizeHost(f.review_domain) === h);
+  if (hit) return hit;
+  const envDomain = normalizeHost(process.env.REVIEW_DOMAIN || '');
+  if (envDomain && envDomain === h) return await getDefaultFirm();
+  return null;
+}
+
+/**
+ * Durably save a firm's review-page settings from an editor patch. When neither
+ * Postgres nor Sheets is configured, falls back to the review-landing.json file
+ * (single-firm only). `firmId` defaults to the default firm.
+ * @returns {Promise<{ ok: boolean, storage: string, error?: string }>}
+ */
+async function saveFirmPageSettings(firmId, patch) {
   if (!pg.isEnabled() && !db.isConfigured()) {
     const res = saveReviewLandingConfig(patch || {});
     return { ok: res.ok, storage: 'file', error: res.error };
@@ -235,25 +252,30 @@ async function saveDefaultFirmPageSettings(patch) {
 
   const storage = pg.isEnabled() ? 'postgres' : 'sheet';
   try {
-    // Merge patch onto the current effective config, then split into columns + blob.
-    const current = landingConfigForFirm(await getDefaultFirm());
+    const targetId = firmId || DEFAULT_FIRM_ID;
+    const firms = await loadFirms();
+    const existing = firms.find((f) => f.id === targetId)
+      || (targetId === DEFAULT_FIRM_ID ? firms.find((f) => f.id === DEFAULT_FIRM_ID) || firms[0] : null);
+
+    // Merge patch onto this firm's current effective config, then split into
+    // discrete columns + the settings blob.
+    const current = landingConfigForFirm(existing || (await getDefaultFirm()));
     const merged = { ...current };
     for (const [k, v] of Object.entries(patch || {})) {
       if (LANDING_KEYS.includes(k)) merged[k] = v;
     }
-
     const blob = {};
     for (const k of LANDING_KEYS) blob[k] = merged[k];
 
-    const firms = await loadFirms();
-    const existing = firms.find((f) => f.id === DEFAULT_FIRM_ID) || firms[0];
     const now = nowIso();
-
     const rowObj = {
-      id: existing?.id || DEFAULT_FIRM_ID,
+      id: existing?.id || targetId,
       firm_name: existing?.firm_name || COMPANY_NAME,
-      review_domain: existing?.review_domain || (process.env.REVIEW_DOMAIN || '').trim(),
+      review_domain: existing?.review_domain || (targetId === DEFAULT_FIRM_ID ? (process.env.REVIEW_DOMAIN || '').trim() : ''),
       google_review_url: merged.googleReviewUrl || '',
+      facebook_review_url: merged.facebookReviewUrl || '',
+      apple_review_url: merged.appleReviewUrl || '',
+      yelp_review_url: merged.yelpReviewUrl || '',
       call_phone_number: merged.callNumber || '',
       text_phone_number: merged.textNumber || '',
       review_page_settings_json: JSON.stringify(blob),
@@ -272,6 +294,11 @@ async function saveDefaultFirmPageSettings(patch) {
   } catch (err) {
     return { ok: false, storage, error: err.message };
   }
+}
+
+/** Backward-compatible wrapper: save the default firm's page settings. */
+async function saveDefaultFirmPageSettings(patch) {
+  return saveFirmPageSettings(DEFAULT_FIRM_ID, patch);
 }
 
 function slugifyFirmId(s) {
@@ -350,7 +377,9 @@ module.exports = {
   getDefaultFirm,
   getFirmById,
   getFirmByHost,
+  matchFirmByHost,
   saveDefaultFirmPageSettings,
+  saveFirmPageSettings,
   saveFirm,
   createFirm,
   deleteFirm,
