@@ -432,6 +432,26 @@ function startManualTriggerServer(opts) {
 
       // Public, branded review landing page (mobile-first). No auth.
       // Resolves firm branding by Host (custom domain), personalizes via ?name=.
+      // Public: reports which firm the incoming Host resolves to. Used by the
+      // firm editor's "Check domain" button to confirm a branded domain points
+      // here and maps to the right firm. CORS-open (returns only public info).
+      if (req.method === 'GET' && path === '/review/domain-info') {
+        const firm = await firmStore.getFirmByHost(req.headers.host);
+        res.writeHead(200, {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Access-Control-Allow-Origin': '*',
+          'Cache-Control': 'no-store',
+        });
+        res.end(JSON.stringify({
+          ok: true,
+          app: 'quo-review',
+          host: String(req.headers.host || ''),
+          firmId: (firm && firm.id) || '',
+          firmName: (firm && firm.firm_name) || '',
+        }));
+        return;
+      }
+
       if (req.method === 'GET' && path === '/review') {
         const firstName =
           url.searchParams.get('name') ||
@@ -620,6 +640,41 @@ function startManualTriggerServer(opts) {
         const result = await firmStore.deleteFirm(String(form.id || '').trim());
         if (!result.ok) { sendJson(res, 400, { error: result.error || 'Delete failed.' }); return; }
         sendJson(res, 200, { ok: true });
+        return;
+      }
+
+      // Verify a firm's branded domain: fetch https://<domain>/review/domain-info
+      // and confirm it reaches this app and maps to the expected firm.
+      if (req.method === 'POST' && path === '/review/firms/check-domain') {
+        if (!authOn) { sendJson(res, 503, { error: 'Locked.' }); return; }
+        const session = reviewAuth.getSession(req);
+        if (!session) { sendJson(res, 401, { error: 'Sign in required.' }); return; }
+        let form;
+        try { form = await parseFormBody(req); } catch { sendJson(res, 400, { error: 'Bad form.' }); return; }
+        const domain = String(form.domain || '').trim().replace(/^https?:\/\//i, '').replace(/\/+$/, '');
+        const firmId = String(form.id || '').trim();
+        if (!domain) { sendJson(res, 400, { error: 'No domain to check — enter a branded review domain first.' }); return; }
+        const target = `https://${domain}/review/domain-info`;
+        try {
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => ctrl.abort(), 8000);
+          let r;
+          try {
+            r = await fetch(target, { signal: ctrl.signal, redirect: 'follow' });
+          } finally {
+            clearTimeout(timer);
+          }
+          const body = await r.json().catch(() => null);
+          if (!r.ok || !body || body.app !== 'quo-review') {
+            sendJson(res, 200, { reachable: true, ok: false, status: r.status, note: 'Reached a server, but it is not this review app — check the domain’s target.' });
+            return;
+          }
+          const matches = Boolean(firmId) && body.firmId === firmId;
+          sendJson(res, 200, { reachable: true, ok: true, matches, resolvedFirmId: body.firmId, resolvedFirmName: body.firmName });
+        } catch (err) {
+          const msg = err && err.name === 'AbortError' ? 'timed out (no response in 8s)' : (err && err.message) || 'unreachable';
+          sendJson(res, 200, { reachable: false, ok: false, error: msg });
+        }
         return;
       }
 

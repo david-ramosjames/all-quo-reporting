@@ -237,6 +237,17 @@ function renderFirmField(f, value) {
       <input type="password" name="${f.key}" autocomplete="new-password" placeholder="${esc(ph)}"/>${help}
     </div>`;
   }
+  // The branded review domain gets a "Check" button that verifies it points here.
+  if (f.key === 'review_domain') {
+    return `<div class="field">
+      <label>${esc(f.label)}</label>
+      <div style="display:flex;gap:.5rem;align-items:center">
+        <input type="text" id="review_domain" name="${f.key}" value="${esc(value)}" placeholder="${esc(f.placeholder || '')}" style="flex:1"/>
+        <button type="button" class="btn ghost" id="check-domain">Check</button>
+      </div>
+      <div id="domain-status" class="help"></div>${help}
+    </div>`;
+  }
   return `<div class="field">
     <label>${esc(f.label)}</label>
     <input type="text" name="${f.key}" value="${esc(value)}" placeholder="${esc(f.placeholder || '')}"/>${help}
@@ -275,6 +286,31 @@ function renderFirmEditorPage(firm, opts = {}) {
         <a class="btn ghost" href="/review/firms">Cancel</a>
       </div>
     </form>
+    <script>
+      (function () {
+        var btn = document.getElementById('check-domain');
+        if (!btn) return;
+        var firmId = ${JSON.stringify((firm && firm.id) || '')};
+        btn.addEventListener('click', async function () {
+          var input = document.getElementById('review_domain');
+          var status = document.getElementById('domain-status');
+          var domain = (input.value || '').trim();
+          if (!domain) { status.style.color = '#f0a8b4'; status.textContent = 'Enter a branded review domain first.'; return; }
+          btn.disabled = true; status.style.color = '#8fa0c4'; status.textContent = 'Checking ' + domain + ' …';
+          try {
+            var body = new URLSearchParams({ domain: domain, id: firmId });
+            var r = await fetch('/review/firms/check-domain', { method:'POST', credentials:'same-origin',
+              headers:{'Content-Type':'application/x-www-form-urlencoded'}, body: body.toString() });
+            var j = await r.json().catch(function(){return {};});
+            if (!j.reachable) { status.style.color = '#f0a8b4'; status.textContent = '✗ Not reachable (' + (j.error || 'no response') + '). Point the domain’s DNS/target at this app.'; }
+            else if (!j.ok) { status.style.color = '#f0a8b4'; status.textContent = '✗ ' + (j.note || 'Reached a server, but not this review app.'); }
+            else if (j.matches) { status.style.color = '#8ff0b6'; status.textContent = '✓ Working — resolves to this firm (' + (j.resolvedFirmName || j.resolvedFirmId) + ').'; }
+            else { status.style.color = '#f0d9a8'; status.textContent = '⚠ Reachable, but resolves to “' + (j.resolvedFirmName || j.resolvedFirmId || 'the default firm') + '”. Save this domain on this firm, then re-check.'; }
+          } catch (e) { status.style.color = '#f0a8b4'; status.textContent = 'Check failed: ' + e.message; }
+          btn.disabled = false;
+        });
+      })();
+    </script>
   `);
 }
 
