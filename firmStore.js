@@ -69,6 +69,8 @@ function landingConfigForFirm(firm) {
   for (const k of LANDING_KEYS) {
     if (stored[k] !== undefined && stored[k] !== null) cfg[k] = stored[k];
   }
+  // Firm name for the page's social/link-preview title (not a persisted setting).
+  cfg.firmName = (firm && firm.firm_name) || COMPANY_NAME;
   if (firm) {
     if (firm.google_review_url) cfg.googleReviewUrl = firm.google_review_url;
     if (firm.facebook_review_url) cfg.facebookReviewUrl = firm.facebook_review_url;

@@ -29,6 +29,8 @@ const CONFIG_PATH =
 const DEFAULT_CONFIG = {
   // Branding
   logoUrl: '',
+  // Social/link-preview image (absolute URL). Falls back to the logo if it's a URL.
+  ogImageUrl: '',
   brandColor: '#0A1C40', // deep navy
   accentColor: '#F5218B', // pink
   ctaColor: '#45C7F0', // bright blue CTA
@@ -78,6 +80,7 @@ const DEFAULT_CONFIG = {
 const FIELD_DEFS = [
   // Branding
   { key: 'logoUrl', label: 'Logo (URL or upload)', type: 'image', group: 'Branding' },
+  { key: 'ogImageUrl', label: 'Social/link preview image (absolute URL — shown when the link is shared)', type: 'url', group: 'Branding' },
   { key: 'brandColor', label: 'Primary brand color', type: 'color', group: 'Branding' },
   { key: 'accentColor', label: 'Accent color (pink)', type: 'color', group: 'Branding' },
   { key: 'ctaColor', label: 'Google button color', type: 'color', group: 'Branding' },
@@ -424,6 +427,24 @@ function renderReviewLandingPage(configOverride, opts = {}) {
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"/>
   <meta name="robots" content="noindex"/>
   <title>${escapeHtml(headline)}</title>
+  ${(() => {
+    const httpOnly = (u) => (/^https?:\/\//i.test(String(u || '').trim()) ? String(u).trim() : '');
+    const oneLine = (s) => String(s || '').replace(/\s+/g, ' ').trim();
+    const ogTitle = oneLine(cfg.firmName) || oneLine(cfg.headline) || 'Leave us a review';
+    const ogDesc = oneLine(cfg.headline) || oneLine(cfg.body) || 'Share your experience.';
+    const ogImage = httpOnly(cfg.ogImageUrl) || httpOnly(cfg.logoUrl);
+    return [
+      '<meta property="og:type" content="website"/>',
+      `<meta property="og:title" content="${escapeAttr(ogTitle)}"/>`,
+      `<meta property="og:description" content="${escapeAttr(ogDesc)}"/>`,
+      ogImage ? `<meta property="og:image" content="${escapeAttr(ogImage)}"/>` : '',
+      `<meta name="twitter:card" content="${ogImage ? 'summary_large_image' : 'summary'}"/>`,
+      `<meta name="twitter:title" content="${escapeAttr(ogTitle)}"/>`,
+      `<meta name="twitter:description" content="${escapeAttr(ogDesc)}"/>`,
+      ogImage ? `<meta name="twitter:image" content="${escapeAttr(ogImage)}"/>` : '',
+      `<meta name="description" content="${escapeAttr(ogDesc)}"/>`,
+    ].filter(Boolean).join('\n  ');
+  })()}
   <style>
     :root {
       --brand: ${brand};
@@ -444,10 +465,10 @@ function renderReviewLandingPage(configOverride, opts = {}) {
       color: var(--ink);
       min-height: 100vh; min-height: 100dvh;
       display: flex; flex-direction: column; align-items: center;
-      padding: 28px 18px calc(28px + env(safe-area-inset-bottom));
+      padding: 16px 16px calc(18px + env(safe-area-inset-bottom));
       -webkit-font-smoothing: antialiased;
     }
-    .header { text-align: center; margin: 8px 0 22px; color: #fff; }
+    .header { text-align: center; margin: 2px 0 14px; color: #fff; }
     .logo-img { max-height: 62px; max-width: 276px; width: auto; }
     .logo-word { display: inline-flex; flex-direction: column; align-items: center; gap: 6px; }
     .logo-mark {
@@ -459,10 +480,10 @@ function renderReviewLandingPage(configOverride, opts = {}) {
     .avail { margin-top: 12px; font-size: 12px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; color: var(--accent); }
     .card {
       background: var(--card); width: 100%; max-width: 30rem; border-radius: 24px;
-      padding: 38px 26px 30px; text-align: center;
+      padding: 26px 24px 24px; text-align: center;
       box-shadow: 0 24px 60px rgba(4, 12, 30, 0.45);
     }
-    .stars { color: var(--gold); font-size: 30px; letter-spacing: 5px; line-height: 1; margin-bottom: 18px; text-shadow: 0 1px 0 rgba(0,0,0,.06); }
+    .stars { color: var(--gold); font-size: 30px; letter-spacing: 5px; line-height: 1; margin-bottom: 12px; text-shadow: 0 1px 0 rgba(0,0,0,.06); }
     h1 { font-size: 27px; line-height: 1.22; margin: 0 0 14px; font-weight: 750; letter-spacing: -0.01em; color: var(--ink); }
     .body { font-size: 16.5px; line-height: 1.55; color: var(--muted); margin: 0 auto 26px; max-width: 27rem; }
     .cta {
@@ -483,11 +504,11 @@ function renderReviewLandingPage(configOverride, opts = {}) {
     .cta.secondary:hover { filter: none; background: ${shade(cta, 40)}14; }
     .helper { font-size: 13.5px; color: var(--muted); margin: 12px 0 0; }
     .config-note { margin: 12px 0 0; font-size: 13px; color: #b4560a; background: #fff6ea; border: 1px solid #f3d6ac; border-radius: 8px; padding: 8px 10px; }
-    .laura { margin: 2px 0 4px; }
+    .laura { margin: 2px 0 20px; }
     .laura-img { width: 76px; height: 76px; border-radius: 50%; object-fit: cover; border: 3px solid #eef2fb; margin-bottom: 12px; }
     .laura-quote { font-size: 15px; line-height: 1.55; font-style: italic; color: #3c4a66; margin: 0 auto 8px; max-width: 26rem; }
     .laura-attr { font-size: 14px; font-weight: 700; color: var(--accent); margin: 0; }
-    .divider { height: 1px; background: #e7ecf6; margin: 26px 0 22px; }
+    .divider { height: 1px; background: #e7ecf6; margin: 16px 0 14px; }
     .help { background: #f5f8fd; border: 1px solid #e7edf7; border-radius: 16px; padding: 20px 18px; }
     .help-h { font-size: 16px; font-weight: 700; color: var(--ink); margin: 0 0 6px; }
     .help-b { font-size: 14.5px; line-height: 1.5; color: var(--muted); margin: 0 0 16px; }
