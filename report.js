@@ -2591,12 +2591,14 @@ function isIncomingDirection(d) {
 function isMissedInboundCall(c) {
   if (!isIncomingDirection(c.direction)) return false;
   const status = String(c.status || '').toLowerCase();
-  // A completed inbound is never a miss — even if Sona routed it, the client
-  // reached someone (either Sona resolved it or it was handed off to a human).
-  if (status === 'completed') return false;
-  // Sona/AI-handled inbound that did NOT complete (voicemail, hang-up
-  // mid-Sona, etc.) — staff still need to call back.
+  // Sona/AI-handled inbound always needs a human callback — even when Quo marks
+  // it "completed," Sona only gathers info / documents the request; it does not
+  // resolve the client's matter or connect them to a person. (Quo sets
+  // aiHandled = 'ai-agent' on these.) A later human-answered call or an outbound
+  // callback still clears the client, since flagging keys off the LATEST call.
   if (c.aiHandled) return true;
+  // A human-completed inbound means the client actually reached a person.
+  if (status === 'completed') return false;
   if (MISSED_INBOUND_STATUSES.has(status)) return true;
   // Fallback: incoming with zero duration treated as missed.
   const dur = Number(c.duration || 0);
@@ -2669,7 +2671,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
     <h2>Missed Client Call Report</h2>
     ${table}
     <p style="margin-top: 16px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
-    <p>Client numbers whose most recent call in the last 24 hours was a missed or Sona/AI-handled call that didn't connect to a person — regardless of which internal line handled it. A number drops off as soon as its latest call is answered (client calls back and gets through) or we dial out to them from any line. Please call back the clients still listed.</p>
+    <p>Client numbers whose most recent call in the last 24 hours was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person — regardless of which internal line handled it. A number drops off as soon as its latest call is answered by a person (client calls back and gets through) or we dial out to them from any line. Please call back the clients still listed.</p>
   </body></html>`;
 }
 
