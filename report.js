@@ -2847,7 +2847,7 @@ function csvCell(v) {
 
 const CLIENT_LANGUAGES_HEADER = [
   'Client', 'Case', 'Phone', 'Language', 'Spanish share',
-  'Items analyzed', 'Calls w/ transcript', 'SMS analyzed', 'Last activity', 'Updated',
+  'Transcripts analyzed', 'Last activity', 'Updated',
 ];
 
 function clientLanguagesSheetId() {
@@ -2866,7 +2866,7 @@ async function writeClientLanguagesSnapshot(rows, publishedAtLocal) {
     CLIENT_LANGUAGES_HEADER,
     ...rows.map((r) => [
       r.clientName, r.caseId, r.phone, r.language, r.spanishShare,
-      r.itemsAnalyzed, r.callsWithTranscript, r.smsAnalyzed, r.lastActivityLocal, publishedAtLocal,
+      r.transcriptsAnalyzed, r.lastActivityLocal, publishedAtLocal,
     ]),
   ];
   // Replace the tab contents (snapshot).
@@ -2876,9 +2876,10 @@ async function writeClientLanguagesSnapshot(rows, publishedAtLocal) {
 }
 
 /**
- * Scans the trailing N days of **client call transcripts + SMS** and classifies
- * each client's language as english / spanish / both / unknown. Writes a Google
- * Sheet snapshot (if configured), a CSV, and a summary email.
+ * Scans the trailing N days of **client call transcripts** (SMS is excluded —
+ * short replies like "ok"/"gracias" cause false positives) and classifies each
+ * client's language as english / spanish / both / unknown. Writes a Google Sheet
+ * snapshot (if configured), a CSV, and a summary email.
  */
 async function runClientLanguageReport(opts = {}) {
   const days = opts.days != null ? Math.max(1, Math.min(365, Math.floor(Number(opts.days) || 0))) : CLIENT_LANGUAGE_LOOKBACK_DAYS;
@@ -2886,16 +2887,16 @@ async function runClientLanguageReport(opts = {}) {
   const rangeLabel = buildSentimentTrailingDaysRangeLabel(createdAfter, createdBefore, days);
 
   console.log(`\n${'═'.repeat(52)}`);
-  console.log('  Client Language Report (transcripts + SMS)');
+  console.log('  Client Language Report (call transcripts only)');
   console.log(`  Lookback: ${days} day(s) · ${rangeLabel}`);
   console.log('═'.repeat(52));
 
-  console.log(`\n[1/3] Fetching client calls WITH transcripts + SMS (${days}-day window)...\n`);
+  console.log(`\n[1/3] Fetching client calls WITH transcripts (${days}-day window)...\n`);
   const { callData } = await runExport({
     createdAfter,
     createdBefore,
     weeklyCommunications: true,
-    includeMessages: true,
+    includeMessages: false, // SMS excluded — transcripts are the reliable signal
     fetchTranscriptForWeekly: true, // real transcripts — summaries are English-only
   });
 
@@ -2906,8 +2907,7 @@ async function runClientLanguageReport(opts = {}) {
   const counts = { english: 0, spanish: 0, both: 0, unknown: 0 };
   for (const [clientKey, items] of groups) {
     const callTexts = items.filter((i) => i.recordType !== 'sms').map((i) => i.transcript).filter((t) => t && t.trim());
-    const smsTexts = items.filter((i) => i.recordType === 'sms').map((i) => i.body).filter((t) => t && t.trim());
-    const agg = aggregateLanguages([...callTexts, ...smsTexts]);
+    const agg = aggregateLanguages(callTexts);
     counts[agg.language]++;
 
     const latest = items.reduce((m, i) => (itemTimeMs(i) > itemTimeMs(m) ? i : m), items[0]);
@@ -2917,9 +2917,7 @@ async function runClientLanguageReport(opts = {}) {
       phone: (items.find((i) => i.phone)?.phone || '').trim(),
       language: agg.language,
       spanishShare: agg.spanishShare,
-      itemsAnalyzed: agg.analyzed,
-      callsWithTranscript: callTexts.length,
-      smsAnalyzed: smsTexts.length,
+      transcriptsAnalyzed: agg.analyzed,
       lastActivityLocal: latest ? formatTimestamp(latest.timestamp) : '',
     });
   }
@@ -2936,7 +2934,7 @@ async function runClientLanguageReport(opts = {}) {
   for (const r of rows) {
     csvLines.push([
       r.clientName, r.caseId, r.phone, r.language, r.spanishShare,
-      r.itemsAnalyzed, r.callsWithTranscript, r.smsAnalyzed, r.lastActivityLocal,
+      r.transcriptsAnalyzed, r.lastActivityLocal,
     ].map(csvCell).join(','));
   }
   fs.writeFileSync(csvName, csvLines.join('\n'), 'utf8');
@@ -2953,7 +2951,7 @@ async function runClientLanguageReport(opts = {}) {
   const summary =
     `Client Language Report — ${rows.length} clients (${days}-day lookback)\n` +
     `English: ${counts.english}  ·  Spanish: ${counts.spanish}  ·  Both: ${counts.both}  ·  Unknown: ${counts.unknown}\n` +
-    `Window: ${rangeLabel}\n\nDetected from call transcripts + SMS text (not summaries). CSV attached.`;
+    `Window: ${rangeLabel}\n\nDetected from call transcripts only (SMS excluded to avoid false positives; summaries not used). CSV attached.`;
 
   if (EMAIL_TO.length && EMAIL_CONFIGURED) {
     try {
