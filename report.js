@@ -22,9 +22,11 @@ const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require
 const firmStore = require('./firmStore');
 const reviewRequests = require('./reviewRequests');
 const quoSend = require('./quoSend');
+const { aggregateLanguages } = require('./languageDetect');
 const {
   getLeadPipelineText,
   fetchSheetData,
+  ensureSheetTab,
   rawRowsToCaseRosterMap,
   appendSheetValues,
   updateSheetValues,
@@ -114,6 +116,9 @@ const REVIEW_REPORT_ALWAYS_SHOW_BEST =
   String(process.env.REVIEW_REPORT_ALWAYS_SHOW_BEST ?? 'true').trim().toLowerCase() !== 'false';
 /** Token budget for the per-client review-scoring JSON call. */
 const OPENAI_REVIEW_MAX_TOKENS = clampInt(process.env.OPENAI_REVIEW_MAX_COMPLETION_TOKENS, 4096, 512, 32000);
+/** Client-language lookback: how many days of transcripts + SMS to scan. */
+const CLIENT_LANGUAGE_LOOKBACK_DAYS = clampInt(process.env.CLIENT_LANGUAGE_LOOKBACK_DAYS, 90, 1, 365);
+const CLIENT_LANGUAGES_TAB = process.env.GOOGLE_CLIENT_LANGUAGES_TAB || 'Client Languages';
 
 const GOOGLE_SHEETS_ID    = process.env.GOOGLE_SHEETS_ID;
 // Blank = entire first worksheet. Otherwise e.g. A:ZZ, or 'Master View'!A:ZZ for a specific tab.
@@ -2833,6 +2838,144 @@ async function runMissedClientCallReport() {
   return { rangeLabel, outstandingCount: outstanding.length, outstanding };
 }
 
+// ── Client Language Report (transcript-based EN/ES/both detection) ────────────
+
+function csvCell(v) {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+}
+
+const CLIENT_LANGUAGES_HEADER = [
+  'Client', 'Case', 'Phone', 'Language', 'Spanish share',
+  'Items analyzed', 'Calls w/ transcript', 'SMS analyzed', 'Last activity', 'Updated',
+];
+
+function clientLanguagesSheetId() {
+  return (process.env.GOOGLE_CLIENT_LANGUAGES_SHEET_ID || GOOGLE_WEEKLY_SENTIMENT_SHEET_ID || '').trim();
+}
+
+async function writeClientLanguagesSnapshot(rows, publishedAtLocal) {
+  const spreadsheetId = clientLanguagesSheetId();
+  const hasOAuth =
+    process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REFRESH_TOKEN;
+  if (!spreadsheetId || !hasOAuth) return false;
+
+  await ensureSheetTab(spreadsheetId, CLIENT_LANGUAGES_TAB);
+  const tab = CLIENT_LANGUAGES_TAB;
+  const values = [
+    CLIENT_LANGUAGES_HEADER,
+    ...rows.map((r) => [
+      r.clientName, r.caseId, r.phone, r.language, r.spanishShare,
+      r.itemsAnalyzed, r.callsWithTranscript, r.smsAnalyzed, r.lastActivityLocal, publishedAtLocal,
+    ]),
+  ];
+  // Replace the tab contents (snapshot).
+  await clearSheetValuesRange(spreadsheetId, `${tab}!A2:Z100000`);
+  await updateSheetValues(spreadsheetId, `${tab}!A1`, values);
+  return true;
+}
+
+/**
+ * Scans the trailing N days of **client call transcripts + SMS** and classifies
+ * each client's language as english / spanish / both / unknown. Writes a Google
+ * Sheet snapshot (if configured), a CSV, and a summary email.
+ */
+async function runClientLanguageReport(opts = {}) {
+  const days = opts.days != null ? Math.max(1, Math.min(365, Math.floor(Number(opts.days) || 0))) : CLIENT_LANGUAGE_LOOKBACK_DAYS;
+  const { createdAfter, createdBefore } = getTrailingDaysRange(days);
+  const rangeLabel = buildSentimentTrailingDaysRangeLabel(createdAfter, createdBefore, days);
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('  Client Language Report (transcripts + SMS)');
+  console.log(`  Lookback: ${days} day(s) · ${rangeLabel}`);
+  console.log('═'.repeat(52));
+
+  console.log(`\n[1/3] Fetching client calls WITH transcripts + SMS (${days}-day window)...\n`);
+  const { callData } = await runExport({
+    createdAfter,
+    createdBefore,
+    weeklyCommunications: true,
+    includeMessages: true,
+    fetchTranscriptForWeekly: true, // real transcripts — summaries are English-only
+  });
+
+  const groups = groupClientTouchpointsByContact(callData);
+  console.log(`\n[2/3] Detecting language for ${groups.size} client(s)...`);
+
+  const rows = [];
+  const counts = { english: 0, spanish: 0, both: 0, unknown: 0 };
+  for (const [clientKey, items] of groups) {
+    const callTexts = items.filter((i) => i.recordType !== 'sms').map((i) => i.transcript).filter((t) => t && t.trim());
+    const smsTexts = items.filter((i) => i.recordType === 'sms').map((i) => i.body).filter((t) => t && t.trim());
+    const agg = aggregateLanguages([...callTexts, ...smsTexts]);
+    counts[agg.language]++;
+
+    const latest = items.reduce((m, i) => (itemTimeMs(i) > itemTimeMs(m) ? i : m), items[0]);
+    rows.push({
+      clientName: displayClientName(clientKey),
+      caseId: extractTrailingCaseDigitsFromClientKey(clientKey) || '',
+      phone: (items.find((i) => i.phone)?.phone || '').trim(),
+      language: agg.language,
+      spanishShare: agg.spanishShare,
+      itemsAnalyzed: agg.analyzed,
+      callsWithTranscript: callTexts.length,
+      smsAnalyzed: smsTexts.length,
+      lastActivityLocal: latest ? formatTimestamp(latest.timestamp) : '',
+    });
+  }
+
+  rows.sort((a, b) => a.clientName.localeCompare(b.clientName, undefined, { sensitivity: 'base' }));
+
+  console.log(
+    `\n[3/3] Results — english: ${counts.english} · spanish: ${counts.spanish} · both: ${counts.both} · unknown: ${counts.unknown}`
+  );
+
+  // CSV
+  const csvName = `quo_client_languages_${createdBefore.slice(0, 10)}.csv`;
+  const csvLines = [CLIENT_LANGUAGES_HEADER.map(csvCell).join(',')];
+  for (const r of rows) {
+    csvLines.push([
+      r.clientName, r.caseId, r.phone, r.language, r.spanishShare,
+      r.itemsAnalyzed, r.callsWithTranscript, r.smsAnalyzed, r.lastActivityLocal,
+    ].map(csvCell).join(','));
+  }
+  fs.writeFileSync(csvName, csvLines.join('\n'), 'utf8');
+  console.log(`  Wrote ${csvName}`);
+
+  const publishedAtLocal = DateTime.now().setZone(TIMEZONE).toFormat('yyyy-LL-dd HH:mm');
+  try {
+    const wrote = await writeClientLanguagesSnapshot(rows, publishedAtLocal);
+    console.log(wrote ? `  Sheet snapshot: wrote ${rows.length} row(s) to "${CLIENT_LANGUAGES_TAB}".` : '  Sheet snapshot skipped (set GOOGLE_CLIENT_LANGUAGES_SHEET_ID + OAuth).');
+  } catch (err) {
+    console.warn(`  Sheet snapshot failed: ${err.message}`);
+  }
+
+  const summary =
+    `Client Language Report — ${rows.length} clients (${days}-day lookback)\n` +
+    `English: ${counts.english}  ·  Spanish: ${counts.spanish}  ·  Both: ${counts.both}  ·  Unknown: ${counts.unknown}\n` +
+    `Window: ${rangeLabel}\n\nDetected from call transcripts + SMS text (not summaries). CSV attached.`;
+
+  if (EMAIL_TO.length && EMAIL_CONFIGURED) {
+    try {
+      await sendEmail({
+        htmlBody: `<pre style="font-family:ui-monospace,monospace;font-size:13px">${escapeHtml(summary)}</pre>`,
+        plainText: summary,
+        subject: `Client Language Report — ${rows.length} clients`,
+        attachments: [{ filename: path.basename(csvName), path: csvName }],
+      });
+      console.log(`  Emailed summary + CSV to: ${EMAIL_TO.join(', ')}`);
+    } catch (err) {
+      console.warn(`  Email failed: ${err.message}`);
+    }
+  } else {
+    console.log('\n' + summary);
+  }
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('Client Language Report complete.');
+  return { rangeLabel, clients: rows.length, counts, csvName };
+}
+
 // ── Review Intelligence V1 (daily Google-review candidate detection) ──────────
 
 /** "Maria Lopez 1048" → "Maria Lopez" (drop the trailing case number for display). */
@@ -3495,6 +3638,7 @@ if (require.main === module) {
   if (arg === '--monthly' || arg === 'monthly') run = runMonthlyNewsletterInsightsReport;
   if (arg === '--missed' || arg === 'missed') run = runMissedClientCallReport;
   if (arg === '--review' || arg === 'review') run = runReviewIntelligenceReport;
+  if (arg === '--language' || arg === 'language') run = runClientLanguageReport;
   // Optional: `node report.js daily --firm <id>` scopes to one firm; otherwise all active firms.
   const firmFlag = process.argv.indexOf('--firm');
   const firmId = firmFlag !== -1 ? process.argv[firmFlag + 1] : undefined;
@@ -3510,5 +3654,6 @@ module.exports = {
   runMonthlyNewsletterInsightsReport,
   runMissedClientCallReport,
   runReviewIntelligenceReport,
+  runClientLanguageReport,
   runForAllFirms,
 };

@@ -14,10 +14,10 @@ const quoSend = require('./quoSend');
 const slackEvents = require('./slackEvents');
 
 /**
- * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review'} JobId
+ * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review' | 'language'} JobId
  */
 
-const JOB_IDS = ['daily', 'weekly', 'monthly', 'missed', 'review'];
+const JOB_IDS = ['daily', 'weekly', 'monthly', 'missed', 'review', 'language'];
 
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -207,6 +207,7 @@ function buildIndexHtml(message, email) {
       <button type="button" data-job="monthly">Run monthly client newsletter ideas (30 days · summaries)</button>
       <button type="button" data-job="missed">Run missed client call report (trailing 24h · clients only)</button>
       <button type="button" data-job="review">Run Review Intelligence (trailing 24h · Google review candidates → Slack)</button>
+      <button type="button" data-job="language">Run Client Language Report (transcripts · EN/ES/both → Sheet + CSV)</button>
     </div>
     <p class="hint">Firms &amp; per-firm config: <a href="/review/firms" style="color:#60a5fa">/review/firms</a> · Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a> · what does this all do? <a href="/faq" style="color:#60a5fa">/faq</a></p>
     <p class="hint">Jobs run in the background so the browser does not time out. Only one job at a time.</p>
