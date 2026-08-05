@@ -67,6 +67,10 @@ function makeClient(apiKey) {
   const client = axios.create({
     baseURL: 'https://api.openphone.com',
     headers: { Authorization: apiKey },
+    // OpenPhone expects array query params as repeated keys (participants=a&participants=b),
+    // NOT axios's default bracket form (participants[]=a). Without this, /v1/calls and
+    // /v1/messages reject every request with "/participants: Expected array".
+    paramsSerializer: { indexes: null },
   });
 
   client.interceptors.response.use(
