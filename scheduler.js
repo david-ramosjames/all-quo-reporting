@@ -8,6 +8,7 @@ const {
   runMissedClientCallReport,
   runReviewIntelligenceReport,
   runClientLanguageReport,
+  runIntakeMarketingReport,
   runForAllFirms,
 } = require('./report');
 
@@ -214,6 +215,7 @@ if (process.env.DISABLE_MANUAL_TRIGGER_UI === 'true' || process.env.DISABLE_MANU
       missed: (opts) => runForAllFirms(runMissedClientCallReport, opts),
       review: (opts) => runForAllFirms(runReviewIntelligenceReport, opts),
       language: (opts) => runForAllFirms(runClientLanguageReport, opts),
+      marketing: (opts) => runForAllFirms(runIntakeMarketingReport, opts),
     },
   });
 }

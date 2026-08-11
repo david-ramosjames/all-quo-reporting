@@ -725,6 +725,137 @@ Rules: **Do not** name private individuals, callers, or staff from the notes. **
 `.trim();
 }
 
+// ============================================================================
+// INTAKE MARKETING INSIGHTS — voice-of-customer mining from intake/lead calls
+// ============================================================================
+
+/** Controlled vocabularies so the report can tally results deterministically. */
+const INTAKE_MARKETING_ENUMS = {
+  referral_source: [
+    'google_search', 'google_ads', 'tv', 'radio', 'billboard_ooh', 'social_media',
+    'friend_family_referral', 'past_client_referral', 'attorney_referral',
+    'provider_hospital_referral', 'website', 'repeat_client', 'other', 'unknown',
+  ],
+  case_type: [
+    'car_accident', 'truck_18wheeler', 'motorcycle', 'pedestrian_bicycle',
+    'slip_and_fall', 'work_injury', 'dog_bite', 'medical_malpractice',
+    'wrongful_death', 'product_liability', 'other', 'unknown',
+  ],
+  primary_motivation: [
+    'medical_bills', 'lost_wages_cant_work', 'vehicle_property_damage',
+    'compensation_justice', 'medical_treatment', 'deal_with_insurance',
+    'unsure_wants_guidance', 'other',
+  ],
+  urgency: ['high', 'medium', 'low'],
+  retained: ['retained', 'consult_scheduled', 'undecided', 'declined', 'unknown'],
+};
+
+/**
+ * Batch: many intake/lead calls → one structured marketing extraction per call.
+ * Mirrors the monthly batch contract (root object with an `extractions` array of
+ * exactly N objects, in order).
+ */
+function buildIntakeMarketingBatchPrompt({ COMPANY_NAME, items }) {
+  const blocks = items
+    .map((it, i) => {
+      let tr = String(it.transcript || '').trim();
+      if (it.transcriptMaxChars > 0 && tr.length > it.transcriptMaxChars) {
+        tr = `${tr.slice(0, it.transcriptMaxChars)}…`;
+      }
+      const summaryText = String(it.summary || '').trim() || '(none)';
+      return `### Item ${i + 1} of ${items.length}
+LINE: ${it.line || ''}
+TIME: ${it.timestamp || ''}
+
+SUMMARY:
+${summaryText}
+
+TRANSCRIPT (primary evidence):
+${tr || '_(none)_'}`;
+    })
+    .join('\n\n---\n\n');
+
+  const e = INTAKE_MARKETING_ENUMS;
+  return `
+You analyze **intake / prospective-client phone calls** for ${COMPANY_NAME}, a personal injury law firm, to mine **marketing insights** (why people call, how they found the firm, what they care about, and what makes them hesitate).
+
+Each **Item** is one intake call. Use the **transcript** as primary evidence, the summary as backup. Do **not** invent facts. Do **not** put any person's name, phone number, or case number in any string.
+
+${blocks}
+
+---
+
+Return **only valid JSON** (no markdown fences). The root must be a single object with one key **extractions**, an **array of exactly ${items.length} objects**, one per Item **in order**. Each object must contain exactly these keys:
+
+{
+  "referral_source": one of ${JSON.stringify(e.referral_source)},
+  "case_type": one of ${JSON.stringify(e.case_type)},
+  "primary_motivation": one of ${JSON.stringify(e.primary_motivation)},
+  "urgency": one of ${JSON.stringify(e.urgency)},
+  "retained": one of ${JSON.stringify(e.retained)},
+  "pain_points": string[],            // fears/worries in the client's own framing (short phrases)
+  "objections": string[],             // hesitations to hiring (cost, unsure they have a case, time, already talked to insurer, using another firm)
+  "decision_factors": string[],       // what attracts them to this firm (reputation, Spanish-speaking, no fee unless we win, recommended, location)
+  "competitor_mentions": string[],    // other firms/attorneys named (generic if unclear)
+  "geography": string,                // city/area mentioned, else ""
+  "notable_quote": string             // one short, anonymized paraphrase capturing their motivation (no names)
+}
+
+Rules:
+- Pick the single best enum value; use "unknown"/"other" only when genuinely unclear.
+- **referral_source** is the most important field — infer carefully from how they say they found the firm.
+- Keep array items to a few words; only include clearly-supported points ([] if none).
+- American English; concise.
+`.trim();
+}
+
+/**
+ * Pooled per-call extractions + authoritative tallies → a marketing brief that
+ * helps the firm focus targeting and messaging.
+ */
+function buildIntakeMarketingBriefPrompt({ COMPANY_NAME, rangeLabel, callCount, talliesMarkdown, samplesMarkdown }) {
+  return `
+You are a **legal marketing strategist** writing an **Intake Marketing Insights** brief for ${COMPANY_NAME}, a personal injury law firm. Audience: the firm owner + marketing. Goal: help them **focus spend, sharpen messaging, and target the right audience** based on what real intake callers said.
+
+Reporting window: **${rangeLabel}** · **${callCount}** intake/prospective calls analyzed.
+
+The following counts are **authoritative** — use these exact numbers; do not invent different ones:
+
+${talliesMarkdown}
+
+Representative anonymized signals (paraphrased quotes and themes):
+
+${samplesMarkdown}
+
+---
+
+Write the brief in **Markdown** with **exactly** these sections and headings:
+
+## Snapshot
+3-5 bullets: volume, English/Spanish split, top case types, and the single biggest takeaway.
+
+## Where leads come from
+Interpret the referral-source counts. Which channels are actually driving calls? Where is spend likely paying off vs. under-measured? Concrete budget/attribution guidance (bullets).
+
+## Why people call (core motivations)
+The dominant motivations and emotional drivers, ranked. Translate each into a **messaging angle / ad hook** the firm can use (bullets: motivation → angle).
+
+## Objections & fears to overcome
+Top hesitations, each paired with a **reassurance or content idea** (FAQ, landing-page copy, ad line) to address it.
+
+## Audience & targeting
+Concrete targeting recommendations grounded in the data — case types to prioritize, geography, language (Spanish vs English creative), and demographics/urgency patterns. Include specific ideas for Google, Facebook/Instagram, and TikTok where relevant.
+
+## Competitive landscape
+What competitor mentions and decision factors reveal about positioning. How to differentiate.
+
+## Recommended actions
+5-8 **specific, prioritized** actions the firm can take this month (most impactful first).
+
+Tone: sharp, practical, and specific to the data — not generic marketing advice. Use the exact numbers. Do **not** include client names. Do not add sections beyond those listed.
+`.trim();
+}
+
 module.exports = {
   generateDailyLeadReportPrompt,
   buildTranscriptSentimentPrompt,
@@ -737,4 +868,7 @@ module.exports = {
   buildMonthlyTranscriptExtractionPrompt,
   buildMonthlyBatchExtractionPrompt,
   buildMonthlyNewsletterAggregationPrompt,
+  INTAKE_MARKETING_ENUMS,
+  buildIntakeMarketingBatchPrompt,
+  buildIntakeMarketingBriefPrompt,
 };

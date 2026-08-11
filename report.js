@@ -16,13 +16,16 @@ const {
   buildMonthlyTranscriptExtractionPrompt,
   buildMonthlyBatchExtractionPrompt,
   buildMonthlyNewsletterAggregationPrompt,
+  INTAKE_MARKETING_ENUMS,
+  buildIntakeMarketingBatchPrompt,
+  buildIntakeMarketingBriefPrompt,
 } = require('./prompts');
 const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage } = require('./slack');
 const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require('./reviewOpportunities');
 const firmStore = require('./firmStore');
 const reviewRequests = require('./reviewRequests');
 const quoSend = require('./quoSend');
-const { aggregateLanguages } = require('./languageDetect');
+const { aggregateLanguages, detectLanguage } = require('./languageDetect');
 const {
   getLeadPipelineText,
   fetchSheetData,
@@ -2974,6 +2977,290 @@ async function runClientLanguageReport(opts = {}) {
   return { rangeLabel, clients: rows.length, counts, csvName };
 }
 
+// ── Intake Marketing Insights (voice-of-customer from intake/lead calls) ─────
+
+/** Normalize one enum value against its allowed set (fallback provided). */
+function normEnum(field, value, fallback) {
+  const allowed = INTAKE_MARKETING_ENUMS[field] || [];
+  const v = String(value || '').trim().toLowerCase().replace(/[\s-]+/g, '_');
+  return allowed.includes(v) ? v : fallback;
+}
+
+function toStrArray(v, cap = 8) {
+  if (!Array.isArray(v)) return [];
+  return v.map((s) => String(s || '').trim()).filter(Boolean).slice(0, cap);
+}
+
+function normalizeIntakeExtraction(obj) {
+  if (!obj || typeof obj !== 'object') return null;
+  return {
+    referral_source: normEnum('referral_source', obj.referral_source, 'unknown'),
+    case_type: normEnum('case_type', obj.case_type, 'unknown'),
+    primary_motivation: normEnum('primary_motivation', obj.primary_motivation, 'other'),
+    urgency: normEnum('urgency', obj.urgency, 'medium'),
+    retained: normEnum('retained', obj.retained, 'unknown'),
+    pain_points: toStrArray(obj.pain_points),
+    objections: toStrArray(obj.objections),
+    decision_factors: toStrArray(obj.decision_factors),
+    competitor_mentions: toStrArray(obj.competitor_mentions, 5),
+    geography: String(obj.geography || '').trim().slice(0, 80),
+    notable_quote: String(obj.notable_quote || '').replace(/\s+/g, ' ').trim().slice(0, 240),
+  };
+}
+
+/** Is this call an intake / prospective-client call worth mining for marketing? */
+function isIntakeCall(call, intakeLineRe) {
+  if (call.recordType !== 'call') return false;
+  if (!String(call.transcript || '').trim()) return false;
+  const onIntakeLine = intakeLineRe && intakeLineRe.test(String(call.line || ''));
+  const isLead = !isClientContactName(call.contact); // no case number → prospect/lead
+  return onIntakeLine || isLead;
+}
+
+/** One LLM batch → array of normalized extractions aligned to `calls`. */
+async function extractIntakeMarketingBatch(calls, transcriptMaxChars) {
+  const items = calls.map((c) => ({
+    line: c.line,
+    timestamp: c.timestamp,
+    summary: c.summary,
+    transcript: c.transcript,
+    transcriptMaxChars,
+  }));
+  const prompt = buildIntakeMarketingBatchPrompt({ COMPANY_NAME: firmCtx().firmName, items });
+  const text = await runChatCompletion(
+    prompt,
+    OPENAI_MONTHLY_EXTRACTION_MAX_TOKENS,
+    `Intake marketing batch (${calls.length})`,
+    { jsonObject: true, throwOnEmpty: true }
+  );
+  let parsed;
+  try {
+    parsed = JSON.parse(stripMarkdownJsonFence(text));
+  } catch {
+    return calls.map(() => null);
+  }
+  const arr = Array.isArray(parsed?.extractions) ? parsed.extractions : Array.isArray(parsed) ? parsed : [];
+  return calls.map((_, i) => normalizeIntakeExtraction(arr[i]));
+}
+
+function tallyEnum(rows, field) {
+  const counts = new Map();
+  for (const r of rows) {
+    const v = r.extraction[field];
+    counts.set(v, (counts.get(v) || 0) + 1);
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+}
+
+function tallyArrayField(rows, field, topN = 12) {
+  const counts = new Map();
+  for (const r of rows) {
+    for (const raw of r.extraction[field] || []) {
+      const key = String(raw).toLowerCase().trim();
+      if (!key) continue;
+      counts.set(key, (counts.get(key) || 0) + 1);
+    }
+  }
+  return [...counts.entries()].sort((a, b) => b[1] - a[1]).slice(0, topN);
+}
+
+function pairsToMd(pairs, total) {
+  if (!pairs.length) return '_(none)_';
+  return pairs
+    .map(([k, n]) => `- ${k}: **${n}**${total ? ` (${Math.round((n / total) * 100)}%)` : ''}`)
+    .join('\n');
+}
+
+/**
+ * Intake Marketing Insights. Mines the trailing N days of intake/prospective
+ * call transcripts for referral sources, motivations, objections, case types,
+ * and language — then writes a marketing brief (email + CSV, optional Slack).
+ */
+async function runIntakeMarketingReport(opts = {}) {
+  const days = opts.days != null
+    ? Math.max(1, Math.min(365, Math.floor(Number(opts.days) || 0)))
+    : Math.max(1, parseInt(process.env.MARKETING_LOOKBACK_DAYS || '30', 10) || 30);
+  const maxCalls = Math.max(0, parseInt(process.env.MARKETING_MAX_CALLS || '500', 10) || 500);
+  let batchSize = parseInt(process.env.MARKETING_EXTRACTION_BATCH_SIZE || '15', 10);
+  if (!Number.isFinite(batchSize) || batchSize < 1) batchSize = 15;
+  batchSize = Math.min(40, batchSize);
+  const intakeLines = (process.env.MARKETING_INTAKE_LINES || 'Intake')
+    .split(',').map((s) => s.trim()).filter(Boolean);
+  const intakeLineRe = intakeLines.length ? new RegExp(intakeLines.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'i') : null;
+  const transcriptCap = Number.isFinite(MONTHLY_BATCH_TRANSCRIPT_MAX_CHARS) && MONTHLY_BATCH_TRANSCRIPT_MAX_CHARS > 0
+    ? Math.max(MONTHLY_BATCH_TRANSCRIPT_MAX_CHARS, 2500) : 2500;
+
+  const { createdAfter, createdBefore } = getTrailingDaysRange(days);
+  const rangeLabel = buildSentimentTrailingDaysRangeLabel(createdAfter, createdBefore, days);
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('  Intake Marketing Insights (intake/lead call transcripts)');
+  console.log(`  Lookback: ${days} day(s) · ${rangeLabel}`);
+  console.log('═'.repeat(52));
+
+  console.log(`\n[1/4] Fetching calls WITH transcripts (${days}-day window)...\n`);
+  const { callData } = await runExport({
+    apiKey: firmCtx().quoApiKey,
+    phoneNumbersFilter: firmCtx().quoPhoneNumbers,
+    createdAfter,
+    createdBefore,
+    weeklyCommunications: true,
+    includeMessages: false,
+    fetchTranscriptForWeekly: true,
+  });
+
+  let intake = (callData || []).filter((c) => isIntakeCall(c, intakeLineRe));
+  console.log(`\n[2/4] Intake/prospective calls with transcripts: ${intake.length}`);
+  if (maxCalls > 0 && intake.length > maxCalls) {
+    intake = intake.slice(0, maxCalls);
+    console.log(`  MARKETING_MAX_CALLS=${maxCalls} — analyzing first ${maxCalls}.`);
+  }
+
+  if (!OPENAI_API_KEY) {
+    console.log('\n[3/4] Skipped — no OPENAI_API_KEY.');
+    return { rangeLabel, calls: intake.length, analyzed: 0 };
+  }
+  if (!intake.length) {
+    console.log('\n[3/4] No intake calls to analyze — nothing to report.');
+    return { rangeLabel, calls: 0, analyzed: 0 };
+  }
+
+  console.log(`\n[3/4] Extracting marketing signals (${batchSize}/batch)...`);
+  /** @type {{ call: object, extraction: object }[]} */
+  const rows = [];
+  for (let start = 0; start < intake.length; start += batchSize) {
+    const batch = intake.slice(start, start + batchSize);
+    process.stdout.write(`  [${start + 1}-${start + batch.length}/${intake.length}] ... `);
+    let extractions;
+    try {
+      extractions = await extractIntakeMarketingBatch(batch, transcriptCap);
+    } catch (err) {
+      console.log(`failed: ${err.message}`);
+      extractions = batch.map(() => null);
+    }
+    let ok = 0;
+    batch.forEach((call, i) => {
+      const ex = extractions[i];
+      if (ex) {
+        ex.language = detectLanguage(call.transcript); // deterministic, don't trust LLM
+        rows.push({ call, extraction: ex });
+        ok++;
+      }
+    });
+    console.log(`${ok}/${batch.length} extracted`);
+    await sleep(SENTIMENT_LLM_DELAY_MS);
+  }
+
+  if (!rows.length) {
+    console.log('\n[4/4] No successful extractions — skipping brief.');
+    return { rangeLabel, calls: intake.length, analyzed: 0 };
+  }
+
+  // Deterministic tallies (authoritative numbers for the brief).
+  const n = rows.length;
+  const langCounts = { english: 0, spanish: 0, both: 0, unknown: 0 };
+  for (const r of rows) langCounts[r.extraction.language] = (langCounts[r.extraction.language] || 0) + 1;
+
+  const talliesMarkdown = [
+    `**Intake calls analyzed:** ${n}`,
+    `\n**Language (of the call):** English ${langCounts.english} · Spanish ${langCounts.spanish} · Unknown ${langCounts.unknown || 0}`,
+    `\n**Referral source (how they found the firm):**\n${pairsToMd(tallyEnum(rows, 'referral_source'), n)}`,
+    `\n**Case type:**\n${pairsToMd(tallyEnum(rows, 'case_type'), n)}`,
+    `\n**Primary motivation:**\n${pairsToMd(tallyEnum(rows, 'primary_motivation'), n)}`,
+    `\n**Urgency:**\n${pairsToMd(tallyEnum(rows, 'urgency'), n)}`,
+    `\n**Outcome (as heard on the call):**\n${pairsToMd(tallyEnum(rows, 'retained'), n)}`,
+    `\n**Top objections / hesitations:**\n${pairsToMd(tallyArrayField(rows, 'objections'), 0)}`,
+    `\n**Top pain points / fears:**\n${pairsToMd(tallyArrayField(rows, 'pain_points'), 0)}`,
+    `\n**Top decision factors (why this firm):**\n${pairsToMd(tallyArrayField(rows, 'decision_factors'), 0)}`,
+    `\n**Competitors mentioned:**\n${pairsToMd(tallyArrayField(rows, 'competitor_mentions', 10), 0)}`,
+    `\n**Geographies mentioned:**\n${pairsToMd(tallyArrayField(rows, 'geography', 10), 0)}`,
+  ].join('\n');
+
+  const samplesMarkdown = rows
+    .filter((r) => r.extraction.notable_quote)
+    .slice(0, 30)
+    .map((r) => `- (${r.extraction.case_type}, ${r.extraction.referral_source}) "${r.extraction.notable_quote}"`)
+    .join('\n') || '_(no quotes captured)_';
+
+  console.log('\n[4/4] Writing marketing brief...');
+  let bodyMd;
+  try {
+    bodyMd = await runChatCompletion(
+      buildIntakeMarketingBriefPrompt({
+        COMPANY_NAME: firmCtx().firmName,
+        rangeLabel,
+        callCount: n,
+        talliesMarkdown,
+        samplesMarkdown,
+      }),
+      OPENAI_MONTHLY_AGGREGATE_MAX_TOKENS,
+      'Intake marketing brief',
+      { throwOnEmpty: true }
+    );
+  } catch (err) {
+    console.warn(`  Brief generation failed: ${err.message}`);
+    bodyMd = `# Intake Marketing Insights\n\n_(Brief generation failed: ${err.message})_\n\n## Raw tallies\n\n${talliesMarkdown}`;
+  }
+
+  // CSV of per-call extractions
+  const csvName = `quo_intake_marketing_${createdBefore.slice(0, 10)}.csv`;
+  const csvHeader = ['time', 'line', 'language', 'referral_source', 'case_type', 'primary_motivation', 'urgency', 'retained', 'geography', 'pain_points', 'objections', 'decision_factors', 'competitor_mentions', 'notable_quote'];
+  const csvLines = [csvHeader.map(csvCell).join(',')];
+  for (const r of rows) {
+    const e = r.extraction;
+    csvLines.push([
+      r.call.timestamp || '', r.call.line || '', e.language, e.referral_source, e.case_type,
+      e.primary_motivation, e.urgency, e.retained, e.geography,
+      e.pain_points.join('; '), e.objections.join('; '), e.decision_factors.join('; '),
+      e.competitor_mentions.join('; '), e.notable_quote,
+    ].map(csvCell).join(','));
+  }
+  fs.writeFileSync(csvName, csvLines.join('\n'), 'utf8');
+  console.log(`  Wrote ${csvName}`);
+
+  const subject = `${firmCtx().firmName} — Intake Marketing Insights (${n} calls, ${days}d)`;
+  const marketingTo = (process.env.MARKETING_EMAIL_TO || '').split(',').map((s) => s.trim()).filter(Boolean);
+  const recipients = marketingTo.length ? marketingTo : firmCtx().emailTo;
+
+  if (recipients.length && EMAIL_CONFIGURED) {
+    try {
+      await sendEmail({
+        htmlBody: buildMonthlyInsightsEmailHtml(bodyMd, rangeLabel),
+        plainText: bodyMd,
+        subject,
+        attachments: [{ filename: path.basename(csvName), path: csvName }],
+        to: recipients,
+      });
+      console.log(`  Emailed brief + CSV to: ${recipients.join(', ')}`);
+    } catch (err) {
+      console.warn(`  Email failed: ${err.message}`);
+    }
+  } else {
+    console.log('\n' + bodyMd);
+  }
+
+  // Optional Slack summary
+  const mktChannel = (process.env.MARKETING_SLACK_CHANNEL || '').trim();
+  if (mktChannel && firmCtx().slackBotToken) {
+    try {
+      const topRef = tallyEnum(rows, 'referral_source').slice(0, 3).map(([k, c]) => `${k} (${c})`).join(', ');
+      const topCase = tallyEnum(rows, 'case_type').slice(0, 3).map(([k, c]) => `${k} (${c})`).join(', ');
+      await postSlackMessage({
+        token: firmCtx().slackBotToken,
+        channel: mktChannel,
+        text: `📊 Intake Marketing Insights — ${n} calls (${days}d)\nTop sources: ${topRef}\nTop case types: ${topCase}\nLanguage: EN ${langCounts.english} · ES ${langCounts.spanish}\nFull brief emailed${recipients.length ? ` to ${recipients.join(', ')}` : ''}.`,
+      });
+      console.log(`  Posted summary to #${mktChannel}.`);
+    } catch (err) {
+      console.warn(`  Slack post failed: ${err.message}`);
+    }
+  }
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('Intake Marketing Insights complete.');
+  return { rangeLabel, calls: intake.length, analyzed: n, csvName };
+}
+
 // ── Review Intelligence V1 (daily Google-review candidate detection) ──────────
 
 /** "Maria Lopez 1048" → "Maria Lopez" (drop the trailing case number for display). */
@@ -3637,6 +3924,7 @@ if (require.main === module) {
   if (arg === '--missed' || arg === 'missed') run = runMissedClientCallReport;
   if (arg === '--review' || arg === 'review') run = runReviewIntelligenceReport;
   if (arg === '--language' || arg === 'language') run = runClientLanguageReport;
+  if (arg === '--marketing' || arg === 'marketing') run = runIntakeMarketingReport;
   // Optional: `node report.js daily --firm <id>` scopes to one firm; otherwise all active firms.
   const firmFlag = process.argv.indexOf('--firm');
   const firmId = firmFlag !== -1 ? process.argv[firmFlag + 1] : undefined;
@@ -3653,5 +3941,6 @@ module.exports = {
   runMissedClientCallReport,
   runReviewIntelligenceReport,
   runClientLanguageReport,
+  runIntakeMarketingReport,
   runForAllFirms,
 };
