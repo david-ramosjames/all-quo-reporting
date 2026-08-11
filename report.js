@@ -3008,13 +3008,16 @@ function normalizeIntakeExtraction(obj) {
   };
 }
 
-/** Is this call an intake / prospective-client call worth mining for marketing? */
-function isIntakeCall(call, intakeLineRe) {
+/**
+ * Is this a lead / prospective-client call worth mining for marketing?
+ * A "lead" is anyone who is NOT an existing client — existing clients have a
+ * case number in their CRM contact name (e.g. "Maria Lopez 1048"); prospects
+ * don't. We require a transcript so there's real conversation to analyze.
+ */
+function isLeadCall(call) {
   if (call.recordType !== 'call') return false;
   if (!String(call.transcript || '').trim()) return false;
-  const onIntakeLine = intakeLineRe && intakeLineRe.test(String(call.line || ''));
-  const isLead = !isClientContactName(call.contact); // no case number → prospect/lead
-  return onIntakeLine || isLead;
+  return !isClientContactName(call.contact);
 }
 
 /** One LLM batch → array of normalized extractions aligned to `calls`. */
@@ -3084,9 +3087,6 @@ async function runIntakeMarketingReport(opts = {}) {
   let batchSize = parseInt(process.env.MARKETING_EXTRACTION_BATCH_SIZE || '15', 10);
   if (!Number.isFinite(batchSize) || batchSize < 1) batchSize = 15;
   batchSize = Math.min(40, batchSize);
-  const intakeLines = (process.env.MARKETING_INTAKE_LINES || 'Intake')
-    .split(',').map((s) => s.trim()).filter(Boolean);
-  const intakeLineRe = intakeLines.length ? new RegExp(intakeLines.map((s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'i') : null;
   const transcriptCap = Number.isFinite(MONTHLY_BATCH_TRANSCRIPT_MAX_CHARS) && MONTHLY_BATCH_TRANSCRIPT_MAX_CHARS > 0
     ? Math.max(MONTHLY_BATCH_TRANSCRIPT_MAX_CHARS, 2500) : 2500;
 
@@ -3094,7 +3094,7 @@ async function runIntakeMarketingReport(opts = {}) {
   const rangeLabel = buildSentimentTrailingDaysRangeLabel(createdAfter, createdBefore, days);
 
   console.log(`\n${'═'.repeat(52)}`);
-  console.log('  Intake Marketing Insights (intake/lead call transcripts)');
+  console.log('  Intake Marketing Insights (lead / prospective-client call transcripts)');
   console.log(`  Lookback: ${days} day(s) · ${rangeLabel}`);
   console.log('═'.repeat(52));
 
@@ -3109,8 +3109,8 @@ async function runIntakeMarketingReport(opts = {}) {
     fetchTranscriptForWeekly: true,
   });
 
-  let intake = (callData || []).filter((c) => isIntakeCall(c, intakeLineRe));
-  console.log(`\n[2/4] Intake/prospective calls with transcripts: ${intake.length}`);
+  let intake = (callData || []).filter((c) => isLeadCall(c));
+  console.log(`\n[2/4] Lead / prospective-client calls with transcripts: ${intake.length}`);
   if (maxCalls > 0 && intake.length > maxCalls) {
     intake = intake.slice(0, maxCalls);
     console.log(`  MARKETING_MAX_CALLS=${maxCalls} — analyzing first ${maxCalls}.`);
