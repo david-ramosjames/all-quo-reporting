@@ -748,6 +748,7 @@ const INTAKE_MARKETING_ENUMS = {
   ],
   urgency: ['high', 'medium', 'low'],
   retained: ['retained', 'consult_scheduled', 'undecided', 'declined', 'unknown'],
+  call_stage: ['intake_new_lead', 'existing_client', 'other'],
 };
 
 /**
@@ -777,9 +778,11 @@ ${tr || '_(none)_'}`;
 
   const e = INTAKE_MARKETING_ENUMS;
   return `
-You analyze **intake / prospective-client phone calls** for ${COMPANY_NAME}, a personal injury law firm, to mine **marketing insights** (why people call, how they found the firm, what they care about, and what makes them hesitate).
+You analyze **phone calls** for ${COMPANY_NAME}, a personal injury law firm, to mine **marketing insights** from **new prospects at intake** (why people call, how they found the firm, what they care about, and what makes them hesitate).
 
-Each **Item** is one intake call. Use the **transcript** as primary evidence, the summary as backup. Do **not** invent facts. Do **not** put any person's name, phone number, or case number in any string.
+Some calls are **new prospects/intake** and some are **existing clients** talking about an ongoing case. **Classify each call from the CONVERSATION itself — not from any name or label** (a lead who signed recently may already have a case number, but their intake call is still an intake call). For each Item, still fill every field, but set **call_stage** so the report can keep only true intake calls.
+
+Each **Item** is one call. Use the **transcript** as primary evidence, the summary as backup. Do **not** invent facts. Do **not** put any person's name, phone number, or case number in any string.
 
 ${blocks}
 
@@ -788,6 +791,7 @@ ${blocks}
 Return **only valid JSON** (no markdown fences). The root must be a single object with one key **extractions**, an **array of exactly ${items.length} objects**, one per Item **in order**. Each object must contain exactly these keys:
 
 {
+  "call_stage": one of ${JSON.stringify(e.call_stage)},   // intake_new_lead = a first-time injury inquiry or someone seeking representation; existing_client = a current client discussing their ongoing case (settlement, appointments, documents, status)
   "referral_source": one of ${JSON.stringify(e.referral_source)},
   "case_type": one of ${JSON.stringify(e.case_type)},
   "primary_motivation": one of ${JSON.stringify(e.primary_motivation)},

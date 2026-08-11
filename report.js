@@ -2994,6 +2994,7 @@ function toStrArray(v, cap = 8) {
 function normalizeIntakeExtraction(obj) {
   if (!obj || typeof obj !== 'object') return null;
   return {
+    call_stage: normEnum('call_stage', obj.call_stage, 'other'),
     referral_source: normEnum('referral_source', obj.referral_source, 'unknown'),
     case_type: normEnum('case_type', obj.case_type, 'unknown'),
     primary_motivation: normEnum('primary_motivation', obj.primary_motivation, 'other'),
@@ -3009,15 +3010,26 @@ function normalizeIntakeExtraction(obj) {
 }
 
 /**
- * Is this a lead / prospective-client call worth mining for marketing?
- * A "lead" is anyone who is NOT an existing client — existing clients have a
- * case number in their CRM contact name (e.g. "Maria Lopez 1048"); prospects
- * don't. We require a transcript so there's real conversation to analyze.
+ * First-contact candidate calls for intake analysis.
+ *
+ * We can't tell leads from clients by the CRM name: a lead who signs within the
+ * window gets a case number, so name-based filtering would drop exactly the
+ * leads who converted. Instead we take the **earliest transcript call per phone
+ * number** in the window (each caller's first substantive conversation) and let
+ * the LLM classify call_stage from the transcript. Existing clients whose intake
+ * predates the window surface as "existing_client" and are dropped downstream.
  */
-function isLeadCall(call) {
-  if (call.recordType !== 'call') return false;
-  if (!String(call.transcript || '').trim()) return false;
-  return !isClientContactName(call.contact);
+function firstContactCalls(callData) {
+  const byPhone = new Map();
+  for (const c of callData || []) {
+    if (c.recordType !== 'call' || !String(c.transcript || '').trim()) continue;
+    const key = last10Digits(c.phone) || last10Digits(c.contact) || c.contactId || c.link;
+    if (!key) continue;
+    const prev = byPhone.get(key);
+    // Keep the earliest (ISO timestamps sort lexicographically).
+    if (!prev || String(c.timestamp || '') < String(prev.timestamp || '')) byPhone.set(key, c);
+  }
+  return [...byPhone.values()];
 }
 
 /** One LLM batch → array of normalized extractions aligned to `calls`. */
@@ -3075,9 +3087,11 @@ function pairsToMd(pairs, total) {
 }
 
 /**
- * Intake Marketing Insights. Mines the trailing N days of intake/prospective
- * call transcripts for referral sources, motivations, objections, case types,
- * and language — then writes a marketing brief (email + CSV, optional Slack).
+ * Intake Marketing Insights. Analyzes each caller's first transcript call in the
+ * trailing N days, has the LLM classify intake/new-lead vs existing-client (so
+ * leads who since signed are still counted), and mines the intake calls for
+ * referral sources, motivations, objections, case types, language, geography and
+ * competitors — then writes a marketing brief (email + CSV, optional Slack).
  */
 async function runIntakeMarketingReport(opts = {}) {
   const days = opts.days != null
@@ -3109,12 +3123,15 @@ async function runIntakeMarketingReport(opts = {}) {
     fetchTranscriptForWeekly: true,
   });
 
-  let intake = (callData || []).filter((c) => isLeadCall(c));
-  console.log(`\n[2/4] Lead / prospective-client calls with transcripts: ${intake.length}`);
-  if (maxCalls > 0 && intake.length > maxCalls) {
-    intake = intake.slice(0, maxCalls);
-    console.log(`  MARKETING_MAX_CALLS=${maxCalls} — analyzing first ${maxCalls}.`);
+  // Candidates = each caller's first transcript call in the window (most recent first).
+  let candidates = firstContactCalls(callData)
+    .sort((a, b) => String(b.timestamp || '').localeCompare(String(a.timestamp || '')));
+  console.log(`\n[2/4] First-contact calls with transcripts (unique callers): ${candidates.length}`);
+  if (maxCalls > 0 && candidates.length > maxCalls) {
+    candidates = candidates.slice(0, maxCalls);
+    console.log(`  MARKETING_MAX_CALLS=${maxCalls} — analyzing the ${maxCalls} most recent.`);
   }
+  let intake = candidates;
 
   if (!OPENAI_API_KEY) {
     console.log('\n[3/4] Skipped — no OPENAI_API_KEY.');
@@ -3125,9 +3142,9 @@ async function runIntakeMarketingReport(opts = {}) {
     return { rangeLabel, calls: 0, analyzed: 0 };
   }
 
-  console.log(`\n[3/4] Extracting marketing signals (${batchSize}/batch)...`);
+  console.log(`\n[3/4] Extracting + classifying (${batchSize}/batch)...`);
   /** @type {{ call: object, extraction: object }[]} */
-  const rows = [];
+  const allExtracted = [];
   for (let start = 0; start < intake.length; start += batchSize) {
     const batch = intake.slice(start, start + batchSize);
     process.stdout.write(`  [${start + 1}-${start + batch.length}/${intake.length}] ... `);
@@ -3143,7 +3160,7 @@ async function runIntakeMarketingReport(opts = {}) {
       const ex = extractions[i];
       if (ex) {
         ex.language = detectLanguage(call.transcript); // deterministic, don't trust LLM
-        rows.push({ call, extraction: ex });
+        allExtracted.push({ call, extraction: ex });
         ok++;
       }
     });
@@ -3151,8 +3168,16 @@ async function runIntakeMarketingReport(opts = {}) {
     await sleep(SENTIMENT_LLM_DELAY_MS);
   }
 
+  // Keep only genuine intake/new-lead conversations (existing-client calls dropped).
+  const rows = allExtracted.filter((r) => r.extraction.call_stage === 'intake_new_lead');
+  const droppedClient = allExtracted.filter((r) => r.extraction.call_stage === 'existing_client').length;
+  const droppedOther = allExtracted.length - rows.length - droppedClient;
+  console.log(
+    `  Classified: ${rows.length} intake/new-lead · dropped ${droppedClient} existing-client · ${droppedOther} other.`
+  );
+
   if (!rows.length) {
-    console.log('\n[4/4] No successful extractions — skipping brief.');
+    console.log('\n[4/4] No intake/new-lead calls to report on.');
     return { rangeLabel, calls: intake.length, analyzed: 0 };
   }
 
