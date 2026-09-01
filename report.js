@@ -2636,9 +2636,12 @@ function formatMissedCallTime(iso) {
 // appears in the Slack post. The "tag" is detected three ways so it works
 // regardless of how the bot marks it: a keyword in the message text, a keyword
 // in a thread reply, or an emoji reaction on the message. All are configurable.
+// Default matches the Quo Router bot's exact tag line ("@RJL-zap request a call
+// back"). We key on the specific phrase — not a bare "call back" — so an AI call
+// summary that happens to say "call back" doesn't trip a false callback flag.
 const CALLBACK_REQUEST_KEYWORDS = (
   process.env.MISSED_CALLBACK_KEYWORDS ||
-  'callback,call back,call-back,called back requested,wants a call,requested a call,please call,ring back'
+  'request a call back,request a callback,requests a call back,requests a callback,requested a call back,requested a callback,requesting a call back,request call back'
 )
   .split(',')
   .map((s) => s.trim().toLowerCase())
