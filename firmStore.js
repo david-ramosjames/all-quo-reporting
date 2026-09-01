@@ -125,16 +125,15 @@ function reportConfigForFirm(firm) {
     slackBotToken: firstNonEmpty(f.slack_bot_token, env.SLACK_BOT_TOKEN),
     slackChannel: firstNonEmpty(f.slack_channel, env.SLACK_CHANNEL, 'lead-calls'),
     reviewSlackChannel: firstNonEmpty(f.review_slack_channel, env.REVIEW_SLACK_CHANNEL, 'review-opportunities'),
-    // Channel where a bot posts inbound-call notifications and tags the ones
-    // where the client asked for a callback. The missed-call report reads this
-    // to flag "callback requested" rows. Defaults to the daily lead-calls
-    // channel since that's usually where call posts land.
+    // Channel(s) where a bot posts inbound-call notifications and tags the ones
+    // where the client asked for a callback. The missed-call report reads these
+    // to flag "callback requested" rows. The bot tags in every call-post
+    // channel, so the default 'all' scans every channel the bot is a member of.
+    // Override with a comma-separated list of channel names/IDs to scope it.
     missedCallbackSlackChannel: firstNonEmpty(
       f.missed_callback_slack_channel,
       env.MISSED_CALLBACK_SLACK_CHANNEL,
-      f.slack_channel,
-      env.SLACK_CHANNEL,
-      'lead-calls'
+      'all'
     ),
     sheets: {
       sheetsId: firstNonEmpty(f.sheets_id, env.GOOGLE_SHEETS_ID),

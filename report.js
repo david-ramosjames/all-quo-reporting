@@ -20,7 +20,7 @@ const {
   buildIntakeMarketingBatchPrompt,
   buildIntakeMarketingBriefPrompt,
 } = require('./prompts');
-const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage } = require('./slack');
+const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage, listMemberChannels } = require('./slack');
 const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require('./reviewOpportunities');
 const firmStore = require('./firmStore');
 const reviewRequests = require('./reviewRequests');
@@ -2688,36 +2688,73 @@ function messageSignalsCallback(msg) {
 }
 
 /**
- * Reads the Slack channel where inbound-call posts are tagged and returns a map
- * of phone-key → { requestedAtLocal } for calls flagged as "callback requested".
- * Best-effort: never throws — a Slack failure just yields no flags.
+ * Resolves the configured callback-channel setting to a concrete list of
+ * channels to scan. The Quo Router bot posts (and tags) in EVERY call-post
+ * channel, so the default ('all'/'*'/blank) scans every channel the bot is a
+ * member of. A comma-separated list of names/IDs scopes it to those.
+ * @returns {Promise<Array<{ id?: string, name: string }>>}
+ */
+async function resolveCallbackChannels(token, setting) {
+  const raw = String(setting || '').trim().toLowerCase();
+  if (!raw || raw === 'all' || raw === '*') {
+    const channels = await listMemberChannels(token);
+    return channels.map((c) => ({ id: c.id, name: c.name }));
+  }
+  return String(setting)
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .map((name) => ({ name }));
+}
+
+/**
+ * Reads the Slack channel(s) where inbound-call posts are tagged and returns a
+ * map of phone-key → { requestedAtLocal } for calls flagged "callback requested".
+ * Scans every channel the bot belongs to by default. Best-effort: never throws —
+ * a Slack failure (per channel or overall) just yields fewer/no flags.
  */
 async function fetchCallbackRequestedPhones({ token, channel, createdAfter, createdBefore }) {
   /** @type {Map<string, { requestedAtLocal: string }>} */
   const flagged = new Map();
-  if (!token || !channel) return flagged;
-  let messages;
+  if (!token) return flagged;
+
+  let channels;
   try {
-    messages = await fetchSlackMessages(token, channel, createdAfter, createdBefore, {
-      includeThreads: true,
-      includeReactions: true,
-    });
+    channels = await resolveCallbackChannels(token, channel);
   } catch (err) {
-    console.warn(`  Callback tags: could not read #${channel} (${err.message}) — skipping callback flags.`);
+    console.warn(`  Callback tags: could not list channels (${err.message}) — skipping callback flags.`);
     return flagged;
   }
-  for (const msg of messages) {
-    if (!messageSignalsCallback(msg)) continue;
-    // The caller's number lives in the call-post text (and sometimes threads).
-    const phoneKeys = [
-      ...extractPhoneKeysFromText(msg.text),
-      ...(msg.threadReplies || []).flatMap((r) => extractPhoneKeysFromText(r.text)),
-    ];
-    if (!phoneKeys.length) continue;
-    const requestedAtLocal = formatMissedCallTime(msg.time) || '';
-    for (const key of phoneKeys) {
-      // Keep the earliest tag time if a number was posted more than once.
-      if (!flagged.has(key)) flagged.set(key, { requestedAtLocal });
+  if (!channels.length) {
+    console.log('  Callback tags: no channels to scan (bot not in any channel?).');
+    return flagged;
+  }
+  console.log(`  Callback tags: scanning ${channels.length} channel(s) for "${CALLBACK_REQUEST_KEYWORDS[0]}"...`);
+
+  for (const ch of channels) {
+    let messages;
+    try {
+      messages = await fetchSlackMessages(token, ch.id || ch.name, createdAfter, createdBefore, {
+        includeThreads: true,
+        includeReactions: true,
+      });
+    } catch (err) {
+      console.warn(`    #${ch.name || ch.id}: could not read (${err.message}) — skipped.`);
+      continue;
+    }
+    for (const msg of messages) {
+      if (!messageSignalsCallback(msg)) continue;
+      // The caller's number lives in the call-post text (and sometimes threads).
+      const phoneKeys = [
+        ...extractPhoneKeysFromText(msg.text),
+        ...(msg.threadReplies || []).flatMap((r) => extractPhoneKeysFromText(r.text)),
+      ];
+      if (!phoneKeys.length) continue;
+      const requestedAtLocal = formatMissedCallTime(msg.time) || '';
+      for (const key of phoneKeys) {
+        // Keep the earliest tag time if a number was tagged more than once.
+        if (!flagged.has(key)) flagged.set(key, { requestedAtLocal });
+      }
     }
   }
   return flagged;
@@ -2903,8 +2940,11 @@ async function runMissedClientCallReport() {
   if (outstanding.length) {
     const cbToken = firmCtx().slackBotToken;
     const cbChannel = firmCtx().missedCallbackSlackChannel;
-    if (cbToken && cbChannel) {
-      console.log(`\n  Checking #${cbChannel} for callback-requested tags...`);
+    if (cbToken) {
+      const scope = cbChannel && !['all', '*'].includes(String(cbChannel).trim().toLowerCase())
+        ? `#${cbChannel}`
+        : 'all channels the bot is in';
+      console.log(`\n  Checking ${scope} for callback-requested tags...`);
       const flagged = await fetchCallbackRequestedPhones({
         token: cbToken,
         channel: cbChannel,
@@ -2922,7 +2962,7 @@ async function runMissedClientCallReport() {
       }
       console.log(`  Callback-requested matches: ${hits} of ${outstanding.length} outstanding.`);
     } else {
-      console.log('\n  Callback tags: skipped (no Slack token or channel configured).');
+      console.log('\n  Callback tags: skipped (no SLACK_BOT_TOKEN configured).');
     }
   }
 

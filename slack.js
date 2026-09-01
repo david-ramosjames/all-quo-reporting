@@ -16,22 +16,27 @@ const ALLOWED_SUBTYPES = new Set(['bot_message', 'file_share']);
 async function fetchSlackMessages(token, channelName, oldest, latest, options = {}) {
   const { includeThreads = true, includeReactions = false } = options;
   const client = new WebClient(token);
-  const name     = channelName.replace(/^#/, '');
+  const name     = String(channelName).replace(/^#/, '');
 
-  let channelId = null;
+  // Accept a raw channel ID (Cxxxx / Gxxxx) so callers scanning many channels
+  // don't pay a full conversations.list pass per channel to resolve a name.
+  const looksLikeId = /^[CG][A-Z0-9]{6,}$/.test(name);
+  let channelId = looksLikeId ? name : null;
   let cursor;
 
-  do {
-    const res = await client.conversations.list({
-      types: 'public_channel,private_channel',
-      exclude_archived: true,
-      limit: 200,
-      cursor,
-    });
-    const match = res.channels.find((c) => c.name === name);
-    if (match) { channelId = match.id; break; }
-    cursor = res.response_metadata?.next_cursor;
-  } while (cursor);
+  if (!channelId) {
+    do {
+      const res = await client.conversations.list({
+        types: 'public_channel,private_channel',
+        exclude_archived: true,
+        limit: 200,
+        cursor,
+      });
+      const match = res.channels.find((c) => c.name === name);
+      if (match) { channelId = match.id; break; }
+      cursor = res.response_metadata?.next_cursor;
+    } while (cursor);
+  }
 
   if (!channelId) throw new Error(`Slack channel #${name} not found. Check the channel name and bot membership.`);
 
@@ -181,6 +186,30 @@ function formatSlackForPrompt(messages, timezone, rangeLabel) {
 }
 
 /**
+ * Lists every channel the bot is a MEMBER of (public + private, non-archived).
+ * Used to scan all call-post channels for callback tags without naming each.
+ * @returns {Promise<{ id: string, name: string }[]>}
+ */
+async function listMemberChannels(token) {
+  const client = new WebClient(token);
+  const out = [];
+  let cursor;
+  do {
+    const res = await client.conversations.list({
+      types: 'public_channel,private_channel',
+      exclude_archived: true,
+      limit: 200,
+      cursor,
+    });
+    for (const c of res.channels || []) {
+      if (c.is_member) out.push({ id: c.id, name: c.name });
+    }
+    cursor = res.response_metadata?.next_cursor;
+  } while (cursor);
+  return out;
+}
+
+/**
  * Resolves a channel **name** (with or without leading #) to its Slack ID.
  * Paginates public + private channels the bot is a member of.
  */
@@ -250,4 +279,4 @@ async function updateSlackMessage({ token, channel, ts, text, blocks }) {
   return { ok: Boolean(res.ok), ts: res.ts, channel: res.channel };
 }
 
-module.exports = { fetchSlackMessages, formatSlackForPrompt, postSlackMessage, updateSlackMessage, resolveChannelId };
+module.exports = { fetchSlackMessages, formatSlackForPrompt, postSlackMessage, updateSlackMessage, resolveChannelId, listMemberChannels };
