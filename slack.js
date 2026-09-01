@@ -14,7 +14,7 @@ const ALLOWED_SUBTYPES = new Set(['bot_message', 'file_share']);
  * Optional: thread replies (see includeThreads).
  */
 async function fetchSlackMessages(token, channelName, oldest, latest, options = {}) {
-  const { includeThreads = true } = options;
+  const { includeThreads = true, includeReactions = false } = options;
   const client = new WebClient(token);
   const name     = channelName.replace(/^#/, '');
 
@@ -92,7 +92,7 @@ async function fetchSlackMessages(token, channelName, oldest, latest, options = 
         if (!m.text?.trim()) continue;
         if (m.subtype && !ALLOWED_SUBTYPES.has(m.subtype)) continue;
         seen.add(m.ts);
-        replies.push({ ...m, _sender: await resolveSender(m) });
+        replies.push({ ...m, _sender: await resolveSender(m), _reactions: reactionNames(m) });
       }
       tc = res.response_metadata?.next_cursor;
       if (tc) await sleep(REQUEST_DELAY_MS);
@@ -122,12 +122,22 @@ async function fetchSlackMessages(token, channelName, oldest, latest, options = 
       threadReplies: threadReplies.map((m) => ({
         user: m._sender,
         text: flattenText(m.text, userCache),
+        ...(includeReactions ? { reactions: m._reactions || [] } : {}),
       })),
+      ...(includeReactions ? { reactions: reactionNames(msg) } : {}),
     });
   }
 
   cleaned.sort((a, b) => parseFloat(a.ts) - parseFloat(b.ts));
   return cleaned;
+}
+
+/** Emoji reaction names on a raw Slack message (requires the `reactions:read` scope). */
+function reactionNames(msg) {
+  if (!Array.isArray(msg?.reactions)) return [];
+  return msg.reactions
+    .map((r) => String(r?.name || '').toLowerCase())
+    .filter(Boolean);
 }
 
 function flattenText(text, userCache) {

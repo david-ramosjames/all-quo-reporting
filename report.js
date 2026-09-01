@@ -2629,14 +2629,106 @@ function formatMissedCallTime(iso) {
   return dt.toFormat("ccc, LLL d 'at' h:mm a") + ` ${TIMEZONE}`;
 }
 
+// ── Callback-requested detection (from Slack) ────────────────────────────────
+// A bot posts inbound-call notifications in Slack and tags the ones where the
+// client asked for a callback. We read that channel and flag matching missed
+// calls, matching the tag to the missed row by the caller's phone number that
+// appears in the Slack post. The "tag" is detected three ways so it works
+// regardless of how the bot marks it: a keyword in the message text, a keyword
+// in a thread reply, or an emoji reaction on the message. All are configurable.
+const CALLBACK_REQUEST_KEYWORDS = (
+  process.env.MISSED_CALLBACK_KEYWORDS ||
+  'callback,call back,call-back,called back requested,wants a call,requested a call,please call,ring back'
+)
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
+
+const CALLBACK_REQUEST_REACTIONS = (
+  process.env.MISSED_CALLBACK_REACTIONS ||
+  'callback,phone,telephone_receiver,call_me_hand,back,leftwards_arrow_with_hook,arrow_backward'
+)
+  .split(',')
+  .map((s) => s.trim().toLowerCase().replace(/^:|:$/g, ''))
+  .filter(Boolean);
+
+/** Pull last-10-digit phone keys out of free Slack text (any common format). */
+function extractPhoneKeysFromText(text) {
+  const keys = new Set();
+  const s = String(text || '');
+  // Match +1-style, (512) 555-1234, 512.555.1234, 5125551234, etc.
+  const re = /(\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g;
+  let m;
+  while ((m = re.exec(s))) {
+    const k = last10Digits(m[0]);
+    if (k) keys.add(k);
+  }
+  return [...keys];
+}
+
+/** True if a fetched Slack message (with threadReplies/reactions) signals a callback request. */
+function messageSignalsCallback(msg) {
+  const hasKeyword = (t) => {
+    const lower = String(t || '').toLowerCase();
+    return CALLBACK_REQUEST_KEYWORDS.some((kw) => lower.includes(kw));
+  };
+  const hasReaction = (arr) =>
+    Array.isArray(arr) && arr.some((r) => CALLBACK_REQUEST_REACTIONS.includes(String(r).toLowerCase()));
+
+  if (hasKeyword(msg.text)) return true;
+  if (hasReaction(msg.reactions)) return true;
+  for (const r of msg.threadReplies || []) {
+    if (hasKeyword(r.text)) return true;
+    if (hasReaction(r.reactions)) return true;
+  }
+  return false;
+}
+
+/**
+ * Reads the Slack channel where inbound-call posts are tagged and returns a map
+ * of phone-key → { requestedAtLocal } for calls flagged as "callback requested".
+ * Best-effort: never throws — a Slack failure just yields no flags.
+ */
+async function fetchCallbackRequestedPhones({ token, channel, createdAfter, createdBefore }) {
+  /** @type {Map<string, { requestedAtLocal: string }>} */
+  const flagged = new Map();
+  if (!token || !channel) return flagged;
+  let messages;
+  try {
+    messages = await fetchSlackMessages(token, channel, createdAfter, createdBefore, {
+      includeThreads: true,
+      includeReactions: true,
+    });
+  } catch (err) {
+    console.warn(`  Callback tags: could not read #${channel} (${err.message}) — skipping callback flags.`);
+    return flagged;
+  }
+  for (const msg of messages) {
+    if (!messageSignalsCallback(msg)) continue;
+    // The caller's number lives in the call-post text (and sometimes threads).
+    const phoneKeys = [
+      ...extractPhoneKeysFromText(msg.text),
+      ...(msg.threadReplies || []).flatMap((r) => extractPhoneKeysFromText(r.text)),
+    ];
+    if (!phoneKeys.length) continue;
+    const requestedAtLocal = formatMissedCallTime(msg.time) || '';
+    for (const key of phoneKeys) {
+      // Keep the earliest tag time if a number was posted more than once.
+      if (!flagged.has(key)) flagged.set(key, { requestedAtLocal });
+    }
+  }
+  return flagged;
+}
+
 function buildMissedClientCallTable(rows) {
-  const header = ['Client', 'Phone', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Link'];
+  const header = ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Link'];
   const lines = [header.join(' | '), header.map(() => '---').join(' | ')];
   for (const r of rows) {
     lines.push(
       [
         r.contact || '(unknown)',
         r.phone || '',
+        r.callbackRequested ? '📞 Yes' : '',
         r.missedAtLocal || '',
         r.reason || '',
         r.attorney || '',
@@ -2656,14 +2748,17 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
     th, td { border: 1px solid #d0d7de; padding: 8px 10px; text-align: left; vertical-align: top; font-size: 14px; }
     th { background: #f6f8fa; }
     .empty { color: #57606a; font-style: italic; padding: 16px 0; }
+    tr.callback td { background: #fff4e5; }
+    .cb { color: #b25000; font-weight: 600; white-space: nowrap; }
   `.trim();
   const headerRow =
-    '<tr><th>Client</th><th>Phone</th><th>Missed at</th><th>Reason</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Link</th></tr>';
+    '<tr><th>Client</th><th>Phone</th><th>Callback?</th><th>Missed at</th><th>Reason</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Link</th></tr>';
   const bodyRows = rows
     .map(
       (r) =>
-        `<tr><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
+        `<tr${r.callbackRequested ? ' class="callback"' : ''}><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
         `<td>${escapeHtml(r.phone || '')}</td>` +
+        `<td>${r.callbackRequested ? '<span class="cb">📞 Yes</span>' : ''}</td>` +
         `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
         `<td>${escapeHtml(r.reason || '')}</td>` +
         `<td>${escapeHtml(r.attorney || '')}</td>` +
@@ -2680,6 +2775,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
     ${table}
     <p style="margin-top: 16px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
     <p>Client numbers whose most recent call in the last 24 hours was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person — regardless of which internal line handled it. A number drops off as soon as its latest call is answered by a person (client calls back and gets through) or we dial out to them from any line. Please call back the clients still listed.</p>
+    <p><strong>📞 Callback?</strong> A "Yes" (highlighted row) means the client explicitly asked for a callback — flagged from the tagged call posts in Slack. Prioritize these.</p>
   </body></html>`;
 }
 
@@ -2799,11 +2895,45 @@ async function runMissedClientCallReport() {
     });
   }
 
-  outstanding.sort((x, y) => String(x.missedAtIso).localeCompare(String(y.missedAtIso)));
+  // Flag rows where the client asked for a callback, read from the tagged
+  // call posts in Slack (best-effort — never blocks the report).
+  if (outstanding.length) {
+    const cbToken = firmCtx().slackBotToken;
+    const cbChannel = firmCtx().missedCallbackSlackChannel;
+    if (cbToken && cbChannel) {
+      console.log(`\n  Checking #${cbChannel} for callback-requested tags...`);
+      const flagged = await fetchCallbackRequestedPhones({
+        token: cbToken,
+        channel: cbChannel,
+        createdAfter,
+        createdBefore,
+      });
+      let hits = 0;
+      for (const r of outstanding) {
+        const hit = r._groupKey && flagged.get(r._groupKey);
+        if (hit) {
+          r.callbackRequested = true;
+          r.callbackRequestedAtLocal = hit.requestedAtLocal || '';
+          hits += 1;
+        }
+      }
+      console.log(`  Callback-requested matches: ${hits} of ${outstanding.length} outstanding.`);
+    } else {
+      console.log('\n  Callback tags: skipped (no Slack token or channel configured).');
+    }
+  }
+
+  // Callback-requested clients first, then oldest miss first within each group.
+  outstanding.sort((x, y) => {
+    if (Boolean(y.callbackRequested) !== Boolean(x.callbackRequested)) {
+      return y.callbackRequested ? 1 : -1;
+    }
+    return String(x.missedAtIso).localeCompare(String(y.missedAtIso));
+  });
 
   console.log(`\n[3/3] Outstanding (unreturned) missed client calls: ${outstanding.length}`);
   for (const r of outstanding) {
-    console.log(`  - ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}`);
+    console.log(`  - ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}${r.callbackRequested ? '  [📞 CALLBACK REQUESTED]' : ''}`);
     // Dump the full call sequence for this dial-in number so false-positives
     // are diagnosable from the Railway logs without re-running.
     const group = r._groupKey ? byPhone.get(r._groupKey) || [] : [];
@@ -2819,8 +2949,10 @@ async function runMissedClientCallReport() {
     delete r._groupKey;
   }
 
+  const callbackCount = outstanding.filter((r) => r.callbackRequested).length;
   const subject = outstanding.length
-    ? `${firmCtx().firmName} — Missed Client Call Report — ${outstanding.length} to call back`
+    ? `${firmCtx().firmName} — Missed Client Call Report — ${outstanding.length} to call back` +
+      (callbackCount ? ` (${callbackCount} requested a callback)` : '')
     : `${firmCtx().firmName} — Missed Client Call Report — all clear`;
   const html = buildMissedClientCallEmailHtml(rangeLabel, outstanding);
   const plainText = outstanding.length
