@@ -20,7 +20,7 @@ const {
   buildIntakeMarketingBatchPrompt,
   buildIntakeMarketingBriefPrompt,
 } = require('./prompts');
-const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage, listMemberChannels } = require('./slack');
+const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage } = require('./slack');
 const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require('./reviewOpportunities');
 const firmStore = require('./firmStore');
 const reviewRequests = require('./reviewRequests');
@@ -2629,113 +2629,64 @@ function formatMissedCallTime(iso) {
   return dt.toFormat("ccc, LLL d 'at' h:mm a") + ` ${TIMEZONE}`;
 }
 
-// ── Callback-requested detection (from Slack) ────────────────────────────────
-// A bot posts inbound-call notifications in Slack and tags the ones where the
-// client asked for a callback. We read that channel and flag matching missed
-// calls, matching the tag to the missed row by the caller's phone number that
-// appears in the Slack post. The "tag" is detected three ways so it works
-// regardless of how the bot marks it: a keyword in the message text, a keyword
-// in a thread reply, or an emoji reaction on the message. All are configurable.
-// Default matches the Quo Router bot's exact tag line ("@RJL-zap request a call
-// back"). We key on the specific phrase — not a bare "call back" — so an AI call
-// summary that happens to say "call back" doesn't trip a false callback flag.
-const CALLBACK_REQUEST_KEYWORDS = (
-  process.env.MISSED_CALLBACK_KEYWORDS ||
-  'request a call back,request a callback,requests a call back,requests a callback,requested a call back,requested a callback,requesting a call back,request call back'
-)
-  .split(',')
-  .map((s) => s.trim().toLowerCase())
-  .filter(Boolean);
+// ── Callback-required detection (from the call transcript, via an LLM) ────────
+// Instead of relying on any external bot/tag, we read each client's most recent
+// substantive call (transcript preferred, summary as fallback) and ask the LLM
+// whether the FIRM still owes that client a return call — e.g. the client asked
+// to be called back, or a staff member/attorney promised to call them back.
+// Direction matters: a call where WE asked the CLIENT to call us back does NOT
+// count. Non-client calls (referring attorneys, vendors, insurers) don't count.
+// A callback falls off once we've actually reached the client again (see
+// isConnectedReturnCall). Fails closed so a bad LLM call drops the flag.
 
-const CALLBACK_REQUEST_REACTIONS = (
-  process.env.MISSED_CALLBACK_REACTIONS ||
-  'callback,phone,telephone_receiver,call_me_hand,back,leftwards_arrow_with_hook,arrow_backward'
-)
-  .split(',')
-  .map((s) => s.trim().toLowerCase().replace(/^:|:$/g, ''))
-  .filter(Boolean);
+// Cap on how many client calls we run through the LLM per report run.
+const CALLBACK_MAX_CLASSIFY = parseInt(process.env.MISSED_CALLBACK_MAX_CLASSIFY || '200', 10);
 
-/** Pull last-10-digit phone keys out of free Slack text (any common format). */
-function extractPhoneKeysFromText(text) {
-  const keys = new Set();
-  const s = String(text || '');
-  // Match +1-style, (512) 555-1234, 512.555.1234, 5125551234, etc.
-  const re = /(\+?1[\s.\-]?)?\(?\d{3}\)?[\s.\-]?\d{3}[\s.\-]?\d{4}/g;
-  let m;
-  while ((m = re.exec(s))) {
-    const k = last10Digits(m[0]);
-    if (k) keys.add(k);
-  }
-  return [...keys];
-}
-
-/** True if a fetched Slack message (with threadReplies/reactions) signals a callback request. */
-function messageSignalsCallback(msg) {
-  const hasKeyword = (t) => {
-    const lower = String(t || '').toLowerCase();
-    return CALLBACK_REQUEST_KEYWORDS.some((kw) => lower.includes(kw));
-  };
-  const hasReaction = (arr) =>
-    Array.isArray(arr) && arr.some((r) => CALLBACK_REQUEST_REACTIONS.includes(String(r).toLowerCase()));
-
-  if (hasKeyword(msg.text)) return true;
-  if (hasReaction(msg.reactions)) return true;
-  for (const r of msg.threadReplies || []) {
-    if (hasKeyword(r.text)) return true;
-    if (hasReaction(r.reactions)) return true;
-  }
-  return false;
+/** Best classifiable text for a call: full transcript if present, else summary. */
+function callClassifyText(c) {
+  const tr = String(c?.transcript || '').trim();
+  if (tr && tr !== '(no transcript — weekly bundle)') return { text: tr, kind: 'transcript' };
+  const sum = String(c?.summary || '').trim();
+  if (sum) return { text: sum, kind: 'summary' };
+  return null;
 }
 
 /**
- * Resolves the configured callback-channel setting to a concrete list of
- * channels to scan. The Quo Router bot posts (and tags) in EVERY call-post
- * channel, so the default ('all'/'*'/blank) scans every channel the bot is a
- * member of. A comma-separated list of names/IDs scopes it to those.
- * @returns {Promise<Array<{ id?: string, name: string }>>}
+ * Reads one call and decides whether the FIRM still owes this client a return
+ * call. Direction-aware: the firm asking the client to call US back does NOT
+ * count. Fails closed (returns ok:false) so a bad LLM call never invents a
+ * callback. Returns { ok, reason }.
  */
-async function resolveCallbackChannels(token, setting) {
-  const raw = String(setting || '').trim().toLowerCase();
-  if (!raw || raw === 'all' || raw === '*') {
-    const channels = await listMemberChannels(token);
-    return channels.map((c) => ({ id: c.id, name: c.name }));
-  }
-  return String(setting)
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean)
-    .map((name) => ({ name }));
-}
+async function classifyCallbackFromCall(c) {
+  const picked = callClassifyText(c);
+  if (!picked) return { ok: false, reason: 'no transcript or summary' };
+  const dir = isIncomingDirection(c.direction)
+    ? 'inbound (the client called the firm)'
+    : 'outbound (the firm called the client)';
+  const label = picked.kind === 'transcript' ? 'Transcript' : 'Call summary (no full transcript available)';
+  const prompt = `You are reviewing a single phone call at a personal-injury law firm to decide whether the FIRM still needs to CALL THIS PERSON BACK.
 
-/**
- * LLM gate: the raw "@RJL-zap request a call back" tag is noisy — it fires on
- * calls where the FIRM asked the client to call us back, on referral / attorney
- * / vendor calls, and on calls with nothing pending. Read the actual post
- * (summary included) and confirm a CLIENT is genuinely waiting for the firm to
- * call THEM back. Fails closed (returns false) so a bad LLM call drops the flag
- * rather than surfacing a false positive.
- */
-async function classifyCallbackPost(text) {
-  const prompt = `You are reviewing an internal call-notification post from a personal-injury law firm's phone system. Decide whether a CLIENT or PROSPECTIVE CLIENT is waiting for someone AT THE FIRM to call THEM back.
+Call direction: ${dir}
+Contact: ${c.contact || '(unknown)'}
 
-Answer true ONLY if the client/prospective client asked the firm to call them back and has not yet been reached.
+Answer true ONLY if, based on this call, the firm owes the client (or prospective client) a return call that has not yet happened — e.g. the client asked to have someone call them back, left a message needing follow-up, or a staff member/attorney said they would call the client back.
 
 Answer false if ANY of these apply:
-- The FIRM (a staff member, paralegal, or attorney) called the client and asked the CLIENT to return the call — i.e. the client owes us a callback, not the reverse.
-- The call is with a referring attorney, vendor, insurance company, court, or other non-client, or is about referral fees / internal matters.
-- No callback is actually being requested by the client.
-- The client's matter was fully handled on the call with nothing left pending.
+- The FIRM called and asked the CLIENT to call US back — i.e. the client owes the callback, not the firm.
+- The person's question or matter was fully handled on this call with nothing left that requires a callback.
+- The other party is NOT a client — e.g. a referring attorney, vendor, insurance company, court, or an internal / marketing call.
+- No callback is owed by the firm.
 
-Post:
+${label}:
 """
-${String(text || '').slice(0, 4000)}
+${picked.text.slice(0, 6000)}
 """
 
-Respond as JSON only: {"client_awaiting_callback": true or false, "reason": "<brief>"}`;
+Respond as JSON only: {"firm_owes_callback": true or false, "reason": "<brief>"}`;
   try {
     const out = await runChatCompletion(prompt, 300, 'Callback classifier', { jsonObject: true });
     const parsed = JSON.parse(out);
-    return { ok: Boolean(parsed.client_awaiting_callback), reason: String(parsed.reason || '') };
+    return { ok: Boolean(parsed.firm_owes_callback), reason: String(parsed.reason || '') };
   } catch (err) {
     console.warn(`    Callback classify failed (${err.message}) — treating as NOT a callback.`);
     return { ok: false, reason: 'classifier error' };
@@ -2743,79 +2694,20 @@ Respond as JSON only: {"client_awaiting_callback": true or false, "reason": "<br
 }
 
 /**
- * Reads the Slack channel(s) where inbound-call posts are tagged and returns a
- * map of phone-key → { requestedAtLocal } for calls where a CLIENT is genuinely
- * waiting for a callback. Detection is two-stage: the tag/keyword finds candidate
- * posts, then an LLM confirms the post is a real client callback request (the raw
- * tag alone is too noisy). To keep LLM calls minimal we only classify candidates
- * whose phone matches an outstanding missed row. Best-effort: never throws.
- * @param {Set<string>} [opts.outstandingKeys] last-10 keys of outstanding rows.
+ * True if `c` is a call, placed AFTER the callback was owed, that actually
+ * connected the client with a person — either we called out and they answered,
+ * or they called in and reached a human. Used to fall a callback off the list
+ * once it's genuinely been returned (a later missed attempt does NOT count).
  */
-async function fetchCallbackRequestedPhones({ token, channel, createdAfter, createdBefore, outstandingKeys }) {
-  /** @type {Map<string, { requestedAtLocal: string }>} */
-  const flagged = new Map();
-  if (!token) return flagged;
-
-  let channels;
-  try {
-    channels = await resolveCallbackChannels(token, channel);
-  } catch (err) {
-    console.warn(`  Callback tags: could not list channels (${err.message}) — skipping callback flags.`);
-    return flagged;
-  }
-  if (!channels.length) {
-    console.log('  Callback tags: no channels to scan (bot not in any channel?).');
-    return flagged;
-  }
-  console.log(`  Callback tags: scanning ${channels.length} channel(s) for candidate posts...`);
-
-  // Stage 1 — gather candidate posts (tag/keyword present + a phone in the text).
-  /** @type {{ text: string, keys: string[], requestedAtLocal: string }[]} */
-  const candidates = [];
-  for (const ch of channels) {
-    let messages;
-    try {
-      messages = await fetchSlackMessages(token, ch.id || ch.name, createdAfter, createdBefore, {
-        includeThreads: true,
-        includeReactions: true,
-      });
-    } catch (err) {
-      console.warn(`    #${ch.name || ch.id}: could not read (${err.message}) — skipped.`);
-      continue;
-    }
-    for (const msg of messages) {
-      if (!messageSignalsCallback(msg)) continue;
-      const threadText = (msg.threadReplies || []).map((r) => r.text).join('\n');
-      const keys = [
-        ...extractPhoneKeysFromText(msg.text),
-        ...extractPhoneKeysFromText(threadText),
-      ];
-      if (!keys.length) continue;
-      candidates.push({
-        text: [msg.text, threadText].filter(Boolean).join('\n'),
-        keys,
-        requestedAtLocal: formatMissedCallTime(msg.time) || '',
-      });
-    }
-  }
-
-  // Stage 2 — LLM-confirm only candidates that could match an outstanding row.
-  let classified = 0;
-  for (const c of candidates) {
-    const matchKeys = outstandingKeys ? c.keys.filter((k) => outstandingKeys.has(k)) : c.keys;
-    if (!matchKeys.length) continue; // no outstanding client matches this post
-    classified += 1;
-    const verdict = await classifyCallbackPost(c.text);
-    if (!verdict.ok) {
-      console.log(`    Skipped (not a client callback): ${verdict.reason || 'n/a'}`);
-      continue;
-    }
-    for (const key of matchKeys) {
-      if (!flagged.has(key)) flagged.set(key, { requestedAtLocal: c.requestedAtLocal });
-    }
-  }
-  console.log(`  Callback tags: ${candidates.length} candidate(s), ${classified} matched an outstanding row, ${flagged.size} confirmed.`);
-  return flagged;
+function isConnectedReturnCall(c, sinceIso) {
+  if (!c || !c.timestamp || !sinceIso) return false;
+  const t = new Date(c.timestamp).getTime();
+  // 2-minute grace so the originating call's own legs don't count as "returned".
+  const since = new Date(sinceIso).getTime() + 120 * 1000;
+  if (!Number.isFinite(t) || !Number.isFinite(since) || t <= since) return false;
+  const status = String(c.status || '').toLowerCase();
+  if (!isIncomingDirection(c.direction)) return status === 'completed'; // we called, they answered
+  return status === 'completed' && !c.aiHandled; // they called back and reached a person
 }
 
 function buildMissedClientCallTable(rows) {
@@ -2873,7 +2765,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
     ${table}
     <p style="margin-top: 16px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
     <p>Client numbers whose most recent call in the last 24 hours was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person — regardless of which internal line handled it. A number drops off as soon as its latest call is answered by a person (client calls back and gets through) or we dial out to them from any line. Please call back the clients still listed.</p>
-    <p><strong>📞 Callback?</strong> A "Yes" (highlighted row) means the client explicitly asked for a callback — flagged from the tagged call posts in Slack. Prioritize these.</p>
+    <p><strong>📞 Callback?</strong> A "Yes" (highlighted row) means the firm owes this client a return call — the client asked us to call them back, or we said we would — determined by reading the call transcript. Rows with reason "Callback requested" are here for that reason even if the call wasn't a missed one. A callback drops off once we've actually reached the client again. Prioritize these.</p>
   </body></html>`;
 }
 
@@ -2900,7 +2792,10 @@ async function runMissedClientCallReport() {
     createdBefore,
     weeklyCommunications: true,
     includeMessages: false,
-    fetchTranscriptForWeekly: false,
+    // Pull transcripts so the LLM can decide whether the firm owes each client a
+    // callback (the client asked us to call back, or we promised to). Missed /
+    // no-answer calls simply have no transcript and fall to the heuristic below.
+    fetchTranscriptForWeekly: true,
     // Pull every line the firm owns — resolving calls often happen on a
     // different line (e.g. miss on RJL Outbound, callback via RJL Main Line,
     // client retry into RJL Transfers). An empty filter = all lines in this
@@ -2993,37 +2888,73 @@ async function runMissedClientCallReport() {
     });
   }
 
-  // Flag rows where the client asked for a callback, read from the tagged
-  // call posts in Slack (best-effort — never blocks the report).
-  if (outstanding.length) {
-    const cbToken = firmCtx().slackBotToken;
-    const cbChannel = firmCtx().missedCallbackSlackChannel;
-    if (cbToken) {
-      const scope = cbChannel && !['all', '*'].includes(String(cbChannel).trim().toLowerCase())
-        ? `#${cbChannel}`
-        : 'all channels the bot is in';
-      console.log(`\n  Checking ${scope} for callback-requested tags...`);
-      const outstandingKeys = new Set(outstanding.map((r) => r._groupKey).filter(Boolean));
-      const flagged = await fetchCallbackRequestedPhones({
-        token: cbToken,
-        channel: cbChannel,
-        createdAfter,
-        createdBefore,
-        outstandingKeys,
-      });
-      let hits = 0;
-      for (const r of outstanding) {
-        const hit = r._groupKey && flagged.get(r._groupKey);
-        if (hit) {
-          r.callbackRequested = true;
-          r.callbackRequestedAtLocal = hit.requestedAtLocal || '';
-          hits += 1;
-        }
+  // Callback-required detection — read each client's most recent substantive
+  // call and ask the LLM whether the FIRM still owes them a return call. These
+  // become first-class rows on the email (marked 📞), and fall off once we've
+  // actually reached the client again. Best-effort — never blocks the report.
+  {
+    const outstandingByKey = new Map(outstanding.map((r) => [r._groupKey, r]).filter(([k]) => k));
+
+    // One candidate per client: their most recent call that has transcript/summary.
+    /** @type {{ key: string, contact: string, anchor: object, convCall: object }[]} */
+    const candidates = [];
+    for (const [key, group] of byPhone) {
+      const clientAnchor = group.find((c) => isClientContactName(c.contact));
+      if (!clientAnchor) continue; // client groups only
+      // group is already sorted ascending by the outstanding loop above.
+      let convCall = null;
+      for (let i = group.length - 1; i >= 0; i--) {
+        if (callClassifyText(group[i])) { convCall = group[i]; break; }
       }
-      console.log(`  Callback-requested matches: ${hits} of ${outstanding.length} outstanding.`);
-    } else {
-      console.log('\n  Callback tags: skipped (no SLACK_BOT_TOKEN configured).');
+      if (!convCall) continue; // nothing to classify (pure missed call, no transcript)
+      candidates.push({ key, contact: clientAnchor.contact || convCall.contact || '', anchor: clientAnchor, convCall });
     }
+
+    const toClassify = candidates.slice(0, CALLBACK_MAX_CLASSIFY);
+    if (candidates.length > toClassify.length) {
+      console.warn(`\n  Callback check: ${candidates.length} client calls, classifying first ${toClassify.length} (MISSED_CALLBACK_MAX_CLASSIFY).`);
+    } else {
+      console.log(`\n  Callback check: classifying ${toClassify.length} client call(s) for firm-owed callbacks...`);
+    }
+
+    let added = 0;
+    let marked = 0;
+    let droppedReturned = 0;
+    for (const cand of toClassify) {
+      const verdict = await classifyCallbackFromCall(cand.convCall);
+      if (!verdict.ok) continue;
+      // Fall off if we've actually reached the client again after this call.
+      const group = byPhone.get(cand.key) || [];
+      const reached = group.some((c) => isConnectedReturnCall(c, cand.convCall.timestamp));
+      if (reached) {
+        droppedReturned += 1;
+        continue;
+      }
+      const existing = outstandingByKey.get(cand.key);
+      if (existing) {
+        existing.callbackRequested = true;
+        marked += 1;
+        continue;
+      }
+      // New standalone "callback required" row (client isn't a missed-inbound).
+      const caseId = extractTrailingCaseDigitsFromClientKey(cand.contact);
+      const rosterHit = caseId ? rosterMap.get(caseId) : null;
+      outstanding.push({
+        contact: cand.contact,
+        phone: cand.anchor.phone || cand.convCall.phone || '',
+        missedAtLocal: formatMissedCallTime(cand.convCall.timestamp),
+        missedAtIso: cand.convCall.timestamp || '',
+        reason: 'Callback requested',
+        attorney: rosterHit?.leadAttorney || '',
+        paralegal: rosterHit?.paralegal || '',
+        line: cand.convCall.line || '',
+        link: cand.convCall.link || cand.anchor.link || '',
+        callbackRequested: true,
+        _groupKey: cand.key,
+      });
+      added += 1;
+    }
+    console.log(`  Callback-required: ${marked} marked on existing missed rows, ${added} added, ${droppedReturned} already returned.`);
   }
 
   // Callback-requested clients first, then oldest miss first within each group.
