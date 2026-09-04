@@ -125,15 +125,16 @@ function reportConfigForFirm(firm) {
     slackBotToken: firstNonEmpty(f.slack_bot_token, env.SLACK_BOT_TOKEN),
     slackChannel: firstNonEmpty(f.slack_channel, env.SLACK_CHANNEL, 'lead-calls'),
     reviewSlackChannel: firstNonEmpty(f.review_slack_channel, env.REVIEW_SLACK_CHANNEL, 'review-opportunities'),
-    // Channel(s) where a bot posts inbound-call notifications and tags the ones
-    // where the client asked for a callback. The missed-call report reads these
-    // to flag "callback requested" rows. The bot tags in every call-post
-    // channel, so the default 'all' scans every channel the bot is a member of.
-    // Override with a comma-separated list of channel names/IDs to scope it.
+    // Channel(s) the missed-call report reads to flag "callback requested" rows.
+    // Recommended: a single dedicated channel (default 'callback-requests') that
+    // the Quo Router Zap posts every callback-tagged call into — the app's bot
+    // just needs to be a member of that one channel. Also accepts a
+    // comma-separated list of channel names/IDs, or 'all' to scan every channel
+    // the bot is a member of.
     missedCallbackSlackChannel: firstNonEmpty(
       f.missed_callback_slack_channel,
       env.MISSED_CALLBACK_SLACK_CHANNEL,
-      'all'
+      'callback-requests'
     ),
     sheets: {
       sheetsId: firstNonEmpty(f.sheets_id, env.GOOGLE_SHEETS_ID),
