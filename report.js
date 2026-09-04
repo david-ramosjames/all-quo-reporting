@@ -2708,12 +2708,50 @@ async function resolveCallbackChannels(token, setting) {
 }
 
 /**
- * Reads the Slack channel(s) where inbound-call posts are tagged and returns a
- * map of phone-key → { requestedAtLocal } for calls flagged "callback requested".
- * Scans every channel the bot belongs to by default. Best-effort: never throws —
- * a Slack failure (per channel or overall) just yields fewer/no flags.
+ * LLM gate: the raw "@RJL-zap request a call back" tag is noisy — it fires on
+ * calls where the FIRM asked the client to call us back, on referral / attorney
+ * / vendor calls, and on calls with nothing pending. Read the actual post
+ * (summary included) and confirm a CLIENT is genuinely waiting for the firm to
+ * call THEM back. Fails closed (returns false) so a bad LLM call drops the flag
+ * rather than surfacing a false positive.
  */
-async function fetchCallbackRequestedPhones({ token, channel, createdAfter, createdBefore }) {
+async function classifyCallbackPost(text) {
+  const prompt = `You are reviewing an internal call-notification post from a personal-injury law firm's phone system. Decide whether a CLIENT or PROSPECTIVE CLIENT is waiting for someone AT THE FIRM to call THEM back.
+
+Answer true ONLY if the client/prospective client asked the firm to call them back and has not yet been reached.
+
+Answer false if ANY of these apply:
+- The FIRM (a staff member, paralegal, or attorney) called the client and asked the CLIENT to return the call — i.e. the client owes us a callback, not the reverse.
+- The call is with a referring attorney, vendor, insurance company, court, or other non-client, or is about referral fees / internal matters.
+- No callback is actually being requested by the client.
+- The client's matter was fully handled on the call with nothing left pending.
+
+Post:
+"""
+${String(text || '').slice(0, 4000)}
+"""
+
+Respond as JSON only: {"client_awaiting_callback": true or false, "reason": "<brief>"}`;
+  try {
+    const out = await runChatCompletion(prompt, 300, 'Callback classifier', { jsonObject: true });
+    const parsed = JSON.parse(out);
+    return { ok: Boolean(parsed.client_awaiting_callback), reason: String(parsed.reason || '') };
+  } catch (err) {
+    console.warn(`    Callback classify failed (${err.message}) — treating as NOT a callback.`);
+    return { ok: false, reason: 'classifier error' };
+  }
+}
+
+/**
+ * Reads the Slack channel(s) where inbound-call posts are tagged and returns a
+ * map of phone-key → { requestedAtLocal } for calls where a CLIENT is genuinely
+ * waiting for a callback. Detection is two-stage: the tag/keyword finds candidate
+ * posts, then an LLM confirms the post is a real client callback request (the raw
+ * tag alone is too noisy). To keep LLM calls minimal we only classify candidates
+ * whose phone matches an outstanding missed row. Best-effort: never throws.
+ * @param {Set<string>} [opts.outstandingKeys] last-10 keys of outstanding rows.
+ */
+async function fetchCallbackRequestedPhones({ token, channel, createdAfter, createdBefore, outstandingKeys }) {
   /** @type {Map<string, { requestedAtLocal: string }>} */
   const flagged = new Map();
   if (!token) return flagged;
@@ -2729,8 +2767,11 @@ async function fetchCallbackRequestedPhones({ token, channel, createdAfter, crea
     console.log('  Callback tags: no channels to scan (bot not in any channel?).');
     return flagged;
   }
-  console.log(`  Callback tags: scanning ${channels.length} channel(s) for "${CALLBACK_REQUEST_KEYWORDS[0]}"...`);
+  console.log(`  Callback tags: scanning ${channels.length} channel(s) for candidate posts...`);
 
+  // Stage 1 — gather candidate posts (tag/keyword present + a phone in the text).
+  /** @type {{ text: string, keys: string[], requestedAtLocal: string }[]} */
+  const candidates = [];
   for (const ch of channels) {
     let messages;
     try {
@@ -2744,19 +2785,36 @@ async function fetchCallbackRequestedPhones({ token, channel, createdAfter, crea
     }
     for (const msg of messages) {
       if (!messageSignalsCallback(msg)) continue;
-      // The caller's number lives in the call-post text (and sometimes threads).
-      const phoneKeys = [
+      const threadText = (msg.threadReplies || []).map((r) => r.text).join('\n');
+      const keys = [
         ...extractPhoneKeysFromText(msg.text),
-        ...(msg.threadReplies || []).flatMap((r) => extractPhoneKeysFromText(r.text)),
+        ...extractPhoneKeysFromText(threadText),
       ];
-      if (!phoneKeys.length) continue;
-      const requestedAtLocal = formatMissedCallTime(msg.time) || '';
-      for (const key of phoneKeys) {
-        // Keep the earliest tag time if a number was tagged more than once.
-        if (!flagged.has(key)) flagged.set(key, { requestedAtLocal });
-      }
+      if (!keys.length) continue;
+      candidates.push({
+        text: [msg.text, threadText].filter(Boolean).join('\n'),
+        keys,
+        requestedAtLocal: formatMissedCallTime(msg.time) || '',
+      });
     }
   }
+
+  // Stage 2 — LLM-confirm only candidates that could match an outstanding row.
+  let classified = 0;
+  for (const c of candidates) {
+    const matchKeys = outstandingKeys ? c.keys.filter((k) => outstandingKeys.has(k)) : c.keys;
+    if (!matchKeys.length) continue; // no outstanding client matches this post
+    classified += 1;
+    const verdict = await classifyCallbackPost(c.text);
+    if (!verdict.ok) {
+      console.log(`    Skipped (not a client callback): ${verdict.reason || 'n/a'}`);
+      continue;
+    }
+    for (const key of matchKeys) {
+      if (!flagged.has(key)) flagged.set(key, { requestedAtLocal: c.requestedAtLocal });
+    }
+  }
+  console.log(`  Callback tags: ${candidates.length} candidate(s), ${classified} matched an outstanding row, ${flagged.size} confirmed.`);
   return flagged;
 }
 
@@ -2945,11 +3003,13 @@ async function runMissedClientCallReport() {
         ? `#${cbChannel}`
         : 'all channels the bot is in';
       console.log(`\n  Checking ${scope} for callback-requested tags...`);
+      const outstandingKeys = new Set(outstanding.map((r) => r._groupKey).filter(Boolean));
       const flagged = await fetchCallbackRequestedPhones({
         token: cbToken,
         channel: cbChannel,
         createdAfter,
         createdBefore,
+        outstandingKeys,
       });
       let hits = 0;
       for (const r of outstanding) {
