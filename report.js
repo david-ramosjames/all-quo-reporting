@@ -2710,37 +2710,41 @@ function isConnectedReturnCall(c, sinceIso) {
   return status === 'completed' && !c.aiHandled; // they called back and reached a person
 }
 
-function buildMissedClientCallTable(rows) {
-  const header = ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Link'];
+function buildMissedClientCallTable(rows, kind = 'missed') {
+  const header = kind === 'callback'
+    ? ['Client', 'Phone', 'Requested at', 'Attorney', 'Paralegal', 'Quo line', 'Link']
+    : ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Link'];
   const lines = [header.join(' | '), header.map(() => '---').join(' | ')];
   for (const r of rows) {
-    lines.push(
-      [
-        r.contact || '(unknown)',
-        r.phone || '',
-        r.callbackRequested ? '📞 Yes' : '',
-        r.missedAtLocal || '',
-        r.reason || '',
-        r.attorney || '',
-        r.paralegal || '',
-        r.line || '',
-        r.link ? `[open](${r.link})` : '',
-      ].join(' | ')
-    );
+    const cells = kind === 'callback'
+      ? [
+          r.contact || '(unknown)',
+          r.phone || '',
+          r.missedAtLocal || '',
+          r.attorney || '',
+          r.paralegal || '',
+          r.line || '',
+          r.link ? `[open](${r.link})` : '',
+        ]
+      : [
+          r.contact || '(unknown)',
+          r.phone || '',
+          r.callbackRequested ? '📞 Yes' : '',
+          r.missedAtLocal || '',
+          r.reason || '',
+          r.attorney || '',
+          r.paralegal || '',
+          r.line || '',
+          r.link ? `[open](${r.link})` : '',
+        ];
+    lines.push(cells.join(' | '));
   }
   return lines.join('\n');
 }
 
-function buildMissedClientCallEmailHtml(rangeLabel, rows) {
-  const css = `
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; }
-    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
-    th, td { border: 1px solid #d0d7de; padding: 8px 10px; text-align: left; vertical-align: top; font-size: 14px; }
-    th { background: #f6f8fa; }
-    .empty { color: #57606a; font-style: italic; padding: 16px 0; }
-    tr.callback td { background: #fff4e5; }
-    .cb { color: #b25000; font-weight: 600; white-space: nowrap; }
-  `.trim();
+/** HTML for the Missed Calls table (9 cols, includes the Callback? flag). */
+function missedTableHtml(rows) {
+  if (!rows.length) return '<p class="empty">No missed client calls in the last 24 hours. Nice work!</p>';
   const headerRow =
     '<tr><th>Client</th><th>Phone</th><th>Callback?</th><th>Missed at</th><th>Reason</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Link</th></tr>';
   const bodyRows = rows
@@ -2757,15 +2761,52 @@ function buildMissedClientCallEmailHtml(rangeLabel, rows) {
         `<td>${r.link ? `<a href="${escapeHtml(r.link)}">open</a>` : ''}</td></tr>`
     )
     .join('');
-  const table = rows.length
-    ? `<table>${headerRow}${bodyRows}</table>`
-    : '<p class="empty">No outstanding missed client calls in the last 24 hours. Nice work!</p>';
+  return `<table>${headerRow}${bodyRows}</table>`;
+}
+
+/** HTML for the Requested Call Backs table (no Callback?/Reason cols — all rows are callbacks). */
+function callbackTableHtml(rows) {
+  if (!rows.length) return '<p class="empty">No outstanding callback requests. Nice work!</p>';
+  const headerRow =
+    '<tr><th>Client</th><th>Phone</th><th>Requested at</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Link</th></tr>';
+  const bodyRows = rows
+    .map(
+      (r) =>
+        `<tr class="callback"><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
+        `<td>${escapeHtml(r.phone || '')}</td>` +
+        `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
+        `<td>${escapeHtml(r.attorney || '')}</td>` +
+        `<td>${escapeHtml(r.paralegal || '')}</td>` +
+        `<td>${escapeHtml(r.line || '')}</td>` +
+        `<td>${r.link ? `<a href="${escapeHtml(r.link)}">open</a>` : ''}</td></tr>`
+    )
+    .join('');
+  return `<table>${headerRow}${bodyRows}</table>`;
+}
+
+function buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows) {
+  const css = `
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; }
+    h3 { margin: 26px 0 4px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+    th, td { border: 1px solid #d0d7de; padding: 8px 10px; text-align: left; vertical-align: top; font-size: 14px; }
+    th { background: #f6f8fa; }
+    .empty { color: #57606a; font-style: italic; padding: 8px 0; }
+    tr.callback td { background: #fff4e5; }
+    .cb { color: #b25000; font-weight: 600; white-space: nowrap; }
+    .note { color: #57606a; font-size: 13px; margin-top: 6px; }
+  `.trim();
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
     <h2>Missed Client Call Report</h2>
-    ${table}
-    <p style="margin-top: 16px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
-    <p>Client numbers whose most recent call in the last 24 hours was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person — regardless of which internal line handled it. A number drops off as soon as its latest call is answered by a person (client calls back and gets through) or we dial out to them from any line. Please call back the clients still listed.</p>
-    <p><strong>📞 Callback?</strong> A "Yes" (highlighted row) means the firm owes this client a return call — the client asked us to call them back, or we said we would — determined by reading the call transcript. Rows with reason "Callback requested" are here for that reason even if the call wasn't a missed one. A callback drops off once we've actually reached the client again. Prioritize these.</p>
+    <p style="margin-top: 4px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
+
+    <h3>1) Missed Calls</h3>
+    ${missedTableHtml(missedRows)}
+    <p class="note">Client numbers whose most recent call in the window was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person. A number drops off as soon as its latest call is answered by a person or we dial out to them. A 📞 here means this client also asked us to call them back.</p>
+
+    <h3>2) Requested Call Backs</h3>
+    ${callbackTableHtml(callbackRows)}
+    <p class="note">Clients the firm owes a return call — the client asked us to call them back, or a staff member/attorney said they would — determined by reading the call transcript. (Clients who are also on the Missed Calls list appear there, flagged 📞, not here.) Each drops off once we've actually reached the client again.</p>
   </body></html>`;
 }
 
@@ -2884,6 +2925,7 @@ async function runMissedClientCallReport() {
       paralegal: rosterHit?.paralegal || '',
       line: lastCall.line || '',
       link: lastCall.link || '',
+      kind: 'missed',
       _groupKey: last10Digits(lastCall.phone) || last10Digits(lastCall.contact) || '',
     });
   }
@@ -2950,6 +2992,7 @@ async function runMissedClientCallReport() {
         line: cand.convCall.line || '',
         link: cand.convCall.link || cand.anchor.link || '',
         callbackRequested: true,
+        kind: 'callback',
         _groupKey: cand.key,
       });
       added += 1;
@@ -2965,9 +3008,16 @@ async function runMissedClientCallReport() {
     return String(x.missedAtIso).localeCompare(String(y.missedAtIso));
   });
 
-  console.log(`\n[3/3] Outstanding (unreturned) missed client calls: ${outstanding.length}`);
+  // Split into the two tables: missed calls first, requested call backs second.
+  // A client who is BOTH a missed call and owed a callback stays in Missed Calls
+  // (with the 📞 flag) — the callback table is only for clients who aren't missed.
+  const byTime = (x, y) => String(x.missedAtIso).localeCompare(String(y.missedAtIso));
+  const missedRows = outstanding.filter((r) => r.kind !== 'callback').sort(byTime);
+  const callbackRows = outstanding.filter((r) => r.kind === 'callback').sort(byTime);
+
+  console.log(`\n[3/3] Missed calls: ${missedRows.length} · Requested call backs: ${callbackRows.length}`);
   for (const r of outstanding) {
-    console.log(`  - ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}${r.callbackRequested ? '  [📞 CALLBACK REQUESTED]' : ''}`);
+    console.log(`  - [${r.kind}] ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}${r.callbackRequested ? '  [📞 CALLBACK REQUESTED]' : ''}`);
     // Dump the full call sequence for this dial-in number so false-positives
     // are diagnosable from the Railway logs without re-running.
     const group = r._groupKey ? byPhone.get(r._groupKey) || [] : [];
@@ -2983,15 +3033,19 @@ async function runMissedClientCallReport() {
     delete r._groupKey;
   }
 
-  const callbackCount = outstanding.filter((r) => r.callbackRequested).length;
-  const subject = outstanding.length
-    ? `${firmCtx().firmName} — Missed Client Call Report — ${outstanding.length} to call back` +
-      (callbackCount ? ` (${callbackCount} requested a callback)` : '')
+  const subjectParts = [];
+  if (missedRows.length) subjectParts.push(`${missedRows.length} missed`);
+  if (callbackRows.length) subjectParts.push(`${callbackRows.length} callback${callbackRows.length === 1 ? '' : 's'}`);
+  const subject = subjectParts.length
+    ? `${firmCtx().firmName} — Missed Client Call Report — ${subjectParts.join(', ')}`
     : `${firmCtx().firmName} — Missed Client Call Report — all clear`;
-  const html = buildMissedClientCallEmailHtml(rangeLabel, outstanding);
-  const plainText = outstanding.length
-    ? `Missed Client Call Report\nWindow: ${rangeLabel}\n\n${buildMissedClientCallTable(outstanding)}\n`
-    : `Missed Client Call Report\nWindow: ${rangeLabel}\n\nNo outstanding missed client calls in the last 24 hours.\n`;
+  const html = buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows);
+  const plainText =
+    `Missed Client Call Report\nWindow: ${rangeLabel}\n\n` +
+    `1) Missed Calls (${missedRows.length})\n` +
+    (missedRows.length ? `${buildMissedClientCallTable(missedRows, 'missed')}\n` : 'None.\n') +
+    `\n2) Requested Call Backs (${callbackRows.length})\n` +
+    (callbackRows.length ? `${buildMissedClientCallTable(callbackRows, 'callback')}\n` : 'None.\n');
 
   const recipients = firmCtx().missedEmailTo;
   if (!recipients.length || !EMAIL_CONFIGURED) {
