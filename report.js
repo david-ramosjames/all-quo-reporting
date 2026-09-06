@@ -2802,11 +2802,14 @@ function buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows) {
 
     <h3>1) Missed Calls</h3>
     ${missedTableHtml(missedRows)}
-    <p class="note">Client numbers whose most recent call in the window was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person. A number drops off as soon as its latest call is answered by a person or we dial out to them. A 📞 here means this client also asked us to call them back.</p>
 
     <h3>2) Requested Call Backs</h3>
     ${callbackTableHtml(callbackRows)}
-    <p class="note">Clients the firm owes a return call — the client asked us to call them back, or a staff member/attorney said they would — determined by reading the call transcript. (Clients who are also on the Missed Calls list appear there, flagged 📞, not here.) Each drops off once we've actually reached the client again.</p>
+
+    <div class="note" style="margin-top: 24px; border-top: 1px solid #d0d7de; padding-top: 12px;">
+      <p><strong>1) Missed Calls</strong> — client numbers whose most recent call in the window was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person. A number drops off as soon as its latest call is answered by a person or we dial out to them. A 📞 here means this client also asked us to call them back.</p>
+      <p><strong>2) Requested Call Backs</strong> — clients the firm owes a return call — the client asked us to call them back, or a staff member/attorney said they would — determined by reading the call transcript. (Clients who are also on the Missed Calls list appear there, flagged 📞, not here.) Each drops off once we've actually reached the client again.</p>
+    </div>
   </body></html>`;
 }
 
