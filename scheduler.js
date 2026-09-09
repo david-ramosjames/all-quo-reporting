@@ -9,6 +9,7 @@ const {
   runReviewIntelligenceReport,
   runClientLanguageReport,
   runIntakeMarketingReport,
+  runDailyCallStatsReport,
   runForAllFirms,
 } = require('./report');
 
@@ -23,6 +24,8 @@ const MONTHLY_INSIGHTS_CRON = process.env.MONTHLY_INSIGHTS_CRON || '0 1 1 * *';
 const MISSED_CLIENT_CALLS_CRON = process.env.MISSED_CLIENT_CALLS_CRON || '0 7 * * *';
 // Review Intelligence: trailing 24h — daily Google-review candidates (default: 6:00 PM local).
 const REVIEW_INTELLIGENCE_CRON = process.env.REVIEW_INTELLIGENCE_CRON || '0 18 * * *';
+// Yesterday Call Stats: previous calendar day's Quo dashboard recap (default: 7:30 AM local).
+const CALL_STATS_CRON = process.env.CALL_STATS_CRON || '30 7 * * *';
 const TIMEZONE = process.env.TIMEZONE || 'America/Chicago';
 
 console.log('══════════════════════════════════════════════');
@@ -33,6 +36,7 @@ console.log(`  Weekly sentiment : ${WEEKLY_SENTIMENT_CRON}`);
 console.log(`  Monthly newsletter : ${MONTHLY_INSIGHTS_CRON}`);
 console.log(`  Missed client calls : ${MISSED_CLIENT_CALLS_CRON}`);
 console.log(`  Review intelligence : ${REVIEW_INTELLIGENCE_CRON}`);
+console.log(`  Yesterday call stats: ${CALL_STATS_CRON}`);
 console.log(`  Timezone         : ${TIMEZONE}`);
 console.log(`  Started          : ${new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' })}`);
 console.log('══════════════════════════════════════════════\n');
@@ -59,6 +63,11 @@ if (!cron.validate(MISSED_CLIENT_CALLS_CRON)) {
 
 if (!cron.validate(REVIEW_INTELLIGENCE_CRON)) {
   console.error(`Invalid REVIEW_INTELLIGENCE_CRON: "${REVIEW_INTELLIGENCE_CRON}"`);
+  process.exit(1);
+}
+
+if (!cron.validate(CALL_STATS_CRON)) {
+  console.error(`Invalid CALL_STATS_CRON: "${CALL_STATS_CRON}"`);
   process.exit(1);
 }
 
@@ -132,6 +141,20 @@ cron.schedule(
   { timezone: TIMEZONE }
 );
 
+cron.schedule(
+  CALL_STATS_CRON,
+  async () => {
+    const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
+    console.log(`\n[${ts}] Cron triggered — Yesterday Call Stats...`);
+    try {
+      await runForAllFirms(runDailyCallStatsReport);
+    } catch (err) {
+      console.error(`[${ts}] Yesterday Call Stats failed:`, err.message);
+    }
+  },
+  { timezone: TIMEZONE }
+);
+
 // ── Next-run visibility ───────────────────────────────────────────────────────
 // Cron jobs only log when they FIRE, so print the next scheduled fire time for
 // each at boot — an easy way to confirm (e.g.) Review Intelligence is armed for 6 PM.
@@ -181,6 +204,7 @@ for (const [label, expr] of [
   ['Monthly newsletter', MONTHLY_INSIGHTS_CRON],
   ['Missed client calls', MISSED_CLIENT_CALLS_CRON],
   ['Review intelligence', REVIEW_INTELLIGENCE_CRON],
+  ['Yesterday call stats', CALL_STATS_CRON],
 ]) {
   const n = nextRun(expr, TIMEZONE);
   console.log(`  ${label.padEnd(20)}: ${n ? n.toFormat("ccc, LLL d 'at' h:mm a ZZZZ") : '(unknown)'}`);
@@ -216,6 +240,7 @@ if (process.env.DISABLE_MANUAL_TRIGGER_UI === 'true' || process.env.DISABLE_MANU
       review: (opts) => runForAllFirms(runReviewIntelligenceReport, opts),
       language: (opts) => runForAllFirms(runClientLanguageReport, opts),
       marketing: (opts) => runForAllFirms(runIntakeMarketingReport, opts),
+      callstats: (opts) => runForAllFirms(runDailyCallStatsReport, opts),
     },
   });
 }

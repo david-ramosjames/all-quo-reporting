@@ -108,6 +108,10 @@ function firstList(...vals) {
 function reportConfigForFirm(firm) {
   const f = firm || {};
   const env = process.env;
+  // Yesterday Call Stats settings live in the review-page settings blob so
+  // they're editable in the same admin UI. defaults ← review-landing.json ←
+  // env (STATS_*) ← this firm's stored blob.
+  const landing = landingConfigForFirm(f);
   return {
     id: f.id || DEFAULT_FIRM_ID,
     firmName: f.firm_name || COMPANY_NAME,
@@ -125,6 +129,10 @@ function reportConfigForFirm(firm) {
     slackBotToken: firstNonEmpty(f.slack_bot_token, env.SLACK_BOT_TOKEN),
     slackChannel: firstNonEmpty(f.slack_channel, env.SLACK_CHANNEL, 'lead-calls'),
     reviewSlackChannel: firstNonEmpty(f.review_slack_channel, env.REVIEW_SLACK_CHANNEL, 'review-opportunities'),
+    // Yesterday Call Stats email (from the review-page settings blob / STATS_* env).
+    statsEmailTo: firstList(landing.statsEmailTo, env.EMAIL_TO),
+    statsExcludeInboxes: parseList(landing.statsExcludeInboxes),
+    statsIncludeUsers: parseList(landing.statsIncludeUsers),
     sheets: {
       sheetsId: firstNonEmpty(f.sheets_id, env.GOOGLE_SHEETS_ID),
       sheetsRange: firstNonEmpty(f.sheets_range, env.GOOGLE_SHEETS_RANGE),

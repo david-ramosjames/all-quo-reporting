@@ -647,6 +647,120 @@ async function main() {
   }
 }
 
+/**
+ * Lean fetch for the "Yesterday Call Stats" email. Pulls raw call + message
+ * metadata (no transcripts/summaries) across all lines except excluded inboxes,
+ * plus a userId→name map from the workspace's phone-number user assignments.
+ *
+ * @param {object} options
+ * @param {string}   [options.apiKey]
+ * @param {string}   options.createdAfter    ISO window start
+ * @param {string}   options.createdBefore   ISO window end
+ * @param {string[]} [options.excludeLineNames] inbox names to skip (case-insensitive)
+ * @param {number}   [options.maxResults]
+ * @returns {Promise<{ calls: object[], messages: object[], userMap: Record<string,string>, includedLines: string[], excludedLines: string[] }>}
+ */
+async function fetchDailyCallStats(options = {}) {
+  const apiKey = options.apiKey ?? API_KEY;
+  if (!apiKey) throw new Error('QUO_API_KEY is not set.');
+  const client = makeClient(apiKey);
+  const excludeNames = (options.excludeLineNames || [])
+    .map((s) => String(s).trim().toLowerCase())
+    .filter(Boolean);
+  const cfg = {
+    createdAfter: options.createdAfter,
+    createdBefore: options.createdBefore,
+    maxResults: options.maxResults ?? MAX_RESULTS,
+    listConversationsByActivity: true,
+  };
+
+  const allLines = await listPhoneNumbers(client);
+
+  // userId → display name, from every line's assigned users.
+  const userMap = {};
+  for (const pn of allLines) {
+    for (const u of pn.users || []) {
+      if (!u || !u.id) continue;
+      userMap[u.id] =
+        [u.firstName, u.lastName].filter(Boolean).join(' ') || u.name || u.email || u.id;
+    }
+  }
+
+  const isExcluded = (pn) => excludeNames.includes(String(pn.name || '').trim().toLowerCase());
+  const includedLines = allLines.filter((pn) => !isExcluded(pn));
+  const excludedLines = allLines.filter(isExcluded);
+  if (!includedLines.length) throw new Error('No inboxes left to report on after exclusions.');
+  const lineMap = Object.fromEntries(allLines.map((pn) => [pn.id, pn.name || pn.number || pn.id]));
+  const numberMap = Object.fromEntries(allLines.map((pn) => [pn.id, pn.number || pn.formattedNumber || '']));
+  const phoneNumberIds = includedLines.map((pn) => pn.id);
+
+  const conversations = await fetchAllConversations(client, phoneNumberIds, cfg);
+
+  const afterMs = cfg.createdAfter ? Date.parse(cfg.createdAfter) : -Infinity;
+  const beforeMs = cfg.createdBefore ? Date.parse(cfg.createdBefore) : Infinity;
+  const inWindow = (ts) => {
+    const t = Date.parse(ts);
+    return Number.isFinite(t) && t >= afterMs && t < beforeMs;
+  };
+
+  const calls = [];
+  const messages = [];
+  for (const conv of conversations) {
+    const lineName = lineMap[conv.phoneNumberId] || '';
+    const ownNumber = numberMap[conv.phoneNumberId] || '';
+    const participant = (conv.participants || []).find((p) => p !== ownNumber);
+    if (!participant) continue;
+
+    let convCalls = [];
+    try {
+      convCalls = await fetchCallsForConversation(client, conv.phoneNumberId, participant, cfg);
+    } catch { /* skip this conversation's calls */ }
+    await sleep(REQUEST_DELAY_MS);
+    for (const c of convCalls) {
+      const ts = c.createdAt || c.answeredAt || '';
+      if (!inWindow(ts)) continue;
+      calls.push({
+        id: c.id,
+        phoneNumberId: conv.phoneNumberId,
+        lineName,
+        userId: c.userId || c.user?.id || null,
+        direction: c.direction || '',
+        status: c.status || '',
+        aiHandled: c.aiHandled || null,
+        duration: Number(c.duration || 0),
+        createdAt: ts,
+        answeredAt: c.answeredAt || null,
+        forwardedTo: c.forwardedTo || null,
+      });
+    }
+
+    let convMsgs = [];
+    try {
+      convMsgs = await fetchMessagesForConversation(client, conv.phoneNumberId, participant, cfg);
+    } catch { /* skip this conversation's messages */ }
+    await sleep(REQUEST_DELAY_MS);
+    for (const m of convMsgs) {
+      const ts = m.createdAt || '';
+      if (!inWindow(ts)) continue;
+      messages.push({
+        phoneNumberId: conv.phoneNumberId,
+        lineName,
+        userId: m.userId || m.user?.id || null,
+        direction: m.direction || '',
+        createdAt: ts,
+      });
+    }
+  }
+
+  return {
+    calls,
+    messages,
+    userMap,
+    includedLines: includedLines.map((l) => l.name || l.number || l.id),
+    excludedLines: excludedLines.map((l) => l.name || l.number || l.id),
+  };
+}
+
 if (require.main === module) main();
 
-module.exports = { runExport };
+module.exports = { runExport, fetchDailyCallStats };

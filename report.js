@@ -5,7 +5,7 @@ const { DateTime } = require('luxon');
 const MailComposer = require('nodemailer/lib/mail-composer');
 const { google } = require('googleapis');
 const OpenAI = require('openai');
-const { runExport } = require('./fetch_calls');
+const { runExport, fetchDailyCallStats } = require('./fetch_calls');
 const {
   generateDailyLeadReportPrompt,
   buildWeeklyClientBundleSentimentPrompt,
@@ -4162,6 +4162,252 @@ async function runDailyReport() {
   return { csvFilename, leadAnalysis, stats };
 }
 
+// ── Yesterday Call Stats email ────────────────────────────────────────────────
+// Recreates the Quo dashboard's Incoming Call Outcomes chart + per-user table
+// for a single day, comparing to the same weekday one week ago. All filters
+// (excluded inboxes, included users) and recipients are admin-configurable.
+
+const CALL_OUTCOME_ORDER = [
+  'Answered by user',
+  'Answered by agent',
+  'Voicemail',
+  'Forwarded',
+  'Missed',
+  'Abandoned',
+  'Agent abandoned',
+  'Other',
+];
+
+/** Bucket one INCOMING call into a dashboard outcome (best-effort from status). */
+function callOutcomeBucket(c) {
+  const status = String(c.status || '').toLowerCase();
+  const agent = Boolean(c.aiHandled);
+  if (status.includes('voicemail')) return 'Voicemail';
+  if (status.includes('forward') || c.forwardedTo) return 'Forwarded';
+  if (status === 'completed' || status === 'answered') return agent ? 'Answered by agent' : 'Answered by user';
+  if (status.includes('abandon')) return agent ? 'Agent abandoned' : 'Abandoned';
+  if (status === 'no-answer' || status.includes('miss') || status === 'busy' || status === 'declined') {
+    return agent ? 'Agent abandoned' : 'Missed';
+  }
+  return 'Other';
+}
+
+function formatCallDuration(totalSec) {
+  const s = Math.round(Number(totalSec) || 0);
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h) return `${h}h ${m}m`;
+  if (m) return `${m}m ${sec}s`;
+  return `${sec}s`;
+}
+
+/** "▲240%" / "▼10%" / "±0%" / "▲ new" / "" comparing cur to prev. */
+function pctChangeLabel(cur, prev) {
+  const a = Number(cur) || 0;
+  const b = Number(prev) || 0;
+  if (a === 0 && b === 0) return '';
+  if (b === 0) return '▲ new';
+  const pct = Math.round(((a - b) / b) * 100);
+  if (pct === 0) return '±0%';
+  return `${pct > 0 ? '▲' : '▼'}${Math.abs(pct)}%`;
+}
+
+/** Aggregate raw call/message records into outcome + per-user tallies. */
+function aggregateCallStats({ calls, messages }) {
+  const outcomes = {};
+  let totalIncoming = 0;
+  for (const c of calls) {
+    if (!isIncomingDirection(c.direction)) continue;
+    totalIncoming += 1;
+    const b = callOutcomeBucket(c);
+    outcomes[b] = (outcomes[b] || 0) + 1;
+  }
+  /** @type {Map<string, { outgoing: number, answered: number, seconds: number, messages: number }>} */
+  const perUser = new Map();
+  const ensure = (id) => {
+    if (!perUser.has(id)) perUser.set(id, { outgoing: 0, answered: 0, seconds: 0, messages: 0 });
+    return perUser.get(id);
+  };
+  for (const c of calls) {
+    if (!c.userId) continue; // agent/unattributed calls aren't in the per-user table
+    const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
+    if (!isIncomingDirection(c.direction)) {
+      const u = ensure(c.userId);
+      u.outgoing += 1;
+      u.seconds += Number(c.duration || 0);
+    } else if (completed) {
+      const u = ensure(c.userId);
+      u.answered += 1;
+      u.seconds += Number(c.duration || 0);
+    }
+  }
+  for (const m of messages) {
+    if (!m.userId || isIncomingDirection(m.direction)) continue; // sent = outgoing
+    ensure(m.userId).messages += 1;
+  }
+  return { outcomes, totalIncoming, perUser };
+}
+
+function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta) {
+  const css = `
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; background: #ffffff; }
+    h2 { margin: 0 0 2px; } h3 { margin: 26px 0 4px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; background: #ffffff; }
+    th, td { border: 1px solid #d0d7de; padding: 7px 10px; text-align: left; font-size: 14px; background: #ffffff; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    .chg { color: #57606a; font-size: 12px; }
+    .note { color: #57606a; font-size: 12px; margin-top: 8px; }
+    .total td { font-weight: 700; }
+  `.trim();
+
+  const outcomeRows = CALL_OUTCOME_ORDER
+    .map((b) => ({ b, cur: curAgg.outcomes[b] || 0, prev: prevAgg.outcomes[b] || 0 }))
+    .filter((r) => r.cur || r.prev)
+    .map(
+      (r) =>
+        `<tr><td>${escapeHtml(r.b)}</td><td class="num">${r.cur}</td>` +
+        `<td class="num">${r.prev}</td><td class="num chg">${escapeHtml(pctChangeLabel(r.cur, r.prev))}</td></tr>`
+    )
+    .join('');
+  const outcomeTable = `<table>
+    <tr><th>Incoming call outcome</th><th class="num">Yesterday</th><th class="num">Same day last wk</th><th class="num">Change</th></tr>
+    ${outcomeRows || '<tr><td colspan="4" class="note">No incoming calls.</td></tr>'}
+    <tr class="total"><td>Total incoming</td><td class="num">${curAgg.totalIncoming}</td><td class="num">${prevAgg.totalIncoming}</td><td class="num chg">${escapeHtml(pctChangeLabel(curAgg.totalIncoming, prevAgg.totalIncoming))}</td></tr>
+  </table>`;
+
+  const cell = (cur, prev) =>
+    `<td class="num">${cur}<div class="chg">${escapeHtml(pctChangeLabel(cur, prev))}</div></td>`;
+  const userBody = userRows.length
+    ? userRows
+        .map(
+          (u) =>
+            `<tr><td>${escapeHtml(u.name)}</td>` +
+            cell(u.total, u.prev.total) +
+            cell(u.outgoing, u.prev.outgoing) +
+            cell(u.answered, u.prev.answered) +
+            `<td class="num">${escapeHtml(formatCallDuration(u.seconds))}<div class="chg">${escapeHtml(pctChangeLabel(u.seconds, u.prev.seconds))}</div></td>` +
+            cell(u.messages, u.prev.messages) +
+            `</tr>`
+        )
+        .join('')
+    : '<tr><td colspan="6" class="note">No matching users with activity.</td></tr>';
+  const userTable = `<table>
+    <tr><th>User</th><th class="num">Total calls</th><th class="num">Outgoing</th><th class="num">Answered</th><th class="num">Time on calls</th><th class="num">Sent messages</th></tr>
+    ${userBody}
+  </table>`;
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
+    <h2>Yesterday Call Stats</h2>
+    <p style="margin:2px 0 0;color:#57606a;font-size:13px">${escapeHtml(dayLabel)} · vs same weekday last week</p>
+
+    <h3>Incoming Call Outcomes</h3>
+    ${outcomeTable}
+
+    <h3>By User</h3>
+    ${userTable}
+
+    <div class="note" style="margin-top:20px;border-top:1px solid #d0d7de;padding-top:10px">
+      <p>Inboxes excluded: ${escapeHtml((meta.excludedLines || []).join(', ') || 'none')}. Users shown: ${meta.usersFilterActive ? 'filtered to the configured team' : 'everyone with activity'}. Each number's change is vs the same weekday one week ago. Outcome buckets are derived from Quo call statuses and are best-effort — tell us if any look off vs the Quo dashboard.</p>
+    </div>
+  </body></html>`;
+}
+
+/**
+ * Yesterday Call Stats — recreates the Quo dashboard's incoming-call-outcomes
+ * chart and per-user activity table for the previous calendar day, comparing to
+ * the same weekday one week ago. Sends to the admin-configured recipients.
+ */
+async function runDailyCallStatsReport() {
+  const cur = getYesterdayRange();
+  const prevStart = DateTime.fromISO(cur.createdAfter).minus({ days: 7 });
+  const prevEnd = DateTime.fromISO(cur.createdBefore).minus({ days: 7 });
+  const prev = { createdAfter: prevStart.toUTC().toISO(), createdBefore: prevEnd.toUTC().toISO() };
+  const dayLabel = DateTime.fromISO(cur.createdAfter).setZone(TIMEZONE).toFormat('cccc, LLL d, yyyy');
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('  Yesterday Call Stats');
+  console.log(`  Day: ${dayLabel} (vs same weekday last week)`);
+  console.log('═'.repeat(52));
+
+  const excludeLineNames = firmCtx().statsExcludeInboxes;
+  const includeUsers = firmCtx().statsIncludeUsers;
+  const apiKey = firmCtx().quoApiKey;
+
+  console.log(`\n[1/3] Fetching yesterday (excluding inboxes: ${excludeLineNames.join(', ') || 'none'})...`);
+  const curData = await fetchDailyCallStats({ apiKey, ...cur, excludeLineNames });
+  console.log(`  ${curData.calls.length} call(s), ${curData.messages.length} message(s) across ${curData.includedLines.length} inbox(es).`);
+  console.log('\n[2/3] Fetching same weekday last week (for comparison)...');
+  const prevData = await fetchDailyCallStats({ apiKey, ...prev, excludeLineNames });
+  console.log(`  ${prevData.calls.length} call(s), ${prevData.messages.length} message(s).`);
+
+  const curAgg = aggregateCallStats(curData);
+  const prevAgg = aggregateCallStats(prevData);
+
+  // Merge the userId→name maps from both windows for display.
+  const userMap = { ...prevData.userMap, ...curData.userMap };
+  const includeSet = new Set(includeUsers.map((n) => n.toLowerCase()));
+  const usersFilterActive = includeSet.size > 0;
+  const allIds = new Set([...curAgg.perUser.keys(), ...prevAgg.perUser.keys()]);
+  const zero = { outgoing: 0, answered: 0, seconds: 0, messages: 0 };
+  const userRows = [];
+  for (const id of allIds) {
+    const name = userMap[id] || id;
+    if (usersFilterActive && !includeSet.has(String(name).toLowerCase())) continue;
+    const c = curAgg.perUser.get(id) || zero;
+    const p = prevAgg.perUser.get(id) || zero;
+    userRows.push({
+      name,
+      total: c.outgoing + c.answered,
+      outgoing: c.outgoing,
+      answered: c.answered,
+      seconds: c.seconds,
+      messages: c.messages,
+      prev: { total: p.outgoing + p.answered, outgoing: p.outgoing, answered: p.answered, seconds: p.seconds, messages: p.messages },
+    });
+  }
+  userRows.sort((a, b) => b.total - a.total);
+
+  console.log(`\n[3/3] Incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming}) · users in table: ${userRows.length}`);
+  for (const b of CALL_OUTCOME_ORDER) {
+    if (curAgg.outcomes[b]) console.log(`   ${b}: ${curAgg.outcomes[b]}`);
+  }
+  for (const u of userRows) {
+    console.log(`   - ${u.name}: total ${u.total}, out ${u.outgoing}, answered ${u.answered}, ${formatCallDuration(u.seconds)}, msgs ${u.messages}`);
+  }
+
+  const meta = { excludedLines: curData.excludedLines, usersFilterActive };
+  const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta);
+  const plainLines = [
+    `Yesterday Call Stats — ${dayLabel} (vs same weekday last week)`,
+    '',
+    'Incoming Call Outcomes:',
+    ...CALL_OUTCOME_ORDER.filter((b) => curAgg.outcomes[b] || prevAgg.outcomes[b]).map(
+      (b) => `  ${b}: ${curAgg.outcomes[b] || 0} (last wk ${prevAgg.outcomes[b] || 0})`
+    ),
+    `  Total incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming})`,
+    '',
+    'By User (total / outgoing / answered / time / sent msgs):',
+    ...userRows.map(
+      (u) => `  ${u.name}: ${u.total} / ${u.outgoing} / ${u.answered} / ${formatCallDuration(u.seconds)} / ${u.messages}`
+    ),
+  ];
+  const plainText = plainLines.join('\n');
+  const subject = `${firmCtx().firmName} — Yesterday Call Stats — ${dayLabel}`;
+
+  const recipients = firmCtx().statsEmailTo;
+  if (!recipients.length || !EMAIL_CONFIGURED) {
+    console.log('\n  Email not configured (set the Yesterday Call Stats recipients in admin, or STATS_EMAIL_TO + Gmail OAuth) — printing report:\n');
+    console.log(plainText);
+  } else {
+    await sendEmail({ htmlBody: html, plainText, subject, to: recipients });
+    console.log(`\n  Sent Yesterday Call Stats to: ${recipients.join(', ')}`);
+  }
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('Yesterday Call Stats complete.');
+}
+
 if (require.main === module) {
   const arg = process.argv[2];
   let run = runDailyReport;
@@ -4171,6 +4417,7 @@ if (require.main === module) {
   if (arg === '--review' || arg === 'review') run = runReviewIntelligenceReport;
   if (arg === '--language' || arg === 'language') run = runClientLanguageReport;
   if (arg === '--marketing' || arg === 'marketing') run = runIntakeMarketingReport;
+  if (arg === '--callstats' || arg === 'callstats') run = runDailyCallStatsReport;
   // Optional: `node report.js daily --firm <id>` scopes to one firm; otherwise all active firms.
   const firmFlag = process.argv.indexOf('--firm');
   const firmId = firmFlag !== -1 ? process.argv[firmFlag + 1] : undefined;
@@ -4188,5 +4435,6 @@ module.exports = {
   runReviewIntelligenceReport,
   runClientLanguageReport,
   runIntakeMarketingReport,
+  runDailyCallStatsReport,
   runForAllFirms,
 };

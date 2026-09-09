@@ -71,6 +71,15 @@ const DEFAULT_CONFIG = {
   // The SMS body sent to a client with their review link. Tokens: {first} {firm} {link}
   smsTemplate:
     'Hi {first}, thank you for trusting {firm}. If we made a difference, a quick Google review would mean a lot: {link}',
+  // ── Yesterday Call Stats email ──────────────────────────────────────────────
+  // Who receives the daily call-stats email (comma-separated addresses).
+  statsEmailTo: '',
+  // Inbox / Quo line names to EXCLUDE from the stats (comma-separated, matched
+  // case-insensitively against the line name).
+  statsExcludeInboxes: 'TC,SA,Extra Number',
+  // Team members to include in the per-user table (comma-separated names as they
+  // appear in Quo). Leave blank to include everyone.
+  statsIncludeUsers: 'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Valeria Chang',
 };
 
 /**
@@ -125,6 +134,25 @@ const FIELD_DEFS = [
     type: 'textarea',
     group: 'Text message',
   },
+  // Yesterday Call Stats email
+  {
+    key: 'statsEmailTo',
+    label: 'Recipients — comma-separated emails who get the daily call-stats email',
+    type: 'textarea',
+    group: 'Yesterday Call Stats email',
+  },
+  {
+    key: 'statsExcludeInboxes',
+    label: 'Inboxes to exclude — comma-separated Quo line names (e.g. TC, SA, Extra Number)',
+    type: 'text',
+    group: 'Yesterday Call Stats email',
+  },
+  {
+    key: 'statsIncludeUsers',
+    label: 'Users in the per-user table — comma-separated names as they appear in Quo (blank = everyone)',
+    type: 'textarea',
+    group: 'Yesterday Call Stats email',
+  },
 ];
 
 const BOOL_KEYS = new Set(FIELD_DEFS.filter((f) => f.type === 'bool').map((f) => f.key));
@@ -148,6 +176,9 @@ const ENV_OVERRIDES = {
   textNumber: 'REVIEW_PAGE_TEXT_NUMBER',
   callNumber: 'REVIEW_PAGE_CALL_NUMBER',
   footer: 'REVIEW_PAGE_FOOTER',
+  statsEmailTo: 'STATS_EMAIL_TO',
+  statsExcludeInboxes: 'STATS_EXCLUDE_INBOXES',
+  statsIncludeUsers: 'STATS_INCLUDE_USERS',
 };
 
 function readConfigFile() {
