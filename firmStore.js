@@ -133,6 +133,7 @@ function reportConfigForFirm(firm) {
     statsEmailTo: firstList(landing.statsEmailTo, env.EMAIL_TO),
     statsExcludeInboxes: parseList(landing.statsExcludeInboxes),
     statsIncludeUsers: parseList(landing.statsIncludeUsers),
+    statsMissedGoal: Math.max(0, parseInt(landing.statsMissedGoal, 10) || 10),
     sheets: {
       sheetsId: firstNonEmpty(f.sheets_id, env.GOOGLE_SHEETS_ID),
       sheetsRange: firstNonEmpty(f.sheets_range, env.GOOGLE_SHEETS_RANGE),

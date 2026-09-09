@@ -4249,7 +4249,17 @@ function aggregateCallStats({ calls, messages }) {
   return { outcomes, totalIncoming, perUser };
 }
 
-function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta) {
+/**
+ * The headline "Missed Calls" number the LAs are measured on:
+ * Missed + Answered by agent + Agent abandoned (all incoming). Goal is to keep
+ * this near zero — every one is a client who didn't reach a person.
+ */
+function missedCallsTotal(agg) {
+  const o = agg.outcomes || {};
+  return (o['Missed'] || 0) + (o['Answered by agent'] || 0) + (o['Agent abandoned'] || 0);
+}
+
+function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed) {
   const css = `
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; background: #ffffff; }
     h2 { margin: 0 0 2px; } h3 { margin: 26px 0 4px; }
@@ -4297,9 +4307,21 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta) {
     ${userBody}
   </table>`;
 
+  const goal = missed.goal;
+  const metGoal = missed.cur < goal;
+  const missedColor = metGoal ? '#067647' : '#b42318';
+  const missedCallout = `<div style="border:2px solid ${missedColor};border-radius:8px;padding:12px 16px;margin-top:14px;max-width:460px">
+      <div style="font-size:12px;color:#57606a;text-transform:uppercase;letter-spacing:.5px">Missed Calls &mdash; Missed + Answered by Agent + Agent Abandoned</div>
+      <div style="margin-top:4px"><span style="font-size:36px;font-weight:800;color:${missedColor}">${missed.cur}</span>
+        <span style="font-size:14px;font-weight:600;color:#57606a;margin-left:6px">${escapeHtml(pctChangeLabel(missed.cur, missed.prev))} vs last wk (${missed.prev})</span></div>
+      <div style="font-size:13px;color:${missedColor};font-weight:600;margin-top:2px">Goal: under ${goal} &mdash; ${metGoal ? 'on target ✓' : 'above goal'}</div>
+    </div>`;
+
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
     <h2>Yesterday Call Stats</h2>
     <p style="margin:2px 0 0;color:#57606a;font-size:13px">${escapeHtml(dayLabel)} · vs same weekday last week</p>
+
+    ${missedCallout}
 
     <h3>Incoming Call Outcomes</h3>
     ${outcomeTable}
@@ -4368,7 +4390,10 @@ async function runDailyCallStatsReport() {
   }
   userRows.sort((a, b) => b.total - a.total);
 
-  console.log(`\n[3/3] Incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming}) · users in table: ${userRows.length}`);
+  const missed = { cur: missedCallsTotal(curAgg), prev: missedCallsTotal(prevAgg), goal: firmCtx().statsMissedGoal };
+
+  console.log(`\n[3/3] MISSED CALLS (Missed+Agent-answered+Agent-abandoned): ${missed.cur} (goal <${missed.goal}, last wk ${missed.prev})`);
+  console.log(`  Incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming}) · users in table: ${userRows.length}`);
   for (const b of CALL_OUTCOME_ORDER) {
     if (curAgg.outcomes[b]) console.log(`   ${b}: ${curAgg.outcomes[b]}`);
   }
@@ -4377,9 +4402,11 @@ async function runDailyCallStatsReport() {
   }
 
   const meta = { excludedLines: curData.excludedLines, usersFilterActive };
-  const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta);
+  const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed);
   const plainLines = [
     `Yesterday Call Stats — ${dayLabel} (vs same weekday last week)`,
+    '',
+    `** MISSED CALLS (Missed + Answered by agent + Agent abandoned): ${missed.cur} ** — goal under ${missed.goal} (last wk ${missed.prev})`,
     '',
     'Incoming Call Outcomes:',
     ...CALL_OUTCOME_ORDER.filter((b) => curAgg.outcomes[b] || prevAgg.outcomes[b]).map(
@@ -4436,5 +4463,7 @@ module.exports = {
   runClientLanguageReport,
   runIntakeMarketingReport,
   runDailyCallStatsReport,
+  aggregateCallStats,
+  buildCallStatsEmailHtml,
   runForAllFirms,
 };

@@ -80,6 +80,9 @@ const DEFAULT_CONFIG = {
   // Team members to include in the per-user table (comma-separated names as they
   // appear in Quo). Leave blank to include everyone.
   statsIncludeUsers: 'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Valeria Chang',
+  // Daily goal for the headline "Missed Calls" number (Missed + Answered by
+  // agent + Agent abandoned). At or above this it's shown red; under it, green.
+  statsMissedGoal: '10',
 };
 
 /**
@@ -153,6 +156,12 @@ const FIELD_DEFS = [
     type: 'textarea',
     group: 'Yesterday Call Stats email',
   },
+  {
+    key: 'statsMissedGoal',
+    label: 'Missed Calls daily goal (Missed + Answered by agent + Agent abandoned) — red at/above, green under',
+    type: 'text',
+    group: 'Yesterday Call Stats email',
+  },
 ];
 
 const BOOL_KEYS = new Set(FIELD_DEFS.filter((f) => f.type === 'bool').map((f) => f.key));
@@ -179,6 +188,7 @@ const ENV_OVERRIDES = {
   statsEmailTo: 'STATS_EMAIL_TO',
   statsExcludeInboxes: 'STATS_EXCLUDE_INBOXES',
   statsIncludeUsers: 'STATS_INCLUDE_USERS',
+  statsMissedGoal: 'STATS_MISSED_GOAL',
 };
 
 function readConfigFile() {
