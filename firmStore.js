@@ -129,7 +129,7 @@ function reportConfigForFirm(firm) {
     // env fallbacks, then built-in defaults. Recipients do NOT fall back to the
     // default report list (this email goes to a specific audience).
     statsEmailTo: firstList(f.stats_email_to, env.STATS_EMAIL_TO),
-    statsExcludeInboxes: firstList(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES, 'TC,SA,Extra Number'),
+    statsExcludeInboxes: firstList(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES, 'RJL Transfers,Extra Number,SA Law Firm,Trucking Chicas'),
     statsIncludeUsers: firstList(
       f.stats_include_users,
       env.STATS_INCLUDE_USERS,

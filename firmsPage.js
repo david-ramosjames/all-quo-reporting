@@ -43,7 +43,7 @@ const FIRM_FIELDS = [
     help: 'Comma-separated. Who receives the daily call-stats email. Blank = no one (prints to logs only). Does NOT fall back to the default recipients.' },
 
   { key: 'stats_exclude_inboxes', label: 'Call stats — inboxes to exclude', type: 'text', group: 'Yesterday Call Stats',
-    help: 'Comma-separated Quo line names to leave out. Blank = default (TC, SA, Extra Number).' },
+    help: 'Comma-separated Quo line names to leave out — must match the line name exactly. Blank = default (RJL Transfers, Extra Number, SA Law Firm, Trucking Chicas).' },
   { key: 'stats_include_users', label: 'Call stats — users in the per-user table', type: 'text', group: 'Yesterday Call Stats',
     help: 'Comma-separated names exactly as they appear in Quo. Blank = default set (the 5 legal assistants + Intake).' },
   { key: 'stats_missed_goal', label: 'Call stats — Missed Calls daily goal', type: 'text', group: 'Yesterday Call Stats',
