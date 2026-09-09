@@ -2786,14 +2786,12 @@ function callbackTableHtml(rows) {
 
 function buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows) {
   const css = `
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; background: #ffffff; }
     h3 { margin: 26px 0 4px; }
-    table { border-collapse: collapse; width: 100%; margin-top: 12px; }
-    th, td { border: 1px solid #d0d7de; padding: 8px 10px; text-align: left; vertical-align: top; font-size: 14px; }
-    th { background: #f6f8fa; }
+    table { border-collapse: collapse; width: 100%; margin-top: 12px; background: #ffffff; }
+    th, td { border: 1px solid #d0d7de; padding: 8px 10px; text-align: left; vertical-align: top; font-size: 14px; background: #ffffff; }
     .empty { color: #57606a; font-style: italic; padding: 8px 0; }
-    tr.callback td { background: #fff4e5; }
-    .cb { color: #b25000; font-weight: 600; white-space: nowrap; }
+    .cb { font-weight: 600; white-space: nowrap; }
     .note { color: #57606a; font-size: 13px; margin-top: 6px; }
   `.trim();
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
