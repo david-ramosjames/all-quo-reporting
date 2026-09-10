@@ -703,6 +703,17 @@ async function fetchDailyCallStats(options = {}) {
     return Number.isFinite(t) && t >= afterMs && t < beforeMs;
   };
 
+  // Diagnostics for calibrating per-user attribution (esp. inbound "answered").
+  const dbg = /^(1|true|yes)$/i.test(String(process.env.STATS_DEBUG_RAW || ''));
+  const rawSamples = [];
+  let inCompleted = 0;
+  let inCompletedWithUser = 0;
+  let outCount = 0;
+  let outWithUser = 0;
+  const answererField = (c) =>
+    c.userId || c.user?.id || c.answeredBy || c.answeredById || c.respondedBy ||
+    c.respondedById || c.assignedTo || c.assignedToId || c.completedBy || null;
+
   const calls = [];
   const messages = [];
   for (const conv of conversations) {
@@ -719,11 +730,21 @@ async function fetchDailyCallStats(options = {}) {
     for (const c of convCalls) {
       const ts = c.createdAt || c.answeredAt || '';
       if (!inWindow(ts)) continue;
+      const inbound = /^(incoming|inbound)$/i.test(c.direction || '');
+      const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
+      if (inbound && completed) {
+        inCompleted += 1;
+        if (answererField(c)) inCompletedWithUser += 1;
+        if (rawSamples.length < 4) rawSamples.push(c);
+      } else if (!inbound) {
+        outCount += 1;
+        if (answererField(c)) outWithUser += 1;
+      }
       calls.push({
         id: c.id,
         phoneNumberId: conv.phoneNumberId,
         lineName,
-        userId: c.userId || c.user?.id || null,
+        userId: answererField(c),
         direction: c.direction || '',
         status: c.status || '',
         aiHandled: c.aiHandled || null,
@@ -750,6 +771,16 @@ async function fetchDailyCallStats(options = {}) {
         createdAt: ts,
       });
     }
+  }
+
+  // Attribution diagnostics — if inbound-completed calls rarely carry a user id,
+  // the answerer lives in a field we're not reading; the key list reveals it.
+  console.log(`  [stats] inbound-completed calls: ${inCompleted} (attributed to a user: ${inCompletedWithUser}) · outbound: ${outCount} (attributed: ${outWithUser})`);
+  if (rawSamples.length) {
+    console.log(`  [stats] inbound call object fields: ${Object.keys(rawSamples[0]).join(', ')}`);
+  }
+  if (dbg) {
+    rawSamples.forEach((c, i) => console.log(`  [stats] RAW inbound-completed #${i + 1}: ${JSON.stringify(c)}`));
   }
 
   return {
