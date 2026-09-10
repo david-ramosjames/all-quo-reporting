@@ -4274,25 +4274,30 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     .chg { color: #57606a; font-size: 12px; }
     .note { color: #57606a; font-size: 12px; margin-top: 8px; }
     .total td { font-weight: 700; }
+    th.hi { font-weight: 800; border-bottom: 2px solid #111; }
+    td.hi { font-weight: 800; font-size: 16px; }
   `.trim();
 
+  const totalIn = curAgg.totalIncoming || 0;
+  const shareOf = (n) => (totalIn ? `${Math.round((n / totalIn) * 100)}%` : '—');
   const outcomeRows = CALL_OUTCOME_ORDER
     .map((b) => ({ b, cur: curAgg.outcomes[b] || 0, prev: prevAgg.outcomes[b] || 0 }))
     .filter((r) => r.cur || r.prev)
     .map(
       (r) =>
         `<tr><td>${escapeHtml(r.b)}</td><td class="num">${r.cur}</td>` +
+        `<td class="num">${shareOf(r.cur)}</td>` +
         `<td class="num">${r.prev}</td><td class="num chg">${escapeHtml(pctChangeLabel(r.cur, r.prev))}</td></tr>`
     )
     .join('');
   const outcomeTable = `<table>
-    <tr><th>Incoming call outcome</th><th class="num">Yesterday</th><th class="num">Same day last wk</th><th class="num">Change</th></tr>
-    ${outcomeRows || '<tr><td colspan="4" class="note">No incoming calls.</td></tr>'}
-    <tr class="total"><td>Total incoming</td><td class="num">${curAgg.totalIncoming}</td><td class="num">${prevAgg.totalIncoming}</td><td class="num chg">${escapeHtml(pctChangeLabel(curAgg.totalIncoming, prevAgg.totalIncoming))}</td></tr>
+    <tr><th>Incoming call outcome</th><th class="num">Yesterday</th><th class="num">% of total</th><th class="num">Same day last wk</th><th class="num">Change</th></tr>
+    ${outcomeRows || '<tr><td colspan="5" class="note">No incoming calls.</td></tr>'}
+    <tr class="total"><td>Total incoming</td><td class="num">${curAgg.totalIncoming}</td><td class="num">${totalIn ? '100%' : '—'}</td><td class="num">${prevAgg.totalIncoming}</td><td class="num chg">${escapeHtml(pctChangeLabel(curAgg.totalIncoming, prevAgg.totalIncoming))}</td></tr>
   </table>`;
 
-  const cell = (cur, prev) =>
-    `<td class="num">${cur}<div class="chg">${escapeHtml(pctChangeLabel(cur, prev))}</div></td>`;
+  const cell = (cur, prev, cls = '') =>
+    `<td class="num${cls}">${cur}<div class="chg">${escapeHtml(pctChangeLabel(cur, prev))}</div></td>`;
   const userBody = userRows.length
     ? userRows
         .map(
@@ -4300,7 +4305,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
             `<tr><td>${escapeHtml(u.name)}</td>` +
             cell(u.total, u.prev.total) +
             cell(u.outgoing, u.prev.outgoing) +
-            cell(u.answered, u.prev.answered) +
+            cell(u.answered, u.prev.answered, ' hi') +
             `<td class="num">${escapeHtml(formatCallDuration(u.seconds))}<div class="chg">${escapeHtml(pctChangeLabel(u.seconds, u.prev.seconds))}</div></td>` +
             cell(u.messages, u.prev.messages) +
             `</tr>`
@@ -4308,7 +4313,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
         .join('')
     : '<tr><td colspan="6" class="note">No matching users with activity.</td></tr>';
   const userTable = `<table>
-    <tr><th>User</th><th class="num">Total calls</th><th class="num">Outgoing</th><th class="num">Answered</th><th class="num">Time on calls</th><th class="num">Sent messages</th></tr>
+    <tr><th>User</th><th class="num">Total calls</th><th class="num">Outgoing</th><th class="num hi">Answered</th><th class="num">Time on calls</th><th class="num">Sent messages</th></tr>
     ${userBody}
   </table>`;
 
@@ -4331,7 +4336,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     <h3>Incoming Call Outcomes</h3>
     ${outcomeTable}
 
-    <h3>By User</h3>
+    <h3>By User <span style="font-weight:400;font-size:13px;color:#57606a">— sorted by Answered calls</span></h3>
     ${userTable}
 
     <div class="note" style="margin-top:20px;border-top:1px solid #d0d7de;padding-top:10px">
@@ -4400,7 +4405,8 @@ async function runDailyCallStatsReport() {
       prev: { total: p.outgoing + p.answered, outgoing: p.outgoing, answered: p.answered, seconds: p.seconds, messages: p.messages },
     });
   }
-  userRows.sort((a, b) => b.total - a.total);
+  // Answered is the number the team is coached on, so lead with it.
+  userRows.sort((a, b) => b.answered - a.answered || b.total - a.total);
 
   const missed = { cur: missedCallsTotal(curAgg), prev: missedCallsTotal(prevAgg), goal: firmCtx().statsMissedGoal };
 
@@ -4421,14 +4427,16 @@ async function runDailyCallStatsReport() {
     `** MISSED CALLS (Missed + Answered by agent + Agent abandoned): ${missed.cur} ** — goal under ${missed.goal} (last wk ${missed.prev})`,
     '',
     'Incoming Call Outcomes:',
-    ...CALL_OUTCOME_ORDER.filter((b) => curAgg.outcomes[b] || prevAgg.outcomes[b]).map(
-      (b) => `  ${b}: ${curAgg.outcomes[b] || 0} (last wk ${prevAgg.outcomes[b] || 0})`
-    ),
+    ...CALL_OUTCOME_ORDER.filter((b) => curAgg.outcomes[b] || prevAgg.outcomes[b]).map((b) => {
+      const n = curAgg.outcomes[b] || 0;
+      const share = curAgg.totalIncoming ? `${Math.round((n / curAgg.totalIncoming) * 100)}%` : '—';
+      return `  ${b}: ${n} (${share} of total, last wk ${prevAgg.outcomes[b] || 0})`;
+    }),
     `  Total incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming})`,
     '',
-    'By User (total / outgoing / answered / time / sent msgs):',
+    'By User — sorted by ANSWERED (answered / total / outgoing / time / sent msgs):',
     ...userRows.map(
-      (u) => `  ${u.name}: ${u.total} / ${u.outgoing} / ${u.answered} / ${formatCallDuration(u.seconds)} / ${u.messages}`
+      (u) => `  ${u.name}: answered ${u.answered} · ${u.total} total / ${u.outgoing} out / ${formatCallDuration(u.seconds)} / ${u.messages} msgs`
     ),
   ];
   const plainText = plainLines.join('\n');
