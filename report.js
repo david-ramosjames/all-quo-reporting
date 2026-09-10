@@ -4230,14 +4230,19 @@ function aggregateCallStats({ calls, messages }) {
     return perUser.get(id);
   };
   for (const c of calls) {
-    if (!c.userId) continue; // agent/unattributed calls aren't in the per-user table
     const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
-    if (!isIncomingDirection(c.direction)) {
-      const u = ensure(c.userId);
+    const inbound = isIncomingDirection(c.direction);
+    // Attribute by the direction-specific actor: who ANSWERED an inbound call vs
+    // who PLACED an outbound one. `userId` is the line/route owner, not the
+    // person who handled the call, so it's only a last-resort fallback outbound.
+    const actorId = inbound ? c.answeredBy : (c.initiatedBy || c.userId);
+    if (!actorId) continue; // agent-handled / unattributed calls aren't per-user
+    if (!inbound) {
+      const u = ensure(actorId);
       u.outgoing += 1;
       u.seconds += Number(c.duration || 0);
     } else if (completed) {
-      const u = ensure(c.userId);
+      const u = ensure(actorId);
       u.answered += 1;
       u.seconds += Number(c.duration || 0);
     }
@@ -4371,6 +4376,13 @@ async function runDailyCallStatsReport() {
   const includeSet = new Set(includeUsers.map((n) => n.toLowerCase()));
   const usersFilterActive = includeSet.size > 0;
   const allIds = new Set([...curAgg.perUser.keys(), ...prevAgg.perUser.keys()]);
+  // If an actor id has no name in the workspace user map, the name-based include
+  // filter would silently drop that person's calls — surface it rather than
+  // quietly reporting zeros.
+  const unresolvedIds = [...allIds].filter((id) => !userMap[id]);
+  if (unresolvedIds.length) {
+    console.warn(`  Note: ${unresolvedIds.length} user id(s) had call activity but no name in the Quo user map — excluded by the user filter: ${unresolvedIds.slice(0, 6).join(', ')}`);
+  }
   const zero = { outgoing: 0, answered: 0, seconds: 0, messages: 0 };
   const userRows = [];
   for (const id of allIds) {

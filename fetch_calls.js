@@ -707,12 +707,15 @@ async function fetchDailyCallStats(options = {}) {
   const dbg = /^(1|true|yes)$/i.test(String(process.env.STATS_DEBUG_RAW || ''));
   const rawSamples = [];
   let inCompleted = 0;
-  let inCompletedWithUser = 0;
+  let inWithAnsweredBy = 0;
   let outCount = 0;
-  let outWithUser = 0;
-  const answererField = (c) =>
-    c.userId || c.user?.id || c.answeredBy || c.answeredById || c.respondedBy ||
-    c.respondedById || c.assignedTo || c.assignedToId || c.completedBy || null;
+  let outWithInitiatedBy = 0;
+  /** Actor fields may be a plain id or an object — normalize to an id string. */
+  const idOf = (v) => {
+    if (!v) return null;
+    if (typeof v === 'object') return v.id || v.userId || null;
+    return String(v);
+  };
 
   const calls = [];
   const messages = [];
@@ -732,19 +735,26 @@ async function fetchDailyCallStats(options = {}) {
       if (!inWindow(ts)) continue;
       const inbound = /^(incoming|inbound)$/i.test(c.direction || '');
       const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
+      const answeredBy = idOf(c.answeredBy);
+      const initiatedBy = idOf(c.initiatedBy);
       if (inbound && completed) {
         inCompleted += 1;
-        if (answererField(c)) inCompletedWithUser += 1;
+        if (answeredBy) inWithAnsweredBy += 1;
         if (rawSamples.length < 4) rawSamples.push(c);
       } else if (!inbound) {
         outCount += 1;
-        if (answererField(c)) outWithUser += 1;
+        if (initiatedBy) outWithInitiatedBy += 1;
       }
       calls.push({
         id: c.id,
         phoneNumberId: conv.phoneNumberId,
         lineName,
-        userId: answererField(c),
+        // Direction-specific actors: answeredBy = who picked up an inbound call,
+        // initiatedBy = who placed an outbound one. `userId` is the line/route
+        // owner and must NOT be used to attribute who handled the call.
+        answeredBy,
+        initiatedBy,
+        userId: idOf(c.userId),
         direction: c.direction || '',
         status: c.status || '',
         aiHandled: c.aiHandled || null,
@@ -775,7 +785,7 @@ async function fetchDailyCallStats(options = {}) {
 
   // Attribution diagnostics — if inbound-completed calls rarely carry a user id,
   // the answerer lives in a field we're not reading; the key list reveals it.
-  console.log(`  [stats] inbound-completed calls: ${inCompleted} (attributed to a user: ${inCompletedWithUser}) · outbound: ${outCount} (attributed: ${outWithUser})`);
+  console.log(`  [stats] inbound-completed: ${inCompleted} (answeredBy set: ${inWithAnsweredBy}) · outbound: ${outCount} (initiatedBy set: ${outWithInitiatedBy})`);
   if (rawSamples.length) {
     console.log(`  [stats] inbound call object fields: ${Object.keys(rawSamples[0]).join(', ')}`);
   }
