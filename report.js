@@ -2664,25 +2664,31 @@ async function classifyCallbackFromCall(c) {
     ? 'inbound (the client called the firm)'
     : 'outbound (the firm called the client)';
   const label = picked.kind === 'transcript' ? 'Transcript' : 'Call summary (no full transcript available)';
-  const prompt = `You are reviewing a single phone call at a personal-injury law firm to decide whether the FIRM still needs to CALL THIS PERSON BACK.
+  const prompt = `You are reviewing a single phone call at a personal-injury law firm to decide whether the FIRM still owes THIS PERSON A RETURN PHONE CALL that has not happened yet.
 
 Call direction: ${dir}
 Contact: ${c.contact || '(unknown)'}
 
-Answer true ONLY if, based on this call, the firm owes the client (or prospective client) a return call that has not yet happened — e.g. the client asked to have someone call them back, left a message needing follow-up, or a staff member/attorney said they would call the client back.
+Answer true ONLY when the call contains an EXPLICIT, UNMET commitment or request for a phone call back:
+- The client asked for someone to call them back, or
+- A staff member/attorney explicitly said they would call the client back, or
+- The client could not reach the person they needed and is waiting on a return call.
 
-Answer false if ANY of these apply:
-- The FIRM called and asked the CLIENT to call US back — i.e. the client owes the callback, not the firm.
-- The person's question or matter was fully handled on this call with nothing left that requires a callback.
-- The other party is NOT a client — e.g. a referring attorney, vendor, insurance company, court, or an internal / marketing call.
-- No callback is owed by the firm.
+Be strict — an unfinished task is NOT a callback. Answer false if ANY of these apply:
+- The client has ENDED or is ending the relationship: they fired the firm, said they're using another firm, asked to stop being contacted, sent a disengagement/termination letter, or declined to sign paperwork because they're leaving. Never flag these people for a callback, even if loose ends remain.
+- The only thing outstanding is paperwork, a document, records, a signature, an email to send, or other administrative follow-up work. That is internal work, not a phone call the client is waiting on.
+- The FIRM called and asked the CLIENT to call US back — the client owes the callback, not the firm.
+- The firm already spoke with the person on this call and nobody promised a further call.
+- The other party is NOT a client — a referring attorney, vendor, insurance company, court, or an internal/marketing call.
+
+If you have to infer or assume a callback was implied, the answer is false. Only an explicit request or promise counts.
 
 ${label}:
 """
 ${picked.text.slice(0, 6000)}
 """
 
-Respond as JSON only: {"firm_owes_callback": true or false, "reason": "<brief>"}`;
+Respond as JSON only: {"firm_owes_callback": true or false, "reason": "<brief, quote the explicit request or promise if true>"}`;
   try {
     const out = await runChatCompletion(prompt, 300, 'Callback classifier', { jsonObject: true });
     const parsed = JSON.parse(out);
@@ -2712,7 +2718,7 @@ function isConnectedReturnCall(c, sinceIso) {
 
 function buildMissedClientCallTable(rows, kind = 'missed') {
   const header = kind === 'callback'
-    ? ['Client', 'Phone', 'Requested at', 'Attorney', 'Paralegal', 'Quo line', 'Link']
+    ? ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Quo line', 'Link']
     : ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Link'];
   const lines = [header.join(' | '), header.map(() => '---').join(' | ')];
   for (const r of rows) {
@@ -2721,6 +2727,7 @@ function buildMissedClientCallTable(rows, kind = 'missed') {
           r.contact || '(unknown)',
           r.phone || '',
           r.missedAtLocal || '',
+          (r.callbackWhy || '').replace(/\|/g, '/'),
           r.attorney || '',
           r.paralegal || '',
           r.line || '',
@@ -2768,13 +2775,14 @@ function missedTableHtml(rows) {
 function callbackTableHtml(rows) {
   if (!rows.length) return '<p class="empty">No outstanding callback requests. Nice work!</p>';
   const headerRow =
-    '<tr><th>Client</th><th>Phone</th><th>Requested at</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Link</th></tr>';
+    '<tr><th>Client</th><th>Phone</th><th>Requested at</th><th>Why</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Link</th></tr>';
   const bodyRows = rows
     .map(
       (r) =>
         `<tr class="callback"><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
         `<td>${escapeHtml(r.phone || '')}</td>` +
         `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
+        `<td style="font-size:13px;color:#57606a">${escapeHtml(r.callbackWhy || '')}</td>` +
         `<td>${escapeHtml(r.attorney || '')}</td>` +
         `<td>${escapeHtml(r.paralegal || '')}</td>` +
         `<td>${escapeHtml(r.line || '')}</td>` +
@@ -2973,9 +2981,11 @@ async function runMissedClientCallReport() {
         droppedReturned += 1;
         continue;
       }
+      console.log(`    Callback owed — ${cand.contact}: ${verdict.reason || 'n/a'}`);
       const existing = outstandingByKey.get(cand.key);
       if (existing) {
         existing.callbackRequested = true;
+        existing.callbackWhy = verdict.reason || '';
         marked += 1;
         continue;
       }
@@ -2993,6 +3003,7 @@ async function runMissedClientCallReport() {
         line: cand.convCall.line || '',
         link: cand.convCall.link || cand.anchor.link || '',
         callbackRequested: true,
+        callbackWhy: verdict.reason || '',
         kind: 'callback',
         _groupKey: cand.key,
       });
