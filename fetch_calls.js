@@ -849,11 +849,7 @@ async function fetchDailyCallStats(options = {}) {
       `  [stats] conversations listed: ${allConversations.length} (all lines) -> ${conversations.length} on included lines` +
       ` · ${Object.entries(convByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`
     );
-    // Collect every distinct counterparty once. Querying calls per
-    // (conversation line, participant) missed calls that person made to a
-    // DIFFERENT line than their conversation sits on — that's how inbound
-    // Intake calls disappeared. Query per participant across all lines instead
-    // and attribute each call by its OWN phoneNumberId.
+    // Collect every distinct counterparty once.
     const participantSet = new Set();
     for (const conv of allConversations) {
       const ownNumber = numberMap[conv.phoneNumberId] || '';
@@ -863,36 +859,72 @@ async function fetchDailyCallStats(options = {}) {
       if (!ps.length) { skippedNoParticipant += 1; continue; }
       for (const p of ps) participantSet.add(p);
     }
-    console.log(`  [stats] querying ${participantSet.size} distinct counterparties across all lines...`);
 
-    let perParticipantOk = true;
-    for (const participant of participantSet) {
-      try {
-        for (const c of await fetchCallsForParticipant(client, participant, cfg)) {
-          if (includedIds.has(c.phoneNumberId)) addCall(c, c.phoneNumberId);
-        }
-      } catch (err) {
-        if (perParticipantOk) {
-          perParticipantOk = false;
-          console.warn(`  [stats] participant-scoped call query failed (${err.response?.data?.message || err.message}) — falling back to per-line queries.`);
-        }
-        for (const pnId of phoneNumberIds) {
-          try {
-            for (const c of await fetchCallsForConversation(client, pnId, participant, cfg)) {
-              if (includedIds.has(c.phoneNumberId || pnId)) addCall(c, c.phoneNumberId || pnId);
-            }
-          } catch { /* skip this line for this participant */ }
-          await sleep(REQUEST_DELAY_MS);
+    // OpenPhone requires phoneNumberId on /v1/calls and /v1/messages, so a
+    // participant-scoped query across all lines isn't possible; probe once and
+    // then fan out per line. (Probing per participant would waste a failing
+    // request every time.)
+    let participantOnlyCalls = true;
+    let participantOnlyMsgs = true;
+    const callsFor = async (participant) => {
+      if (participantOnlyCalls) {
+        try {
+          return await fetchCallsForParticipant(client, participant, cfg);
+        } catch (err) {
+          participantOnlyCalls = false;
+          console.warn(`  [stats] line-less call query unsupported (${err.response?.data?.message || err.message}) — querying each line per counterparty.`);
         }
       }
-      await sleep(REQUEST_DELAY_MS);
-      try {
-        for (const m of await fetchMessagesForParticipant(client, participant, cfg)) {
-          if (includedIds.has(m.phoneNumberId)) addMessage(m, m.phoneNumberId);
+      const out = [];
+      for (const pnId of phoneNumberIds) {
+        try {
+          out.push(...(await fetchCallsForConversation(client, pnId, participant, cfg)));
+        } catch { /* skip this line for this counterparty */ }
+        await sleep(REQUEST_DELAY_MS);
+      }
+      return out;
+    };
+    const msgsFor = async (participant) => {
+      if (participantOnlyMsgs) {
+        try {
+          return await fetchMessagesForParticipant(client, participant, cfg);
+        } catch {
+          participantOnlyMsgs = false;
         }
-      } catch { /* messages are best-effort */ }
-      await sleep(REQUEST_DELAY_MS);
+      }
+      const out = [];
+      for (const pnId of phoneNumberIds) {
+        try {
+          out.push(...(await fetchMessagesForConversation(client, pnId, participant, cfg)));
+        } catch { /* skip */ }
+        await sleep(REQUEST_DELAY_MS);
+      }
+      return out;
+    };
+
+    console.log(`  [stats] querying ${participantSet.size} distinct counterparties...`);
+    for (const participant of participantSet) {
+      for (const c of await callsFor(participant)) {
+        if (includedIds.has(c.phoneNumberId)) addCall(c, c.phoneNumberId);
+      }
+      for (const m of await msgsFor(participant)) {
+        if (includedIds.has(m.phoneNumberId)) addMessage(m, m.phoneNumberId);
+      }
     }
+
+    // Routed / auto-forwarded calls carry INTERNAL line numbers in
+    // `participants` rather than the original caller (that's why the 8 inbound
+    // RJL Outbound calls resolved to a single "caller" — the Main Line number),
+    // so a query keyed on the real caller never returns them. Sweep the line
+    // numbers themselves as participants to pick those up. Deduped by call id.
+    const lineNumbers = allLines.map((pn) => pn.number || pn.formattedNumber).filter(Boolean);
+    console.log(`  [stats] sweeping ${lineNumbers.length} line numbers for routed calls...`);
+    for (const num of lineNumbers) {
+      for (const c of await callsFor(num)) {
+        if (includedIds.has(c.phoneNumberId)) addCall(c, c.phoneNumberId);
+      }
+    }
+
     console.log(`  [stats] conversations listed on included lines: ${conversations.length} (skipped, no participant: ${skippedNoParticipant})`);
   }
 
