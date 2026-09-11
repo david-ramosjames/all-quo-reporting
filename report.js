@@ -2632,8 +2632,9 @@ function formatMissedCallTime(iso) {
 // ── Callback-required detection (from the call transcript, via an LLM) ────────
 // Instead of relying on any external bot/tag, we read each client's most recent
 // substantive call (transcript preferred, summary as fallback) and ask the LLM
-// whether the FIRM still owes that client a return call — e.g. the client asked
-// to be called back, or a staff member/attorney promised to call them back.
+// whether the FIRM still owes that client a near-term return call — e.g. the
+// client asked to be called back, or a staff member promised to call them (not
+// a later "we'll reach out once we have more information" status update).
 // Direction matters: a call where WE asked the CLIENT to call us back does NOT
 // count. Non-client calls (referring attorneys, vendors, insurers) don't count.
 // A callback falls off once we've actually reached the client again (see
@@ -2652,10 +2653,11 @@ function callClassifyText(c) {
 }
 
 /**
- * Reads one call and decides whether the FIRM still owes this client a return
- * call. Direction-aware: the firm asking the client to call US back does NOT
- * count. Fails closed (returns ok:false) so a bad LLM call never invents a
- * callback. Returns { ok, reason }.
+ * Reads one call and decides whether the FIRM still owes this client a
+ * near-term return call. Contingent "we'll reach out once we have more
+ * information" updates do not count. Direction-aware: the firm asking the
+ * client to call US back does NOT count. Fails closed (returns ok:false) so a
+ * bad LLM call never invents a callback. Returns { ok, reason }.
  */
 async function classifyCallbackFromCall(c) {
   const picked = callClassifyText(c);
@@ -2664,31 +2666,36 @@ async function classifyCallbackFromCall(c) {
     ? 'inbound (the client called the firm)'
     : 'outbound (the firm called the client)';
   const label = picked.kind === 'transcript' ? 'Transcript' : 'Call summary (no full transcript available)';
-  const prompt = `You are reviewing a single phone call at a personal-injury law firm to decide whether the FIRM still owes THIS PERSON A RETURN PHONE CALL that has not happened yet.
+  const prompt = `You are reviewing a single phone call at a personal-injury law firm to decide whether the FIRM still owes THIS PERSON A RETURN PHONE CALL that staff should place now (or very soon) as the next action.
 
 Call direction: ${dir}
 Contact: ${c.contact || '(unknown)'}
 
-Answer true ONLY when the call contains an EXPLICIT, UNMET commitment or request for a phone call back:
-- The client asked for someone to call them back, or
-- A staff member/attorney explicitly said they would call the client back, or
-- The client could not reach the person they needed and is waiting on a return call.
+Answer true ONLY when the call contains an EXPLICIT, UNMET request or promise that someone will PHONE the client as the next step:
+- The client asked to be called back ("can you call me back", "have the attorney call me"), or
+- A staff member/attorney said they would call the client back as the next action ("I'll call you back", "I'll have X call you this afternoon", "give me 10 minutes and I'll call you"), or
+- The client could not reach the person they needed and is waiting on that person to return THIS call.
+
+The promise must be a phone call that is already owed. "Call", "contact", "reach out", or "let you know" later does NOT count if it is a status update after some other event.
 
 Be strict — an unfinished task is NOT a callback. Answer false if ANY of these apply:
+- FUTURE / CONTINGENT CONTACT: staff will get back to the client only after receiving more information, documents, a police report, a check, next steps, or similar. Examples that are FALSE: "as soon as I hear a word I'll send you a message", "once we know the next steps I will reach out… probably next week", "the office will contact you once they have the check ready", "as soon as we get that police report I'll let you know", "I'll leave a message so he can verify that information and let you know how long it may take" / "le dejaré el mensaje para que verifique y le deje saber cuánto tiempo se puede tomar".
+- A later process call (someone will introduce themselves, go over the process, or set up treatment after information arrives) is onboarding, not a callback owed from this conversation.
+- The promised follow-up is a message, text, email, or "I'll let you know" — not a return phone call.
 - The client has ENDED or is ending the relationship: they fired the firm, said they're using another firm, asked to stop being contacted, sent a disengagement/termination letter, or declined to sign paperwork because they're leaving. Never flag these people for a callback, even if loose ends remain.
 - The only thing outstanding is paperwork, a document, records, a signature, an email to send, or other administrative follow-up work. That is internal work, not a phone call the client is waiting on.
 - The FIRM called and asked the CLIENT to call US back — the client owes the callback, not the firm.
 - The firm already spoke with the person on this call and nobody promised a further call.
 - The other party is NOT a client — a referring attorney, vendor, insurance company, court, or an internal/marketing call.
 
-If you have to infer or assume a callback was implied, the answer is false. Only an explicit request or promise counts.
+If you have to infer or assume a callback was implied, the answer is false. Only an explicit near-term return-call request or promise counts. Apply the same rules to Spanish (or any language).
 
 ${label}:
 """
 ${picked.text.slice(0, 6000)}
 """
 
-Respond as JSON only: {"firm_owes_callback": true or false, "reason": "<brief, quote the explicit request or promise if true>"}`;
+Respond as JSON only: {"firm_owes_callback": true or false, "reason": "<brief, quote the explicit near-term call-back request or promise if true>"}`;
   try {
     const out = await runChatCompletion(prompt, 300, 'Callback classifier', { jsonObject: true });
     const parsed = JSON.parse(out);
@@ -2814,7 +2821,7 @@ function buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows) {
 
     <div class="note" style="margin-top: 24px; border-top: 1px solid #d0d7de; padding-top: 12px;">
       <p><strong>1) Missed Calls</strong> — client numbers whose most recent call in the window was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person. A number drops off as soon as its latest call is answered by a person or we dial out to them. A 📞 here means this client also asked us to call them back.</p>
-      <p><strong>2) Requested Call Backs</strong> — clients the firm owes a return call — the client asked us to call them back, or a staff member/attorney said they would — determined by reading the call transcript. (Clients who are also on the Missed Calls list appear there, flagged 📞, not here.) Each drops off once we've actually reached the client again.</p>
+      <p><strong>2) Requested Call Backs</strong> — clients the firm owes a near-term return call: the client asked us to call them back, or a staff member promised to call them as the next step. Later "we'll reach out once we have more information" updates (check ready, police report, next steps, someone introducing themselves later) are not listed. (Clients who are also on the Missed Calls list appear there, flagged 📞, not here.) Each drops off once we've actually reached the client again.</p>
     </div>
   </body></html>`;
 }
