@@ -4194,6 +4194,9 @@ function callOutcomeBucket(c) {
   const status = String(c.status || '').toLowerCase();
   const agent = Boolean(c.aiHandled);
   if (status.includes('voicemail')) return 'Voicemail';
+  // Quo export uses status=forwarded for the auto-forward tap (RJL Outbound →
+  // Main Line). That record is also dropped by ignoreIncomingLines; this keeps
+  // any leftover tap out of "Answered by user".
   if (status.includes('forward')) return 'Forwarded';
   if (status === 'completed' || status === 'answered') {
     if (agent) return 'Answered by agent';
@@ -4253,9 +4256,13 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
 
   const outcomes = {};
   let totalIncoming = 0;
+  let ignoredInbound = 0;
   for (const c of calls) {
     if (!isIncomingDirection(c.direction)) continue;
-    if (isIgnoredInbound(c)) continue;
+    if (isIgnoredInbound(c)) {
+      ignoredInbound += 1;
+      continue;
+    }
     if (isVolumeExcluded(c)) continue;
     totalIncoming += 1;
     const b = callOutcomeBucket(c);
@@ -4297,7 +4304,7 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
     if (!m.userId || isIncomingDirection(m.direction)) continue; // sent = outgoing
     ensure(m.userId).messages += 1;
   }
-  return { outcomes, totalIncoming, perUser, answeredByLine };
+  return { outcomes, totalIncoming, perUser, answeredByLine, ignoredInbound };
 }
 
 /**
@@ -4386,7 +4393,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     ${userTable}
 
     <div class="note" style="margin-top:20px;border-top:1px solid #d0d7de;padding-top:10px">
-      <p>Inboxes excluded: ${escapeHtml((meta.excludedLines || []).join(', ') || 'none')}. Users shown: ${meta.usersFilterActive ? 'filtered to the configured team' : 'everyone with activity'}. Each number's change is vs the same weekday one week ago. Outcome buckets are derived from Quo call statuses and are best-effort — tell us if any look off vs the Quo dashboard.</p>
+      <p>Inboxes excluded: ${escapeHtml((meta.excludedLines || []).join(', ') || 'none')}. Incoming auto-forwards ignored on: ${escapeHtml((meta.ignoreIncomingLines || []).join(', ') || 'none')} (the call is counted on the line that received it). Users shown: ${meta.usersFilterActive ? 'filtered to the configured team' : 'everyone with activity'}. Each number's change is vs the same weekday one week ago.</p>
     </div>
   </body></html>`;
 }
@@ -4430,7 +4437,7 @@ async function runDailyCallStatsReport() {
   const ignoreIncomingLines = firmCtx().statsIgnoreIncomingInboxes;
   const curAgg = aggregateCallStats({ ...curData, volumeExcludeLines: transferLines, ignoreIncomingLines });
   const prevAgg = aggregateCallStats({ ...prevData, volumeExcludeLines: transferLines, ignoreIncomingLines });
-  console.log(`  Ignoring inbound (auto-forward duplicates) on: ${ignoreIncomingLines.join(', ') || 'none'}`);
+  console.log(`  Ignoring inbound (auto-forward duplicates) on: ${ignoreIncomingLines.join(', ') || 'none'} (dropped ${curAgg.ignoredInbound || 0} yesterday)`);
   console.log(`  Answered calls by line: ${Object.entries(curAgg.answeredByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`);
   console.log(`  (transfer lines counted for per-user answered, excluded from incoming volume: ${transferLines.join(', ') || 'none'})`);
 
@@ -4481,7 +4488,11 @@ async function runDailyCallStatsReport() {
     console.log(`   - ${u.name}: total ${u.total}, out ${u.outgoing}, answered ${u.answered}, ${formatCallDuration(u.seconds)}, msgs ${u.messages}`);
   }
 
-  const meta = { excludedLines: curData.excludedLines, usersFilterActive };
+  const meta = {
+    excludedLines: curData.excludedLines,
+    ignoreIncomingLines,
+    usersFilterActive,
+  };
   const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed);
   const plainLines = [
     `Yesterday Call Stats — ${dayLabel} (vs same weekday last week)`,

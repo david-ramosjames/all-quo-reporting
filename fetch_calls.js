@@ -157,6 +157,25 @@ function lookupContactId(contactMap, phone) {
   return '';
 }
 
+/** True when two phone strings are the same number (+1 / punctuation / 10-digit). */
+function samePhone(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const keys = new Set(phoneLookupKeys(a));
+  return phoneLookupKeys(b).some((k) => keys.has(k));
+}
+
+/**
+ * Counterparty numbers on a conversation or call, excluding our line.
+ * Other workspace lines are kept — auto-forwards often list the forwarding
+ * line as the participant instead of the original caller.
+ */
+function conversationCounterparties(participants, ownNumber) {
+  const all = (participants || []).filter(Boolean);
+  const others = all.filter((p) => !samePhone(p, ownNumber));
+  return others.length ? [...new Set(others)] : [];
+}
+
 // ── API functions ─────────────────────────────────────────────────────────────
 
 async function listPhoneNumbers(client) {
@@ -407,7 +426,7 @@ function extractInlineTranscript(call) {
 
 function getExternalPhone(call, ownNumber) {
   const participants = call.participants || [];
-  return participants.find((p) => p !== ownNumber) || participants[0] || '';
+  return participants.find((p) => !samePhone(p, ownNumber)) || participants[0] || '';
 }
 
 // ── Core export function ──────────────────────────────────────────────────────
@@ -776,7 +795,7 @@ async function fetchDailyCallStats(options = {}) {
       inboundByLine[lineName] = (inboundByLine[lineName] || 0) + 1;
       const own = numberMap[phoneNumberId] || '';
       const parts = Array.isArray(c.participants) ? c.participants : [];
-      const other = parts.find((p) => p !== own) || parts[0] || '(unknown)';
+      const other = parts.find((p) => !samePhone(p, own)) || parts[0] || '(unknown)';
       (inboundPartiesByLine[lineName] ||= new Set()).add(other);
     } else {
       outboundByLine[lineName] = (outboundByLine[lineName] || 0) + 1;
@@ -807,6 +826,7 @@ async function fetchDailyCallStats(options = {}) {
       answeredAt: c.answeredAt || null,
       forwardedFrom: c.forwardedFrom || null,
       forwardedTo: c.forwardedTo || null,
+      callRoute: c.callRoute || null,
     });
   };
 
@@ -825,15 +845,13 @@ async function fetchDailyCallStats(options = {}) {
   };
 
   {
-    // OpenPhone's /v1/calls requires `participants`, so calls can only be
-    // reached through conversations. List them from the window start onward
-    // (no upper bound — a thread touched after the window still holds that
-    // window's calls) and query every participant of each.
-    // List conversations across ALL lines (no phoneNumbers filter) and filter by
-    // line ourselves. The server-side filter was dropping threads that had calls
-    // in the window — e.g. every inbound thread on the Intake line — which
-    // silently undercounted the report. Listing is cheap; the per-conversation
-    // call fetches are the expensive part and those are still line-scoped.
+    // /v1/calls requires both phoneNumberId and participants, so every call is
+    // reached through a conversation pair. List conversations on ALL lines (the
+    // server-side phoneNumbers filter has dropped in-window threads before —
+    // e.g. Intake inbound) and query only the (line, counterparty) pairs that
+    // actually exist. The previous "every caller × every line" fallback after a
+    // line-less probe failed was thousands of requests that silently swallowed
+    // errors and undercounted forwarded Main Line legs.
     const allConversations = await fetchAllConversations(client, null, {
       ...cfg,
       createdBefore: undefined,
@@ -849,81 +867,84 @@ async function fetchDailyCallStats(options = {}) {
       `  [stats] conversations listed: ${allConversations.length} (all lines) -> ${conversations.length} on included lines` +
       ` · ${Object.entries(convByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`
     );
-    // Collect every distinct counterparty once.
-    const participantSet = new Set();
-    for (const conv of allConversations) {
+
+    const pairs = [];
+    const pairKey = new Set();
+    const addPair = (phoneNumberId, participant) => {
+      if (!phoneNumberId || !participant) return;
+      const key = `${phoneNumberId}|${participant}`;
+      if (pairKey.has(key)) return;
+      pairKey.add(key);
+      pairs.push({ phoneNumberId, participant });
+    };
+
+    for (const conv of conversations) {
       const ownNumber = numberMap[conv.phoneNumberId] || '';
-      const all = (conv.participants || []).filter(Boolean);
-      let ps = all.filter((p) => p !== ownNumber);
-      if (!ps.length) ps = all;
-      if (!ps.length) { skippedNoParticipant += 1; continue; }
-      for (const p of ps) participantSet.add(p);
+      const others = conversationCounterparties(conv.participants, ownNumber);
+      if (!others.length) {
+        skippedNoParticipant += 1;
+        continue;
+      }
+      for (const p of others) addPair(conv.phoneNumberId, p);
     }
 
-    // OpenPhone requires phoneNumberId on /v1/calls and /v1/messages, so a
-    // participant-scoped query across all lines isn't possible; probe once and
-    // then fan out per line. (Probing per participant would waste a failing
-    // request every time.)
-    let participantOnlyCalls = true;
-    let participantOnlyMsgs = true;
-    const callsFor = async (participant) => {
-      if (participantOnlyCalls) {
+    console.log(`  [stats] querying ${pairs.length} conversation pair(s)...`);
+    let pairErrors = 0;
+    let pairIdx = 0;
+    for (const { phoneNumberId, participant } of pairs) {
+      pairIdx += 1;
+      if (pairIdx % 25 === 0 || pairIdx === pairs.length) {
+        console.log(`  [stats] pairs ${pairIdx}/${pairs.length}...`);
+      }
+      try {
+        const [callList, msgList] = await Promise.all([
+          fetchCallsForConversation(client, phoneNumberId, participant, cfg),
+          fetchMessagesForConversation(client, phoneNumberId, participant, cfg),
+        ]);
+        for (const c of callList) {
+          if (includedIds.has(c.phoneNumberId)) addCall(c, c.phoneNumberId);
+        }
+        for (const m of msgList) {
+          if (includedIds.has(m.phoneNumberId)) addMessage(m, m.phoneNumberId);
+        }
+      } catch (err) {
+        pairErrors += 1;
+        const line = lineMap[phoneNumberId] || phoneNumberId;
+        console.warn(`  [stats] pair failed ${line} × ${participant}: ${err.response?.data?.message || err.message}`);
+      }
+      await sleep(REQUEST_DELAY_MS);
+    }
+
+    // Auto-forwards (RJL Outbound → RJL Main Line) often store the other line
+    // as the participant, not the original caller. Query each included line
+    // against every workspace number so those legs are not missed. Deduped by id.
+    const beforeSweep = calls.length;
+    const lineNumbers = allLines
+      .map((pn) => ({ id: pn.id, name: pn.name || '', number: pn.number || pn.formattedNumber || '' }))
+      .filter((x) => x.number);
+    console.log(
+      `  [stats] sweeping ${includedLines.length} included line(s) × ${lineNumbers.length} workspace number(s) for routed calls...`
+    );
+    for (const dest of includedLines) {
+      for (const src of lineNumbers) {
+        if (src.id === dest.id) continue;
+        if (samePhone(src.number, numberMap[dest.id])) continue;
         try {
-          return await fetchCallsForParticipant(client, participant, cfg);
+          const routed = await fetchCallsForConversation(client, dest.id, src.number, cfg);
+          for (const c of routed) {
+            if (includedIds.has(c.phoneNumberId)) addCall(c, c.phoneNumberId);
+          }
         } catch (err) {
-          participantOnlyCalls = false;
-          console.warn(`  [stats] line-less call query unsupported (${err.response?.data?.message || err.message}) — querying each line per counterparty.`);
+          console.warn(
+            `  [stats] sweep failed ${dest.name || dest.id} × ${src.number}: ${err.response?.data?.message || err.message}`
+          );
         }
-      }
-      const out = [];
-      for (const pnId of phoneNumberIds) {
-        try {
-          out.push(...(await fetchCallsForConversation(client, pnId, participant, cfg)));
-        } catch { /* skip this line for this counterparty */ }
         await sleep(REQUEST_DELAY_MS);
       }
-      return out;
-    };
-    const msgsFor = async (participant) => {
-      if (participantOnlyMsgs) {
-        try {
-          return await fetchMessagesForParticipant(client, participant, cfg);
-        } catch {
-          participantOnlyMsgs = false;
-        }
-      }
-      const out = [];
-      for (const pnId of phoneNumberIds) {
-        try {
-          out.push(...(await fetchMessagesForConversation(client, pnId, participant, cfg)));
-        } catch { /* skip */ }
-        await sleep(REQUEST_DELAY_MS);
-      }
-      return out;
-    };
-
-    console.log(`  [stats] querying ${participantSet.size} distinct counterparties...`);
-    for (const participant of participantSet) {
-      for (const c of await callsFor(participant)) {
-        if (includedIds.has(c.phoneNumberId)) addCall(c, c.phoneNumberId);
-      }
-      for (const m of await msgsFor(participant)) {
-        if (includedIds.has(m.phoneNumberId)) addMessage(m, m.phoneNumberId);
-      }
     }
-
-    // Routed / auto-forwarded calls carry INTERNAL line numbers in
-    // `participants` rather than the original caller (that's why the 8 inbound
-    // RJL Outbound calls resolved to a single "caller" — the Main Line number),
-    // so a query keyed on the real caller never returns them. Sweep the line
-    // numbers themselves as participants to pick those up. Deduped by call id.
-    const lineNumbers = allLines.map((pn) => pn.number || pn.formattedNumber).filter(Boolean);
-    console.log(`  [stats] sweeping ${lineNumbers.length} line numbers for routed calls...`);
-    for (const num of lineNumbers) {
-      for (const c of await callsFor(num)) {
-        if (includedIds.has(c.phoneNumberId)) addCall(c, c.phoneNumberId);
-      }
-    }
+    const swept = calls.length - beforeSweep;
+    if (swept) console.log(`  [stats] line sweep added ${swept} routed call(s)`);
+    if (pairErrors) console.warn(`  [stats] ${pairErrors} conversation pair(s) failed after retries`);
 
     console.log(`  [stats] conversations listed on included lines: ${conversations.length} (skipped, no participant: ${skippedNoParticipant})`);
   }
