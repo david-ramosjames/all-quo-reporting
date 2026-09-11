@@ -129,7 +129,12 @@ function reportConfigForFirm(firm) {
     // env fallbacks, then built-in defaults. Recipients do NOT fall back to the
     // default report list (this email goes to a specific audience).
     statsEmailTo: firstList(f.stats_email_to, env.STATS_EMAIL_TO),
-    statsExcludeInboxes: firstList(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES, 'RJL Transfers,Extra Number,SA Law Firm,Trucking Chicas'),
+    // Lines dropped entirely (other firms / noise). Transfer lines are NOT here:
+    // they still count toward who answered, just not toward incoming volume.
+    statsExcludeInboxes: firstList(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES, 'Extra Number,SA Law Firm,Trucking Chicas'),
+    // Counted for per-user attribution but excluded from incoming call volume,
+    // so a transferred call isn't counted twice.
+    statsTransferInboxes: firstList(f.stats_transfer_inboxes, env.STATS_TRANSFER_INBOXES, 'RJL Transfers'),
     statsIncludeUsers: firstList(
       f.stats_include_users,
       env.STATS_INCLUDE_USERS,

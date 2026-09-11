@@ -42,8 +42,10 @@ const FIRM_FIELDS = [
   { key: 'stats_email_to', label: 'Yesterday Call Stats recipients', type: 'text', group: 'Email',
     help: 'Comma-separated. Who receives the daily call-stats email. Blank = no one (prints to logs only). Does NOT fall back to the default recipients.' },
 
-  { key: 'stats_exclude_inboxes', label: 'Call stats — inboxes to exclude', type: 'text', group: 'Yesterday Call Stats',
-    help: 'Comma-separated Quo line names to leave out — must match the line name exactly. Blank = default (RJL Transfers, Extra Number, SA Law Firm, Trucking Chicas).' },
+  { key: 'stats_exclude_inboxes', label: 'Call stats — inboxes to exclude entirely', type: 'text', group: 'Yesterday Call Stats',
+    help: 'Comma-separated Quo line names dropped from the report completely (other firms / unused lines) — must match the line name exactly. Blank = default (Extra Number, SA Law Firm, Trucking Chicas).' },
+  { key: 'stats_transfer_inboxes', label: 'Call stats — transfer lines', type: 'text', group: 'Yesterday Call Stats',
+    help: 'Lines that receive transferred calls. These still count toward who ANSWERED (the person really did take the client), but are left out of incoming call volume so a transferred call is not counted twice. Blank = default (RJL Transfers).' },
   { key: 'stats_include_users', label: 'Call stats — users in the per-user table', type: 'text', group: 'Yesterday Call Stats',
     help: 'Comma-separated names exactly as they appear in Quo. Blank = default set (the 5 legal assistants + Intake).' },
   { key: 'stats_missed_goal', label: 'Call stats — Missed Calls daily goal', type: 'text', group: 'Yesterday Call Stats',

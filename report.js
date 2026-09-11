@@ -4225,15 +4225,27 @@ function pctChangeLabel(cur, prev) {
 }
 
 /** Aggregate raw call/message records into outcome + per-user tallies. */
-function aggregateCallStats({ calls, messages }) {
+function aggregateCallStats({ calls, messages, volumeExcludeLines }) {
+  // Transfer lines are excluded from INCOMING VOLUME (a transferred call already
+  // counted once on the line it arrived on, so counting the transfer leg would
+  // double-count it) but still count for PER-USER attribution — the person who
+  // picks up a transferred call really did answer that client.
+  const volExclude = new Set(
+    (volumeExcludeLines || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean)
+  );
+  const isVolumeExcluded = (c) => volExclude.has(String(c.lineName || '').trim().toLowerCase());
+
   const outcomes = {};
   let totalIncoming = 0;
   for (const c of calls) {
     if (!isIncomingDirection(c.direction)) continue;
+    if (isVolumeExcluded(c)) continue;
     totalIncoming += 1;
     const b = callOutcomeBucket(c);
     outcomes[b] = (outcomes[b] || 0) + 1;
   }
+  /** Answered-call counts per Quo line — diagnoses where answered calls land. */
+  const answeredByLine = {};
   /** @type {Map<string, { outgoing: number, answered: number, seconds: number, messages: number }>} */
   const perUser = new Map();
   const ensure = (id) => {
@@ -4256,13 +4268,15 @@ function aggregateCallStats({ calls, messages }) {
       const u = ensure(actorId);
       u.answered += 1;
       u.seconds += Number(c.duration || 0);
+      const ln = c.lineName || '(unknown line)';
+      answeredByLine[ln] = (answeredByLine[ln] || 0) + 1;
     }
   }
   for (const m of messages) {
     if (!m.userId || isIncomingDirection(m.direction)) continue; // sent = outgoing
     ensure(m.userId).messages += 1;
   }
-  return { outcomes, totalIncoming, perUser };
+  return { outcomes, totalIncoming, perUser, answeredByLine };
 }
 
 /**
@@ -4384,8 +4398,11 @@ async function runDailyCallStatsReport() {
   const prevData = await fetchDailyCallStats({ apiKey, ...prev, excludeLineNames });
   console.log(`  ${prevData.calls.length} call(s), ${prevData.messages.length} message(s).`);
 
-  const curAgg = aggregateCallStats(curData);
-  const prevAgg = aggregateCallStats(prevData);
+  const transferLines = firmCtx().statsTransferInboxes;
+  const curAgg = aggregateCallStats({ ...curData, volumeExcludeLines: transferLines });
+  const prevAgg = aggregateCallStats({ ...prevData, volumeExcludeLines: transferLines });
+  console.log(`  Answered calls by line: ${Object.entries(curAgg.answeredByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`);
+  console.log(`  (transfer lines counted for per-user answered, excluded from incoming volume: ${transferLines.join(', ') || 'none'})`);
 
   // Merge the userId→name maps from both windows for display.
   const userMap = { ...prevData.userMap, ...curData.userMap };
@@ -4397,7 +4414,11 @@ async function runDailyCallStatsReport() {
   // quietly reporting zeros.
   const unresolvedIds = [...allIds].filter((id) => !userMap[id]);
   if (unresolvedIds.length) {
-    console.warn(`  Note: ${unresolvedIds.length} user id(s) had call activity but no name in the Quo user map — excluded by the user filter: ${unresolvedIds.slice(0, 6).join(', ')}`);
+    const detail = unresolvedIds.slice(0, 6).map((id) => {
+      const c = curAgg.perUser.get(id) || { outgoing: 0, answered: 0 };
+      return `${id} (answered ${c.answered}, out ${c.outgoing})`;
+    });
+    console.warn(`  Note: ${unresolvedIds.length} user id(s) had call activity but no name in the Quo user map — excluded by the user filter: ${detail.join(' · ')}`);
   }
   const zero = { outgoing: 0, answered: 0, seconds: 0, messages: 0 };
   const userRows = [];
