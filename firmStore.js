@@ -137,6 +137,10 @@ function reportConfigForFirm(firm) {
     // volume. Empty by default — move a line here (and out of the exclude list)
     // to credit staff for transferred calls without double-counting volume.
     statsTransferInboxes: firstList(f.stats_transfer_inboxes, env.STATS_TRANSFER_INBOXES),
+    // Lines that auto-forward every inbound call elsewhere. Quo writes a second
+    // record on the forwarding line, so counting it double-counts the call —
+    // ignore inbound on these lines (outbound still counts).
+    statsIgnoreIncomingInboxes: firstList(f.stats_ignore_incoming_inboxes, env.STATS_IGNORE_INCOMING_INBOXES, 'RJL Outbound'),
     statsIncludeUsers: firstList(
       f.stats_include_users,
       env.STATS_INCLUDE_USERS,

@@ -85,6 +85,7 @@ ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_exclude_inboxes text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_include_users text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_missed_goal text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_transfer_inboxes text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_ignore_incoming_inboxes text;
 CREATE TABLE IF NOT EXISTS review_requests (
   id uuid PRIMARY KEY,
   token text UNIQUE NOT NULL,
@@ -200,7 +201,7 @@ const FIRM_UPSERT_COLUMNS = [
   'case_roster_case_col', 'case_roster_attorney_col', 'case_roster_paralegal_col',
   'active',
   'stats_email_to', 'stats_exclude_inboxes', 'stats_include_users', 'stats_missed_goal',
-  'stats_transfer_inboxes',
+  'stats_transfer_inboxes', 'stats_ignore_incoming_inboxes',
 ];
 
 async function upsertFirm(f) {

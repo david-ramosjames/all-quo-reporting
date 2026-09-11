@@ -46,6 +46,8 @@ const FIRM_FIELDS = [
     help: 'Comma-separated Quo line names dropped from the report completely — must match the line name exactly. Blank = default (RJL Transfers, Extra Number, SA Law Firm, Trucking Chicas), which mirrors the Quo dashboard inbox filter.' },
   { key: 'stats_transfer_inboxes', label: 'Call stats — transfer lines', type: 'text', group: 'Yesterday Call Stats',
     help: 'Optional. Lines listed here count toward who ANSWERED but are left out of incoming call volume (no double-counting a transferred call). Blank by default — to credit staff for transferred calls, put RJL Transfers here AND remove it from the exclude list above.' },
+  { key: 'stats_ignore_incoming_inboxes', label: 'Call stats — ignore INCOMING on these lines', type: 'text', group: 'Yesterday Call Stats',
+    help: 'Lines that auto-forward every inbound call to another line. Quo logs a second record on the forwarding line, so counting it double-counts the call. Outbound on these lines still counts. Blank = default (RJL Outbound).' },
   { key: 'stats_include_users', label: 'Call stats — users in the per-user table', type: 'text', group: 'Yesterday Call Stats',
     help: 'Comma-separated names exactly as they appear in Quo. Blank = default set (the 5 legal assistants + Intake).' },
   { key: 'stats_missed_goal', label: 'Call stats — Missed Calls daily goal', type: 'text', group: 'Yesterday Call Stats',

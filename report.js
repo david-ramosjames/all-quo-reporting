@@ -4233,7 +4233,15 @@ function pctChangeLabel(cur, prev) {
 }
 
 /** Aggregate raw call/message records into outcome + per-user tallies. */
-function aggregateCallStats({ calls, messages, volumeExcludeLines }) {
+function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomingLines }) {
+  // Lines that auto-forward every inbound call: Quo writes a duplicate record on
+  // the forwarding line, so its inbound copies are dropped outright (the call is
+  // already counted on the line that actually took it). Outbound is unaffected.
+  const ignoreIn = new Set(
+    (ignoreIncomingLines || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean)
+  );
+  const isIgnoredInbound = (c) =>
+    isIncomingDirection(c.direction) && ignoreIn.has(String(c.lineName || '').trim().toLowerCase());
   // Transfer lines are excluded from INCOMING VOLUME (a transferred call already
   // counted once on the line it arrived on, so counting the transfer leg would
   // double-count it) but still count for PER-USER attribution — the person who
@@ -4247,6 +4255,7 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines }) {
   let totalIncoming = 0;
   for (const c of calls) {
     if (!isIncomingDirection(c.direction)) continue;
+    if (isIgnoredInbound(c)) continue;
     if (isVolumeExcluded(c)) continue;
     totalIncoming += 1;
     const b = callOutcomeBucket(c);
@@ -4261,6 +4270,7 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines }) {
     return perUser.get(id);
   };
   for (const c of calls) {
+    if (isIgnoredInbound(c)) continue;
     const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
     const inbound = isIncomingDirection(c.direction);
     // Attribute by the direction-specific actor: who ANSWERED an inbound call vs
@@ -4417,8 +4427,10 @@ async function runDailyCallStatsReport() {
   console.log(`  ${prevData.calls.length} call(s), ${prevData.messages.length} message(s).`);
 
   const transferLines = firmCtx().statsTransferInboxes;
-  const curAgg = aggregateCallStats({ ...curData, volumeExcludeLines: transferLines });
-  const prevAgg = aggregateCallStats({ ...prevData, volumeExcludeLines: transferLines });
+  const ignoreIncomingLines = firmCtx().statsIgnoreIncomingInboxes;
+  const curAgg = aggregateCallStats({ ...curData, volumeExcludeLines: transferLines, ignoreIncomingLines });
+  const prevAgg = aggregateCallStats({ ...prevData, volumeExcludeLines: transferLines, ignoreIncomingLines });
+  console.log(`  Ignoring inbound (auto-forward duplicates) on: ${ignoreIncomingLines.join(', ') || 'none'}`);
   console.log(`  Answered calls by line: ${Object.entries(curAgg.answeredByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`);
   console.log(`  (transfer lines counted for per-user answered, excluded from incoming volume: ${transferLines.join(', ') || 'none'})`);
 
