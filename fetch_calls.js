@@ -728,24 +728,46 @@ async function fetchDailyCallStats(options = {}) {
 
   const calls = [];
   const messages = [];
+  const seenCallIds = new Set();
+  const inboundByLine = {};
+  const outboundByLine = {};
+  let skippedNoParticipant = 0;
   for (const conv of conversations) {
     const lineName = lineMap[conv.phoneNumberId] || '';
     const ownNumber = numberMap[conv.phoneNumberId] || '';
-    const participant = (conv.participants || []).find((p) => p !== ownNumber);
-    if (!participant) continue;
+    // Query EVERY external participant, not just the first: a conversation with
+    // more than one counterparty would otherwise have the rest of its calls
+    // silently dropped. Results are de-duped by call id.
+    const all = (conv.participants || []).filter(Boolean);
+    let participants = all.filter((p) => p !== ownNumber);
+    if (!participants.length) participants = all; // own-number-only thread
+    if (!participants.length) {
+      skippedNoParticipant += 1;
+      continue;
+    }
 
     let convCalls = [];
-    try {
-      convCalls = await fetchCallsForConversation(client, conv.phoneNumberId, participant, cfg);
-    } catch { /* skip this conversation's calls */ }
-    await sleep(REQUEST_DELAY_MS);
+    for (const participant of participants) {
+      try {
+        const got = await fetchCallsForConversation(client, conv.phoneNumberId, participant, cfg);
+        convCalls.push(...got);
+      } catch { /* skip this participant's calls */ }
+      await sleep(REQUEST_DELAY_MS);
+    }
     for (const c of convCalls) {
+      if (c.id && seenCallIds.has(c.id)) continue;
+      if (c.id) seenCallIds.add(c.id);
       const ts = c.createdAt || c.answeredAt || '';
       if (!inWindow(ts)) continue;
       const inbound = /^(incoming|inbound)$/i.test(c.direction || '');
       const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
       const answeredBy = idOf(c.answeredBy);
       const initiatedBy = idOf(c.initiatedBy);
+      if (inbound) {
+        inboundByLine[lineName] = (inboundByLine[lineName] || 0) + 1;
+      } else {
+        outboundByLine[lineName] = (outboundByLine[lineName] || 0) + 1;
+      }
       if (inbound && completed) {
         inCompleted += 1;
         if (answeredBy) inWithAnsweredBy += 1;
@@ -775,11 +797,17 @@ async function fetchDailyCallStats(options = {}) {
     }
 
     let convMsgs = [];
-    try {
-      convMsgs = await fetchMessagesForConversation(client, conv.phoneNumberId, participant, cfg);
-    } catch { /* skip this conversation's messages */ }
-    await sleep(REQUEST_DELAY_MS);
+    for (const participant of participants) {
+      try {
+        const got = await fetchMessagesForConversation(client, conv.phoneNumberId, participant, cfg);
+        convMsgs.push(...got);
+      } catch { /* skip this participant's messages */ }
+      await sleep(REQUEST_DELAY_MS);
+    }
+    const seenMsgIds = new Set();
     for (const m of convMsgs) {
+      if (m.id && seenMsgIds.has(m.id)) continue;
+      if (m.id) seenMsgIds.add(m.id);
       const ts = m.createdAt || '';
       if (!inWindow(ts)) continue;
       messages.push({
@@ -795,6 +823,10 @@ async function fetchDailyCallStats(options = {}) {
   // Attribution diagnostics — if inbound-completed calls rarely carry a user id,
   // the answerer lives in a field we're not reading; the key list reveals it.
   console.log(`  [stats] inbound-completed: ${inCompleted} (answeredBy set: ${inWithAnsweredBy}) · outbound: ${outCount} (initiatedBy set: ${outWithInitiatedBy})`);
+  const fmt = (o) => Object.entries(o).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none';
+  console.log(`  [stats] INBOUND by line:  ${fmt(inboundByLine)}`);
+  console.log(`  [stats] OUTBOUND by line: ${fmt(outboundByLine)}`);
+  console.log(`  [stats] conversations: ${conversations.length} (skipped, no participant: ${skippedNoParticipant})`);
   if (rawSamples.length) {
     console.log(`  [stats] inbound call object fields: ${Object.keys(rawSamples[0]).join(', ')}`);
   }
