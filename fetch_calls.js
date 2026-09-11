@@ -176,11 +176,39 @@ function conversationCounterparties(participants, ownNumber) {
   return others.length ? [...new Set(others)] : [];
 }
 
+function isE164(value) {
+  return /^\+[1-9]\d{1,14}$/.test(String(value || '').trim());
+}
+
+function assigneeUserId(value) {
+  const id = typeof value === 'object' && value ? value.id || value.userId : value;
+  return typeof id === 'string' && /^US/i.test(id) ? id : null;
+}
+
 // ── API functions ─────────────────────────────────────────────────────────────
 
 async function listPhoneNumbers(client) {
   const res = await client.get('/v1/phone-numbers');
   return res.data.data || [];
+}
+
+async function listAllUsers(client) {
+  const users = [];
+  let pageToken = null;
+  do {
+    const params = { maxResults: 50 };
+    if (pageToken) params.pageToken = pageToken;
+    const res = await client.get('/v1/users', { params });
+    users.push(...(res.data.data || []));
+    pageToken = res.data.nextPageToken || null;
+    if (pageToken) await sleep(REQUEST_DELAY_MS);
+  } while (pageToken);
+  return users;
+}
+
+async function fetchCallById(client, callId) {
+  const res = await client.get(`/v1/calls/${encodeURIComponent(callId)}`);
+  return res.data.data || null;
 }
 
 function matchesFilter(pn, filters) {
@@ -278,8 +306,11 @@ async function fetchCallsForConversation(client, phoneNumberId, participant, cfg
       participants: [participant],
       maxResults: cfg.maxResults,
     };
-    if (cfg.createdAfter)  params.createdAfter  = cfg.createdAfter;
-    if (cfg.createdBefore) params.createdBefore = cfg.createdBefore;
+    if (cfg.userId) params.userId = cfg.userId;
+    if (!cfg.omitApiDateFilter) {
+      if (cfg.createdAfter)  params.createdAfter  = cfg.createdAfter;
+      if (cfg.createdBefore) params.createdBefore = cfg.createdBefore;
+    }
     if (pageToken)         params.pageToken     = pageToken;
 
     const res = await client.get('/v1/calls', { params });
@@ -733,14 +764,20 @@ async function fetchDailyCallStats(options = {}) {
 
   const allLines = await listPhoneNumbers(client);
 
-  // userId → display name, from every line's assigned users.
+  // userId → display name, from every line's assigned users, then /v1/users.
   const userMap = {};
+  const rememberUser = (u) => {
+    if (!u || !u.id) return;
+    userMap[u.id] =
+      [u.firstName, u.lastName].filter(Boolean).join(' ') || u.name || u.email || u.id;
+  };
   for (const pn of allLines) {
-    for (const u of pn.users || []) {
-      if (!u || !u.id) continue;
-      userMap[u.id] =
-        [u.firstName, u.lastName].filter(Boolean).join(' ') || u.name || u.email || u.id;
-    }
+    for (const u of pn.users || []) rememberUser(u);
+  }
+  try {
+    for (const u of await listAllUsers(client)) rememberUser(u);
+  } catch (err) {
+    console.warn(`  [stats] could not list workspace users: ${err.response?.data?.message || err.message}`);
   }
 
   const isExcluded = (pn) => excludeNames.includes(String(pn.name || '').trim().toLowerCase());
@@ -760,8 +797,12 @@ async function fetchDailyCallStats(options = {}) {
 
   const calls = [];
   const messages = [];
-  const seenCallIds = new Set();
+  // Quo writes a separate export row per line for forwards/transfers (Outbound
+  // tap + Main Line answer, or Leads + Intake). Those legs can share one call
+  // id, so dedupe by id+line — not id alone.
+  const seenCallKeys = new Set();
   const seenMsgIds = new Set();
+  const callKey = (id, phoneNumberId) => `${id || ''}::${phoneNumberId || ''}`;
   const inboundByLine = {};
   const outboundByLine = {};
   const inboundPartiesByLine = {};
@@ -784,17 +825,19 @@ async function fetchDailyCallStats(options = {}) {
   const addCall = (c, phoneNumberId) => {
     const ts = c.createdAt || c.answeredAt || '';
     if (!inWindow(ts)) return;
-    if (c.id && seenCallIds.has(c.id)) return;
-    if (c.id) seenCallIds.add(c.id);
-    const lineName = lineMap[phoneNumberId] || '';
+    const pnId = c.phoneNumberId || phoneNumberId;
+    const key = callKey(c.id, pnId);
+    if (c.id && seenCallKeys.has(key)) return;
+    if (c.id) seenCallKeys.add(key);
+    const lineName = lineMap[pnId] || '';
     const inbound = /^(incoming|inbound)$/i.test(c.direction || '');
     const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
     const answeredBy = idOf(c.answeredBy);
     const initiatedBy = idOf(c.initiatedBy);
+    const parts = Array.isArray(c.participants) ? c.participants : [];
     if (inbound) {
       inboundByLine[lineName] = (inboundByLine[lineName] || 0) + 1;
-      const own = numberMap[phoneNumberId] || '';
-      const parts = Array.isArray(c.participants) ? c.participants : [];
+      const own = numberMap[pnId] || '';
       const other = parts.find((p) => !samePhone(p, own)) || parts[0] || '(unknown)';
       (inboundPartiesByLine[lineName] ||= new Set()).add(other);
     } else {
@@ -810,8 +853,9 @@ async function fetchDailyCallStats(options = {}) {
     }
     calls.push({
       id: c.id,
-      phoneNumberId,
+      phoneNumberId: pnId,
       lineName,
+      participants: parts,
       // Direction-specific actors: answeredBy = who picked up an inbound call,
       // initiatedBy = who placed an outbound one. `userId` is the line/route
       // owner and must NOT be used to attribute who handled the call.
@@ -868,14 +912,32 @@ async function fetchDailyCallStats(options = {}) {
       ` · ${Object.entries(convByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`
     );
 
+    const isWorkspaceNumber = (phone) =>
+      Object.values(numberMap).some((n) => samePhone(n, phone));
+    const resolveLineId = (ref) => {
+      if (!ref) return null;
+      if (includedIds.has(ref) || lineMap[ref]) return ref;
+      const hit = allLines.find(
+        (pn) => pn.id === ref || samePhone(pn.number, ref) || samePhone(pn.formattedNumber, ref)
+      );
+      return hit?.id || null;
+    };
+
+    const ingestCalls = (list) => {
+      for (const c of list || []) {
+        const pnId = c.phoneNumberId;
+        if (pnId && includedIds.has(pnId)) addCall(c, pnId);
+      }
+    };
+
     const pairs = [];
     const pairKey = new Set();
-    const addPair = (phoneNumberId, participant) => {
+    const addPair = (phoneNumberId, participant, userId) => {
       if (!phoneNumberId || !participant) return;
-      const key = `${phoneNumberId}|${participant}`;
+      const key = `${phoneNumberId}|${participant}|${userId || ''}`;
       if (pairKey.has(key)) return;
       pairKey.add(key);
-      pairs.push({ phoneNumberId, participant });
+      pairs.push({ phoneNumberId, participant, userId: userId || null });
     };
 
     for (const conv of conversations) {
@@ -885,25 +947,28 @@ async function fetchDailyCallStats(options = {}) {
         skippedNoParticipant += 1;
         continue;
       }
-      for (const p of others) addPair(conv.phoneNumberId, p);
+      const assignee = assigneeUserId(conv.assignedTo);
+      for (const p of others) {
+        addPair(conv.phoneNumberId, p, null);
+        if (assignee) addPair(conv.phoneNumberId, p, assignee);
+      }
     }
 
     console.log(`  [stats] querying ${pairs.length} conversation pair(s)...`);
     let pairErrors = 0;
     let pairIdx = 0;
-    for (const { phoneNumberId, participant } of pairs) {
+    for (const { phoneNumberId, participant, userId } of pairs) {
       pairIdx += 1;
       if (pairIdx % 25 === 0 || pairIdx === pairs.length) {
         console.log(`  [stats] pairs ${pairIdx}/${pairs.length}...`);
       }
+      const pairCfg = userId ? { ...cfg, userId } : cfg;
       try {
         const [callList, msgList] = await Promise.all([
-          fetchCallsForConversation(client, phoneNumberId, participant, cfg),
+          fetchCallsForConversation(client, phoneNumberId, participant, pairCfg),
           fetchMessagesForConversation(client, phoneNumberId, participant, cfg),
         ]);
-        for (const c of callList) {
-          if (includedIds.has(c.phoneNumberId)) addCall(c, c.phoneNumberId);
-        }
+        ingestCalls(callList);
         for (const m of msgList) {
           if (includedIds.has(m.phoneNumberId)) addMessage(m, m.phoneNumberId);
         }
@@ -915,9 +980,30 @@ async function fetchDailyCallStats(options = {}) {
       await sleep(REQUEST_DELAY_MS);
     }
 
+    // Conversation.lastActivityId is a call id (AC…) — GET it directly so a
+    // transfer/forward leg that list-calls hid under the workspace-owner scope
+    // still lands.
+    let activityAdded = 0;
+    for (const conv of conversations) {
+      const aid = conv.lastActivityId;
+      if (!aid || !/^AC/i.test(String(aid))) continue;
+      if (conv.lastActivityAt && Date.parse(conv.lastActivityAt) < afterMs) continue;
+      if (seenCallKeys.has(callKey(aid, conv.phoneNumberId))) continue;
+      try {
+        const c = await fetchCallById(client, aid);
+        const before = calls.length;
+        if (c) ingestCalls([c]);
+        if (calls.length > before) activityAdded += 1;
+      } catch {
+        /* last activity may be a message that shares the AC prefix, or 404 */
+      }
+      await sleep(REQUEST_DELAY_MS);
+    }
+    if (activityAdded) console.log(`  [stats] lastActivityId lookup added ${activityAdded} call(s)`);
+
     // Auto-forwards (RJL Outbound → RJL Main Line) often store the other line
     // as the participant, not the original caller. Query each included line
-    // against every workspace number so those legs are not missed. Deduped by id.
+    // against every workspace number so those legs are not missed.
     const beforeSweep = calls.length;
     const lineNumbers = allLines
       .map((pn) => ({ id: pn.id, name: pn.name || '', number: pn.number || pn.formattedNumber || '' }))
@@ -930,10 +1016,7 @@ async function fetchDailyCallStats(options = {}) {
         if (src.id === dest.id) continue;
         if (samePhone(src.number, numberMap[dest.id])) continue;
         try {
-          const routed = await fetchCallsForConversation(client, dest.id, src.number, cfg);
-          for (const c of routed) {
-            if (includedIds.has(c.phoneNumberId)) addCall(c, c.phoneNumberId);
-          }
+          ingestCalls(await fetchCallsForConversation(client, dest.id, src.number, cfg));
         } catch (err) {
           console.warn(
             `  [stats] sweep failed ${dest.name || dest.id} × ${src.number}: ${err.response?.data?.message || err.message}`
@@ -944,6 +1027,56 @@ async function fetchDailyCallStats(options = {}) {
     }
     const swept = calls.length - beforeSweep;
     if (swept) console.log(`  [stats] line sweep added ${swept} routed call(s)`);
+
+    // Follow forwardedFrom / forwardedTo onto the other line with the original
+    // caller (and without the API date filter — forwarded createdAt can sit
+    // outside the tap's window).
+    const beforeFollow = calls.length;
+    const followCfg = { ...cfg, omitApiDateFilter: true };
+    const followPairs = new Set();
+    const queueFollow = (phoneNumberId, participant) => {
+      if (!phoneNumberId || !participant || !includedIds.has(phoneNumberId)) return;
+      const key = `${phoneNumberId}|${participant}`;
+      if (followPairs.has(key)) return;
+      followPairs.add(key);
+    };
+    for (const c of [...calls]) {
+      const forwarded = /forward/i.test(String(c.status || '')) || c.forwardedTo || c.forwardedFrom;
+      if (!forwarded) continue;
+      const destId = resolveLineId(c.forwardedTo);
+      const srcId = resolveLineId(c.forwardedFrom);
+      const own = numberMap[c.phoneNumberId] || '';
+      const externals = [
+        ...conversationCounterparties(c.participants, own).filter((p) => !isWorkspaceNumber(p)),
+        isE164(c.forwardedFrom) && !isWorkspaceNumber(c.forwardedFrom) ? c.forwardedFrom : null,
+        isE164(c.forwardedTo) && !isWorkspaceNumber(c.forwardedTo) ? c.forwardedTo : null,
+      ].filter(Boolean);
+      console.log(
+        `  [stats] FORWARD ${c.lineName} ${c.status || ''} from=${c.forwardedFrom || '—'} to=${c.forwardedTo || '—'} parts=${(c.participants || []).join(',')}`
+      );
+      for (const p of externals) {
+        if (destId) queueFollow(destId, p);
+        if (srcId) queueFollow(srcId, p);
+        for (const line of includedLines) queueFollow(line.id, p);
+      }
+      if (destId) {
+        for (const p of conversationCounterparties(c.participants, own)) queueFollow(destId, p);
+      }
+    }
+    if (followPairs.size) {
+      console.log(`  [stats] following ${followPairs.size} forwarded pair(s)...`);
+      for (const key of followPairs) {
+        const [phoneNumberId, participant] = key.split('|');
+        try {
+          ingestCalls(await fetchCallsForConversation(client, phoneNumberId, participant, followCfg));
+        } catch (err) {
+          console.warn(`  [stats] follow failed ${lineMap[phoneNumberId] || phoneNumberId} × ${participant}: ${err.response?.data?.message || err.message}`);
+        }
+        await sleep(REQUEST_DELAY_MS);
+      }
+    }
+    const followed = calls.length - beforeFollow;
+    if (followed) console.log(`  [stats] forward follow-up added ${followed} call(s)`);
     if (pairErrors) console.warn(`  [stats] ${pairErrors} conversation pair(s) failed after retries`);
 
     console.log(`  [stats] conversations listed on included lines: ${conversations.length} (skipped, no participant: ${skippedNoParticipant})`);
@@ -951,7 +1084,9 @@ async function fetchDailyCallStats(options = {}) {
 
   // Attribution diagnostics — if inbound-completed calls rarely carry a user id,
   // the answerer lives in a field we're not reading; the key list reveals it.
+  const uniqueCallIds = new Set(calls.map((c) => c.id).filter(Boolean)).size;
   console.log(`  [stats] inbound-completed: ${inCompleted} (answeredBy set: ${inWithAnsweredBy}) · outbound: ${outCount} (initiatedBy set: ${outWithInitiatedBy})`);
+  console.log(`  [stats] ${calls.length} line-record(s) / ${uniqueCallIds} unique call id(s)`);
   const fmt = (o) => Object.entries(o).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none';
   console.log(`  [stats] INBOUND by line:  ${fmt(inboundByLine)}`);
   console.log(`  [stats] INBOUND distinct callers by line: ${Object.entries(inboundPartiesByLine).map(([l, s2]) => `${l}=${s2.size}`).join(' · ') || 'none'}`);
