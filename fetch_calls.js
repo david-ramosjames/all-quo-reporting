@@ -694,7 +694,16 @@ async function fetchDailyCallStats(options = {}) {
   const numberMap = Object.fromEntries(allLines.map((pn) => [pn.id, pn.number || pn.formattedNumber || '']));
   const phoneNumberIds = includedLines.map((pn) => pn.id);
 
-  const conversations = await fetchAllConversations(client, phoneNumberIds, cfg);
+  // List conversations active from the window start ONWARD, with no upper bound.
+  // A thread touched AFTER the window still contains that window's calls, so
+  // capping updatedBefore at the window end silently drops them — badly for an
+  // older window (every thread touched since is lost). Individual calls and
+  // messages are still filtered to the exact window below and by the
+  // createdAfter/createdBefore params on /v1/calls and /v1/messages.
+  const conversations = await fetchAllConversations(client, phoneNumberIds, {
+    ...cfg,
+    createdBefore: undefined,
+  });
 
   const afterMs = cfg.createdAfter ? Date.parse(cfg.createdAfter) : -Infinity;
   const beforeMs = cfg.createdBefore ? Date.parse(cfg.createdBefore) : Infinity;
