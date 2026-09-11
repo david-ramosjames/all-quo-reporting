@@ -791,10 +791,26 @@ async function fetchDailyCallStats(options = {}) {
     // reached through conversations. List them from the window start onward
     // (no upper bound — a thread touched after the window still holds that
     // window's calls) and query every participant of each.
-    const conversations = await fetchAllConversations(client, phoneNumberIds, {
+    // List conversations across ALL lines (no phoneNumbers filter) and filter by
+    // line ourselves. The server-side filter was dropping threads that had calls
+    // in the window — e.g. every inbound thread on the Intake line — which
+    // silently undercounted the report. Listing is cheap; the per-conversation
+    // call fetches are the expensive part and those are still line-scoped.
+    const allConversations = await fetchAllConversations(client, null, {
       ...cfg,
       createdBefore: undefined,
     });
+    const includedIds = new Set(phoneNumberIds);
+    const conversations = allConversations.filter((c) => includedIds.has(c.phoneNumberId));
+    const convByLine = {};
+    for (const c of conversations) {
+      const ln = lineMap[c.phoneNumberId] || '(unknown)';
+      convByLine[ln] = (convByLine[ln] || 0) + 1;
+    }
+    console.log(
+      `  [stats] conversations listed: ${allConversations.length} (all lines) -> ${conversations.length} on included lines` +
+      ` · ${Object.entries(convByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`
+    );
     for (const conv of conversations) {
       const ownNumber = numberMap[conv.phoneNumberId] || '';
       const all = (conv.participants || []).filter(Boolean);
