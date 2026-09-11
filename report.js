@@ -4376,15 +4376,22 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
  * the same weekday one week ago. Sends to the admin-configured recipients.
  */
 async function runDailyCallStatsReport() {
-  const cur = getYesterdayRange();
-  const prevStart = DateTime.fromISO(cur.createdAfter).minus({ days: 7 });
-  const prevEnd = DateTime.fromISO(cur.createdBefore).minus({ days: 7 });
+  // Whole calendar day, midnight-to-midnight in TIMEZONE (Central) — no
+  // time-of-day cutoff, regardless of when the job runs. Both windows are
+  // derived in the local zone so a DST change can't shift them by an hour.
+  const dayStart = DateTime.now().setZone(TIMEZONE).startOf('day').minus({ days: 1 });
+  const dayEnd = dayStart.plus({ days: 1 });
+  const prevStart = dayStart.minus({ days: 7 }); // same weekday, also a full day
+  const prevEnd = prevStart.plus({ days: 1 });
+  const cur = { createdAfter: dayStart.toUTC().toISO(), createdBefore: dayEnd.toUTC().toISO() };
   const prev = { createdAfter: prevStart.toUTC().toISO(), createdBefore: prevEnd.toUTC().toISO() };
-  const dayLabel = DateTime.fromISO(cur.createdAfter).setZone(TIMEZONE).toFormat('cccc, LLL d, yyyy');
+  const dayLabel = dayStart.toFormat('cccc, LLL d, yyyy');
 
   console.log(`\n${'═'.repeat(52)}`);
   console.log('  Yesterday Call Stats');
   console.log(`  Day: ${dayLabel} (vs same weekday last week)`);
+  console.log(`  Window:  ${dayStart.toFormat('LLL d, h:mm a')} – ${dayEnd.toFormat('LLL d, h:mm a')} ${TIMEZONE} (full day)`);
+  console.log(`  Compare: ${prevStart.toFormat('ccc, LLL d, h:mm a')} – ${prevEnd.toFormat('LLL d, h:mm a')} ${TIMEZONE} (full day)`);
   console.log('═'.repeat(52));
 
   const excludeLineNames = firmCtx().statsExcludeInboxes;
