@@ -211,6 +211,45 @@ async function fetchAllConversations(client, phoneNumberIds, cfg) {
   return conversations;
 }
 
+/**
+ * All calls on a line in the window, WITHOUT enumerating conversations.
+ * Walking conversations→calls silently loses calls whose conversation isn't
+ * returned by the listing, so this is the preferred path; callers fall back to
+ * the conversation walk if OpenPhone rejects a participants-less query.
+ */
+async function fetchCallsForLine(client, phoneNumberId, cfg) {
+  const calls = [];
+  let pageToken = null;
+  do {
+    const params = { phoneNumberId, maxResults: cfg.maxResults };
+    if (cfg.createdAfter) params.createdAfter = cfg.createdAfter;
+    if (cfg.createdBefore) params.createdBefore = cfg.createdBefore;
+    if (pageToken) params.pageToken = pageToken;
+    const res = await client.get('/v1/calls', { params });
+    calls.push(...(res.data.data || []));
+    pageToken = res.data.nextPageToken || null;
+    if (pageToken) await sleep(REQUEST_DELAY_MS);
+  } while (pageToken);
+  return calls;
+}
+
+/** All messages on a line in the window (same rationale as fetchCallsForLine). */
+async function fetchMessagesForLine(client, phoneNumberId, cfg) {
+  const messages = [];
+  let pageToken = null;
+  do {
+    const params = { phoneNumberId, maxResults: cfg.maxResults };
+    if (cfg.createdAfter) params.createdAfter = cfg.createdAfter;
+    if (cfg.createdBefore) params.createdBefore = cfg.createdBefore;
+    if (pageToken) params.pageToken = pageToken;
+    const res = await client.get('/v1/messages', { params });
+    messages.push(...(res.data.data || []));
+    pageToken = res.data.nextPageToken || null;
+    if (pageToken) await sleep(REQUEST_DELAY_MS);
+  } while (pageToken);
+  return messages;
+}
+
 async function fetchCallsForConversation(client, phoneNumberId, participant, cfg) {
   const calls = [];
   let pageToken = null;
@@ -694,23 +733,13 @@ async function fetchDailyCallStats(options = {}) {
   const numberMap = Object.fromEntries(allLines.map((pn) => [pn.id, pn.number || pn.formattedNumber || '']));
   const phoneNumberIds = includedLines.map((pn) => pn.id);
 
-  // List conversations active from the window start ONWARD, with no upper bound.
-  // A thread touched AFTER the window still contains that window's calls, so
-  // capping updatedBefore at the window end silently drops them — badly for an
-  // older window (every thread touched since is lost). Individual calls and
-  // messages are still filtered to the exact window below and by the
-  // createdAfter/createdBefore params on /v1/calls and /v1/messages.
-  const conversations = await fetchAllConversations(client, phoneNumberIds, {
-    ...cfg,
-    createdBefore: undefined,
-  });
-
-  const afterMs = cfg.createdAfter ? Date.parse(cfg.createdAfter) : -Infinity;
-  const beforeMs = cfg.createdBefore ? Date.parse(cfg.createdBefore) : Infinity;
-  const inWindow = (ts) => {
-    const t = Date.parse(ts);
-    return Number.isFinite(t) && t >= afterMs && t < beforeMs;
-  };
+  const calls = [];
+  const messages = [];
+  const seenCallIds = new Set();
+  const seenMsgIds = new Set();
+  const inboundByLine = {};
+  const outboundByLine = {};
+  let skippedNoParticipant = 0;
 
   // Diagnostics for calibrating per-user attribution (esp. inbound "answered").
   const dbg = /^(1|true|yes)$/i.test(String(process.env.STATS_DEBUG_RAW || ''));
@@ -726,98 +755,116 @@ async function fetchDailyCallStats(options = {}) {
     return String(v);
   };
 
-  const calls = [];
-  const messages = [];
-  const seenCallIds = new Set();
-  const inboundByLine = {};
-  const outboundByLine = {};
-  let skippedNoParticipant = 0;
-  for (const conv of conversations) {
-    const lineName = lineMap[conv.phoneNumberId] || '';
-    const ownNumber = numberMap[conv.phoneNumberId] || '';
-    // Query EVERY external participant, not just the first: a conversation with
-    // more than one counterparty would otherwise have the rest of its calls
-    // silently dropped. Results are de-duped by call id.
-    const all = (conv.participants || []).filter(Boolean);
-    let participants = all.filter((p) => p !== ownNumber);
-    if (!participants.length) participants = all; // own-number-only thread
-    if (!participants.length) {
-      skippedNoParticipant += 1;
-      continue;
+  const addCall = (c, phoneNumberId) => {
+    const ts = c.createdAt || c.answeredAt || '';
+    if (!inWindow(ts)) return;
+    if (c.id && seenCallIds.has(c.id)) return;
+    if (c.id) seenCallIds.add(c.id);
+    const lineName = lineMap[phoneNumberId] || '';
+    const inbound = /^(incoming|inbound)$/i.test(c.direction || '');
+    const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
+    const answeredBy = idOf(c.answeredBy);
+    const initiatedBy = idOf(c.initiatedBy);
+    if (inbound) inboundByLine[lineName] = (inboundByLine[lineName] || 0) + 1;
+    else outboundByLine[lineName] = (outboundByLine[lineName] || 0) + 1;
+    if (inbound && completed) {
+      inCompleted += 1;
+      if (answeredBy) inWithAnsweredBy += 1;
+      if (rawSamples.length < 4) rawSamples.push(c);
+    } else if (!inbound) {
+      outCount += 1;
+      if (initiatedBy) outWithInitiatedBy += 1;
     }
+    calls.push({
+      id: c.id,
+      phoneNumberId,
+      lineName,
+      // Direction-specific actors: answeredBy = who picked up an inbound call,
+      // initiatedBy = who placed an outbound one. `userId` is the line/route
+      // owner and must NOT be used to attribute who handled the call.
+      answeredBy,
+      initiatedBy,
+      userId: idOf(c.userId),
+      direction: c.direction || '',
+      status: c.status || '',
+      aiHandled: c.aiHandled || null,
+      duration: Number(c.duration || 0),
+      createdAt: ts,
+      answeredAt: c.answeredAt || null,
+      forwardedFrom: c.forwardedFrom || null,
+      forwardedTo: c.forwardedTo || null,
+    });
+  };
 
-    let convCalls = [];
-    for (const participant of participants) {
-      try {
-        const got = await fetchCallsForConversation(client, conv.phoneNumberId, participant, cfg);
-        convCalls.push(...got);
-      } catch { /* skip this participant's calls */ }
+  const addMessage = (m, phoneNumberId) => {
+    const ts = m.createdAt || '';
+    if (!inWindow(ts)) return;
+    if (m.id && seenMsgIds.has(m.id)) return;
+    if (m.id) seenMsgIds.add(m.id);
+    messages.push({
+      phoneNumberId,
+      lineName: lineMap[phoneNumberId] || '',
+      userId: idOf(m.userId) || idOf(m.user?.id) || null,
+      direction: m.direction || '',
+      createdAt: ts,
+    });
+  };
+
+  // Preferred: pull every call/message per LINE directly. Enumerating
+  // conversations→calls loses any call whose conversation the listing doesn't
+  // return, which undercounted the report. Fall back to the conversation walk
+  // only if OpenPhone rejects a participants-less query.
+  let usedDirect = true;
+  try {
+    for (const pn of includedLines) {
+      for (const c of await fetchCallsForLine(client, pn.id, cfg)) addCall(c, pn.id);
+      await sleep(REQUEST_DELAY_MS);
+      for (const m of await fetchMessagesForLine(client, pn.id, cfg)) addMessage(m, pn.id);
       await sleep(REQUEST_DELAY_MS);
     }
-    for (const c of convCalls) {
-      if (c.id && seenCallIds.has(c.id)) continue;
-      if (c.id) seenCallIds.add(c.id);
-      const ts = c.createdAt || c.answeredAt || '';
-      if (!inWindow(ts)) continue;
-      const inbound = /^(incoming|inbound)$/i.test(c.direction || '');
-      const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
-      const answeredBy = idOf(c.answeredBy);
-      const initiatedBy = idOf(c.initiatedBy);
-      if (inbound) {
-        inboundByLine[lineName] = (inboundByLine[lineName] || 0) + 1;
-      } else {
-        outboundByLine[lineName] = (outboundByLine[lineName] || 0) + 1;
-      }
-      if (inbound && completed) {
-        inCompleted += 1;
-        if (answeredBy) inWithAnsweredBy += 1;
-        if (rawSamples.length < 4) rawSamples.push(c);
-      } else if (!inbound) {
-        outCount += 1;
-        if (initiatedBy) outWithInitiatedBy += 1;
-      }
-      calls.push({
-        id: c.id,
-        phoneNumberId: conv.phoneNumberId,
-        lineName,
-        // Direction-specific actors: answeredBy = who picked up an inbound call,
-        // initiatedBy = who placed an outbound one. `userId` is the line/route
-        // owner and must NOT be used to attribute who handled the call.
-        answeredBy,
-        initiatedBy,
-        userId: idOf(c.userId),
-        direction: c.direction || '',
-        status: c.status || '',
-        aiHandled: c.aiHandled || null,
-        duration: Number(c.duration || 0),
-        createdAt: ts,
-        answeredAt: c.answeredAt || null,
-        forwardedTo: c.forwardedTo || null,
-      });
-    }
+    console.log(`  [stats] fetched per line directly (no conversation walk).`);
+  } catch (err) {
+    usedDirect = false;
+    const why = err.response?.data?.message || err.message;
+    console.warn(`  [stats] per-line fetch unavailable (${why}) — falling back to the conversation walk.`);
+    calls.length = 0; messages.length = 0;
+    seenCallIds.clear(); seenMsgIds.clear();
+    for (const k of Object.keys(inboundByLine)) delete inboundByLine[k];
+    for (const k of Object.keys(outboundByLine)) delete outboundByLine[k];
+    inCompleted = 0; inWithAnsweredBy = 0; outCount = 0; outWithInitiatedBy = 0;
+    rawSamples.length = 0;
+  }
 
-    let convMsgs = [];
-    for (const participant of participants) {
-      try {
-        const got = await fetchMessagesForConversation(client, conv.phoneNumberId, participant, cfg);
-        convMsgs.push(...got);
-      } catch { /* skip this participant's messages */ }
-      await sleep(REQUEST_DELAY_MS);
+  if (!usedDirect) {
+    // Fallback: list conversations from the window start onward (no upper bound
+    // — a thread touched after the window still holds that window's calls) and
+    // query every participant of each.
+    const conversations = await fetchAllConversations(client, phoneNumberIds, {
+      ...cfg,
+      createdBefore: undefined,
+    });
+    for (const conv of conversations) {
+      const ownNumber = numberMap[conv.phoneNumberId] || '';
+      const all = (conv.participants || []).filter(Boolean);
+      let participants = all.filter((p) => p !== ownNumber);
+      if (!participants.length) participants = all;
+      if (!participants.length) { skippedNoParticipant += 1; continue; }
+      for (const participant of participants) {
+        try {
+          for (const c of await fetchCallsForConversation(client, conv.phoneNumberId, participant, cfg)) {
+            addCall(c, conv.phoneNumberId);
+          }
+        } catch { /* skip */ }
+        await sleep(REQUEST_DELAY_MS);
+        try {
+          for (const m of await fetchMessagesForConversation(client, conv.phoneNumberId, participant, cfg)) {
+            addMessage(m, conv.phoneNumberId);
+          }
+        } catch { /* skip */ }
+        await sleep(REQUEST_DELAY_MS);
+      }
     }
-    const seenMsgIds = new Set();
-    for (const m of convMsgs) {
-      if (m.id && seenMsgIds.has(m.id)) continue;
-      if (m.id) seenMsgIds.add(m.id);
-      const ts = m.createdAt || '';
-      if (!inWindow(ts)) continue;
-      messages.push({
-        phoneNumberId: conv.phoneNumberId,
-        lineName,
-        userId: m.userId || m.user?.id || null,
-        direction: m.direction || '',
-        createdAt: ts,
-      });
-    }
+    console.log(`  [stats] conversations walked: ${conversations.length} (skipped, no participant: ${skippedNoParticipant})`);
   }
 
   // Attribution diagnostics — if inbound-completed calls rarely carry a user id,

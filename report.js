@@ -4194,8 +4194,16 @@ function callOutcomeBucket(c) {
   const status = String(c.status || '').toLowerCase();
   const agent = Boolean(c.aiHandled);
   if (status.includes('voicemail')) return 'Voicemail';
-  if (status.includes('forward') || c.forwardedTo) return 'Forwarded';
-  if (status === 'completed' || status === 'answered') return agent ? 'Answered by agent' : 'Answered by user';
+  if (status.includes('forward')) return 'Forwarded';
+  if (status === 'completed' || status === 'answered') {
+    if (agent) return 'Answered by agent';
+    // A "completed" inbound call that nobody answered was forwarded off this
+    // line — Quo reports these as status=forwarded, but the API returns them as
+    // completed with no answeredBy (and duration 0). Without this they inflate
+    // "Answered by user".
+    if (!c.answeredBy) return 'Forwarded';
+    return 'Answered by user';
+  }
   if (status.includes('abandon')) return agent ? 'Agent abandoned' : 'Abandoned';
   if (status === 'no-answer' || status.includes('miss') || status === 'busy' || status === 'declined') {
     return agent ? 'Agent abandoned' : 'Missed';
@@ -4258,8 +4266,11 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines }) {
     // Attribute by the direction-specific actor: who ANSWERED an inbound call vs
     // who PLACED an outbound one. `userId` is the line/route owner, not the
     // person who handled the call, so it's only a last-resort fallback outbound.
+    // Agent (Sona) answers aren't a person's work — they're already in the
+    // Missed Calls KPI, and counting them would invent a phantom "user".
+    if (inbound && c.aiHandled) continue;
     const actorId = inbound ? c.answeredBy : (c.initiatedBy || c.userId);
-    if (!actorId) continue; // agent-handled / unattributed calls aren't per-user
+    if (!actorId) continue; // forwarded / unattributed calls aren't per-user
     if (!inbound) {
       const u = ensure(actorId);
       u.outgoing += 1;
