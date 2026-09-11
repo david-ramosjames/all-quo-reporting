@@ -12,6 +12,7 @@ const { renderAnalyticsPage } = require('./analyticsPage');
 const { parseFirmForm, renderFirmsListPage, renderFirmEditorPage } = require('./firmsPage');
 const quoSend = require('./quoSend');
 const slackEvents = require('./slackEvents');
+const quoWebhooks = require('./quoWebhooks');
 
 /**
  * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review' | 'language' | 'marketing' | 'callstats'} JobId
@@ -366,6 +367,14 @@ function startManualTriggerServer(opts) {
       if (req.method === 'GET' && path === '/health') {
         res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
         res.end('ok');
+        return;
+      }
+
+      // Quo call/message ledger — signature-verified, no session.
+      if (req.method === 'POST' && path === '/webhooks/quo') {
+        const raw = await readRawBody(req);
+        const result = await quoWebhooks.handleRawDelivery(raw, req.headers);
+        sendJson(res, result.status, result.body);
         return;
       }
 
@@ -947,7 +956,12 @@ function startManualTriggerServer(opts) {
       })`
     );
     console.log(`Review page: http://127.0.0.1:${port}/review  (public)`);
-    console.log(`Health check: http://127.0.0.1:${port}/health\n`);
+    console.log(`Health check: http://127.0.0.1:${port}/health`);
+    const hookUrl = quoWebhooks.publicWebhookUrl() || `http://127.0.0.1:${port}/webhooks/quo`;
+    console.log(`Quo webhook: ${hookUrl}\n`);
+    quoWebhooks.ensureRegistered(process.env.QUO_API_KEY).catch((err) => {
+      console.warn('[quo webhook] subscribe failed:', err.message);
+    });
   });
 
   return server;

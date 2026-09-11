@@ -133,6 +133,66 @@ ALTER TABLE review_requests ADD COLUMN IF NOT EXISTS review_destination text;
 CREATE INDEX IF NOT EXISTS idx_review_requests_token ON review_requests (token);
 CREATE INDEX IF NOT EXISTS idx_review_requests_slackts ON review_requests (slack_message_ts);
 CREATE INDEX IF NOT EXISTS idx_review_requests_opp ON review_requests (review_opportunity_id);
+
+-- Quo webhook ledger: one row per (call, line). Later events (answered /
+-- forwarded / completed) merge into the same row so Yesterday Call Stats can
+-- read a complete day without paging /v1/calls.
+CREATE TABLE IF NOT EXISTS quo_calls (
+  call_id text NOT NULL,
+  phone_number_id text NOT NULL DEFAULT '',
+  firm_id text,
+  org_id text,
+  conversation_id text,
+  direction text,
+  status text,
+  user_id text,
+  answered_by text,
+  initiated_by text,
+  duration_sec integer,
+  created_at timestamptz,
+  answered_at timestamptz,
+  completed_at timestamptz,
+  forwarded_from text,
+  forwarded_to text,
+  ai_handled boolean DEFAULT false,
+  has_voicemail boolean DEFAULT false,
+  participants jsonb,
+  line_name text,
+  last_event_type text,
+  payload_json jsonb,
+  updated_at timestamptz DEFAULT now(),
+  PRIMARY KEY (call_id, phone_number_id)
+);
+CREATE INDEX IF NOT EXISTS idx_quo_calls_created ON quo_calls (created_at);
+CREATE INDEX IF NOT EXISTS idx_quo_calls_phone_created ON quo_calls (phone_number_id, created_at);
+
+CREATE TABLE IF NOT EXISTS quo_messages (
+  message_id text PRIMARY KEY,
+  phone_number_id text,
+  firm_id text,
+  direction text,
+  status text,
+  user_id text,
+  created_at timestamptz,
+  payload_json jsonb,
+  updated_at timestamptz DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_quo_messages_created ON quo_messages (created_at);
+
+CREATE TABLE IF NOT EXISTS quo_webhook_deliveries (
+  delivery_id text PRIMARY KEY,
+  event_type text,
+  received_at timestamptz DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS quo_webhook_endpoints (
+  id text PRIMARY KEY,
+  url text,
+  signing_key text,
+  events text,
+  created_at timestamptz DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS review_request_events (
   id uuid PRIMARY KEY,
   review_request_id uuid,
@@ -387,6 +447,164 @@ async function aggregate() {
   };
 }
 
+function emptyToNull(v) {
+  if (v === undefined || v === null || v === '') return null;
+  return v;
+}
+
+async function recordWebhookDelivery(deliveryId, eventType) {
+  if (!deliveryId) return false;
+  const { rowCount } = await query(
+    `INSERT INTO quo_webhook_deliveries (delivery_id, event_type)
+     VALUES ($1, $2)
+     ON CONFLICT (delivery_id) DO NOTHING`,
+    [deliveryId, eventType || '']
+  );
+  return rowCount > 0;
+}
+
+async function upsertQuoCall(row) {
+  const callId = String(row.call_id || '').trim();
+  if (!callId) return false;
+  const phoneNumberId = String(row.phone_number_id || '');
+  await query(
+    `INSERT INTO quo_calls (
+       call_id, phone_number_id, firm_id, org_id, conversation_id, direction, status,
+       user_id, answered_by, initiated_by, duration_sec, created_at, answered_at, completed_at,
+       forwarded_from, forwarded_to, ai_handled, has_voicemail, participants, line_name,
+       last_event_type, payload_json, updated_at
+     ) VALUES (
+       $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19::jsonb,$20,$21,$22::jsonb,now()
+     )
+     ON CONFLICT (call_id, phone_number_id) DO UPDATE SET
+       firm_id = COALESCE(NULLIF(EXCLUDED.firm_id, ''), quo_calls.firm_id),
+       org_id = COALESCE(NULLIF(EXCLUDED.org_id, ''), quo_calls.org_id),
+       conversation_id = COALESCE(NULLIF(EXCLUDED.conversation_id, ''), quo_calls.conversation_id),
+       direction = COALESCE(NULLIF(EXCLUDED.direction, ''), quo_calls.direction),
+       status = COALESCE(NULLIF(EXCLUDED.status, ''), quo_calls.status),
+       user_id = COALESCE(NULLIF(EXCLUDED.user_id, ''), quo_calls.user_id),
+       answered_by = COALESCE(NULLIF(EXCLUDED.answered_by, ''), quo_calls.answered_by),
+       initiated_by = COALESCE(NULLIF(EXCLUDED.initiated_by, ''), quo_calls.initiated_by),
+       duration_sec = COALESCE(EXCLUDED.duration_sec, quo_calls.duration_sec),
+       created_at = COALESCE(EXCLUDED.created_at, quo_calls.created_at),
+       answered_at = COALESCE(EXCLUDED.answered_at, quo_calls.answered_at),
+       completed_at = COALESCE(EXCLUDED.completed_at, quo_calls.completed_at),
+       forwarded_from = COALESCE(NULLIF(EXCLUDED.forwarded_from, ''), quo_calls.forwarded_from),
+       forwarded_to = COALESCE(NULLIF(EXCLUDED.forwarded_to, ''), quo_calls.forwarded_to),
+       ai_handled = quo_calls.ai_handled OR EXCLUDED.ai_handled,
+       has_voicemail = quo_calls.has_voicemail OR EXCLUDED.has_voicemail,
+       participants = COALESCE(EXCLUDED.participants, quo_calls.participants),
+       line_name = COALESCE(NULLIF(EXCLUDED.line_name, ''), quo_calls.line_name),
+       last_event_type = COALESCE(NULLIF(EXCLUDED.last_event_type, ''), quo_calls.last_event_type),
+       payload_json = COALESCE(EXCLUDED.payload_json, quo_calls.payload_json),
+       updated_at = now()`,
+    [
+      callId,
+      phoneNumberId,
+      emptyToNull(row.firm_id),
+      emptyToNull(row.org_id),
+      emptyToNull(row.conversation_id),
+      emptyToNull(row.direction),
+      emptyToNull(row.status),
+      emptyToNull(row.user_id),
+      emptyToNull(row.answered_by),
+      emptyToNull(row.initiated_by),
+      row.duration_sec == null || row.duration_sec === '' ? null : Number(row.duration_sec),
+      emptyToNull(row.created_at),
+      emptyToNull(row.answered_at),
+      emptyToNull(row.completed_at),
+      emptyToNull(row.forwarded_from),
+      emptyToNull(row.forwarded_to),
+      Boolean(row.ai_handled),
+      Boolean(row.has_voicemail),
+      row.participants == null ? null : JSON.stringify(row.participants),
+      emptyToNull(row.line_name),
+      emptyToNull(row.last_event_type),
+      row.payload_json == null ? null : JSON.stringify(row.payload_json),
+    ]
+  );
+  return true;
+}
+
+async function upsertQuoMessage(row) {
+  const messageId = String(row.message_id || '').trim();
+  if (!messageId) return false;
+  await query(
+    `INSERT INTO quo_messages (
+       message_id, phone_number_id, firm_id, direction, status, user_id, created_at, payload_json, updated_at
+     ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,now())
+     ON CONFLICT (message_id) DO UPDATE SET
+       phone_number_id = COALESCE(NULLIF(EXCLUDED.phone_number_id, ''), quo_messages.phone_number_id),
+       direction = COALESCE(NULLIF(EXCLUDED.direction, ''), quo_messages.direction),
+       status = COALESCE(NULLIF(EXCLUDED.status, ''), quo_messages.status),
+       user_id = COALESCE(NULLIF(EXCLUDED.user_id, ''), quo_messages.user_id),
+       created_at = COALESCE(EXCLUDED.created_at, quo_messages.created_at),
+       payload_json = COALESCE(EXCLUDED.payload_json, quo_messages.payload_json),
+       updated_at = now()`,
+    [
+      messageId,
+      emptyToNull(row.phone_number_id),
+      emptyToNull(row.firm_id),
+      emptyToNull(row.direction),
+      emptyToNull(row.status),
+      emptyToNull(row.user_id),
+      emptyToNull(row.created_at),
+      row.payload_json == null ? null : JSON.stringify(row.payload_json),
+    ]
+  );
+  return true;
+}
+
+async function listQuoCallsInWindow(createdAfter, createdBefore) {
+  const { rows } = await query(
+    `SELECT * FROM quo_calls
+     WHERE created_at >= $1 AND created_at < $2
+     ORDER BY created_at ASC`,
+    [createdAfter, createdBefore]
+  );
+  return rows;
+}
+
+async function listQuoMessagesInWindow(createdAfter, createdBefore) {
+  const { rows } = await query(
+    `SELECT * FROM quo_messages
+     WHERE created_at >= $1 AND created_at < $2
+     ORDER BY created_at ASC`,
+    [createdAfter, createdBefore]
+  );
+  return rows;
+}
+
+async function saveWebhookEndpoint(ep) {
+  if (!ep?.id) return false;
+  await query(
+    `INSERT INTO quo_webhook_endpoints (id, url, signing_key, events, created_at)
+     VALUES ($1,$2,$3,$4,now())
+     ON CONFLICT (id) DO UPDATE SET
+       url = EXCLUDED.url,
+       signing_key = COALESCE(NULLIF(EXCLUDED.signing_key, ''), quo_webhook_endpoints.signing_key),
+       events = COALESCE(EXCLUDED.events, quo_webhook_endpoints.events)`,
+    [ep.id, ep.url || '', ep.signing_key || '', ep.events || '']
+  );
+  return true;
+}
+
+async function listWebhookSigningKeys() {
+  const { rows } = await query('SELECT signing_key FROM quo_webhook_endpoints WHERE signing_key IS NOT NULL AND signing_key <> \'\'');
+  return rows.map((r) => r.signing_key).filter(Boolean);
+}
+
+async function findWebhookEndpointByUrl(url) {
+  if (!url) return null;
+  const { rows } = await query('SELECT * FROM quo_webhook_endpoints WHERE url=$1 LIMIT 1', [url]);
+  return rows[0] || null;
+}
+
+async function countQuoCalls() {
+  const { rows } = await query('SELECT count(*)::int AS n FROM quo_calls');
+  return Number(rows[0]?.n) || 0;
+}
+
 module.exports = {
   isEnabled,
   ensureSchema,
@@ -405,4 +623,13 @@ module.exports = {
   markSent,
   listRequests,
   aggregate,
+  recordWebhookDelivery,
+  upsertQuoCall,
+  upsertQuoMessage,
+  listQuoCallsInWindow,
+  listQuoMessagesInWindow,
+  saveWebhookEndpoint,
+  listWebhookSigningKeys,
+  findWebhookEndpointByUrl,
+  countQuoCalls,
 };

@@ -64,7 +64,21 @@ Trigger a deploy (or push to the connected branch). Watch **Deployments → Logs
 
 ## 5b. Datastore — Postgres (recommended) vs Sheets
 
-The review system (firm settings, trackable links, click events) uses **Postgres when `DATABASE_URL` is set**, otherwise Google Sheets. Postgres is the more stable choice — atomic click counters and no spreadsheet write limits. On Railway: **New → Database → Add PostgreSQL**; Railway injects `DATABASE_URL` into the service. Tables (`firm_settings`, `review_requests`, `review_request_events`) are created automatically on first use. No `DATABASE_URL` → it falls back to the `GOOGLE_REVIEW_SHEET_ID` sheet, and firm settings/editor edits fall back to `review-landing.json`.
+The review system (firm settings, trackable links, click events) uses **Postgres when `DATABASE_URL` is set**, otherwise Google Sheets. Postgres is the more stable choice — atomic click counters and no spreadsheet write limits. On Railway: **New → Database → Add PostgreSQL**; Railway injects `DATABASE_URL` into the service. Tables (`firm_settings`, `review_requests`, `review_request_events`, `quo_calls`, `quo_messages`) are created automatically on first use. No `DATABASE_URL` → it falls back to the `GOOGLE_REVIEW_SHEET_ID` sheet, and firm settings/editor edits fall back to `review-landing.json`.
+
+## 5e. Quo webhook — call ledger (Yesterday Call Stats)
+
+Quo’s public list-calls API misses forwarded / transferred legs. The trustworthy source is a live ledger: Quo POSTs each call and outbound SMS to this app, and we write it to the same Railway Postgres.
+
+1. Give the Railway service a **public URL** (it already has one if `/health` is reachable).
+2. On deploy the app tries to create the Quo webhook automatically (`QUO_API_KEY` + `RAILWAY_PUBLIC_DOMAIN` or `QUO_WEBHOOK_URL`).
+3. Copy the signing secret from **Reveal signing secret** into **`QUO_WEBHOOK_KEY`** (it is also stored in `quo_webhook_endpoints`).
+4. Or create it in Quo: **Workspace settings → API → Webhooks**, URL `https://<your-domain>/webhooks/quo`. The current UI only lists these — check:
+   - `call.completed` (covers answered, missed, and forwarded — look at `answeredAt` / `forwardedTo` on the payload)
+   - `message.delivered` (outbound SMS for the sent-messages column)
+   - `message.received` (optional inbound SMS)
+
+Rows land in **`quo_calls`** / **`quo_messages`**. History before the webhook was turned on is not backfilled — the email can use the ledger once it has a full day.
 
 ## 5c. Slack approval-to-send (Events API)
 

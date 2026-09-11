@@ -76,6 +76,10 @@ const FAQ = [
     )}. It reads client communications from Quo (phone calls + SMS), the #lead-calls Slack channel, and Google Sheets, then uses AI to produce daily/weekly/monthly reports and — new in V1 — to spot clients who are great candidates for a Google review. It also hosts the branded review page clients see.`,
   },
   {
+    q: 'Where do Yesterday Call Stats get their numbers?',
+    a: 'Quo POSTs each <code>call.completed</code> (and sent texts) to <code>/webhooks/quo</code>. Answered vs missed vs forwarded is read from the payload (<code>answeredAt</code>, <code>forwardedTo</code>), not from separate event types — the current Quo webhook UI only offers <code>call.completed</code>. Those events are stored in Railway Postgres (<code>quo_calls</code>, <code>quo_messages</code>) so the email can count one real customer event instead of paging the public list-calls API, which drops auto-forward and transfer legs. History from before the webhook was turned on is not backfilled.',
+  },
+  {
     q: 'How does Review Intelligence decide who to recommend?',
     a: 'Every evening it looks at each client who communicated in the last 24 hours and evaluates their whole recent journey — not a single message. It first reuses the existing sentiment analysis as a gate (anyone negative or at risk of a bad review is dropped), then an AI “decision engine” scores the rest 0–100 on positive signals (gratitude, relief, settlement reached/distributed, case closed) and disqualifies anyone with frustration, confusion, complaints, or poor communication. Qualified clients are saved to the review_opportunities table and the highest-confidence ones are posted to Slack.',
   },
@@ -208,7 +212,7 @@ function renderFaqPage() {
     ${faqItems}
 
     <footer>
-      Manual runs: <a class="inline" href="/">/</a> · Firms: <a class="inline" href="/review/firms">/review/firms</a> · Review page: <a class="inline" href="/review">/review</a> · Edit page: <a class="inline" href="/review/edit">/review/edit</a> · Health: <a class="inline" href="/health">/health</a>
+      Manual runs: <a class="inline" href="/">/</a> · Firms: <a class="inline" href="/review/firms">/review/firms</a> · Review page: <a class="inline" href="/review">/review</a> · Edit page: <a class="inline" href="/review/edit">/review/edit</a> · Health: <a class="inline" href="/health">/health</a> · Quo webhook: <code>/webhooks/quo</code>
     </footer>
   </div>
 </body>
