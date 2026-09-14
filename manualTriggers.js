@@ -210,7 +210,15 @@ function buildIndexHtml(message, email) {
       <button type="button" data-job="review">Run Review Intelligence (trailing 24h · Google review candidates → Slack)</button>
       <button type="button" data-job="language">Run Client Language Report (transcripts · EN/ES/both → Sheet + CSV)</button>
       <button type="button" data-job="marketing">Run Intake Marketing Insights (intake calls · targeting &amp; messaging → email + CSV)</button>
-      <button type="button" data-job="callstats">Run Yesterday Call Stats (dashboard recap · outcomes + per-user → email)</button>
+      <div class="field">
+        <label for="callstats-slot">Call stats send</label>
+        <select id="callstats-slot">
+          <option value="morning">Morning — prior day (default 7:30 AM list)</option>
+          <option value="midday">Midday — today so far (1:00 PM list)</option>
+          <option value="afternoon">Afternoon — today so far (5:00 PM list)</option>
+        </select>
+      </div>
+      <button type="button" data-job="callstats">Run Call Stats (uses the send selected above → that list)</button>
     </div>
     <p class="hint">Firms &amp; per-firm config: <a href="/review/firms" style="color:#60a5fa">/review/firms</a> · Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a> · what does this all do? <a href="/faq" style="color:#60a5fa">/faq</a></p>
     <p class="hint">Jobs run in the background so the browser does not time out. Only one job at a time.</p>
@@ -272,6 +280,9 @@ function buildIndexHtml(message, email) {
       if (!days) { setStatus('Enter a custom day count (1–180).'); return; }
       options.days = days;
       options.onlyLatest = document.getElementById('weekly-only-latest').checked;
+    }
+    if (job === 'callstats') {
+      options.slot = document.getElementById('callstats-slot').value || 'morning';
     }
     clearPoll();
     setStatus('Starting…');
@@ -929,6 +940,14 @@ function startManualTriggerServer(opts) {
           }
           options.days = days;
           options.onlyLatest = Boolean(rawOptions.onlyLatest);
+        }
+        if (job === 'callstats') {
+          const slot = String(rawOptions.slot || 'morning').trim().toLowerCase();
+          if (!['morning', 'midday', 'afternoon'].includes(slot)) {
+            sendJson(res, 400, { error: 'options.slot must be morning, midday, or afternoon' });
+            return;
+          }
+          options.slot = slot;
         }
         setImmediate(() => {
           runInBackground(job, options).catch((e) => console.error('[manual trigger] unhandled', e));

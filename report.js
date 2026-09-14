@@ -4324,7 +4324,7 @@ function missedCallsTotal(agg) {
   return (o['Missed'] || 0) + (o['Answered by agent'] || 0) + (o['Agent abandoned'] || 0);
 }
 
-function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed) {
+function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed, view = {}) {
   const css = `
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; background: #ffffff; }
     h2 { margin: 0 0 2px; } h3 { margin: 26px 0 4px; }
@@ -4351,7 +4351,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     )
     .join('');
   const outcomeTable = `<table>
-    <tr><th>Incoming call outcome</th><th class="num">Yesterday</th><th class="num">% of total</th><th class="num">Same day last wk</th><th class="num">Change</th></tr>
+    <tr><th>Incoming call outcome</th><th class="num">${escapeHtml(view.periodCol || 'Yesterday')}</th><th class="num">% of total</th><th class="num">${escapeHtml(view.compareCol || 'Same day last wk')}</th><th class="num">Change</th></tr>
     ${outcomeRows || '<tr><td colspan="5" class="note">No incoming calls.</td></tr>'}
     <tr class="total"><td>Total incoming</td><td class="num">${curAgg.totalIncoming}</td><td class="num">${totalIn ? '100%' : '—'}</td><td class="num">${prevAgg.totalIncoming}</td><td class="num chg">${escapeHtml(pctChangeLabel(curAgg.totalIncoming, prevAgg.totalIncoming))}</td></tr>
   </table>`;
@@ -4388,8 +4388,8 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     </div>`;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
-    <h2>Yesterday Call Stats</h2>
-    <p style="margin:2px 0 0;color:#57606a;font-size:13px">${escapeHtml(dayLabel)} · vs same weekday last week</p>
+    <h2>${escapeHtml(view.title || 'Yesterday Call Stats')}</h2>
+    <p style="margin:2px 0 0;color:#57606a;font-size:13px">${escapeHtml(view.subtitle || `${dayLabel} · vs same weekday last week`)}</p>
 
     ${missedCallout}
 
@@ -4405,35 +4405,81 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
   </body></html>`;
 }
 
-/**
- * Yesterday Call Stats — recreates the Quo dashboard's incoming-call-outcomes
- * chart and per-user activity table for the previous calendar day, comparing to
- * the same weekday one week ago. Sends to the admin-configured recipients.
- */
-async function runDailyCallStatsReport() {
-  // Whole calendar day, midnight-to-midnight in TIMEZONE (Central) — no
-  // time-of-day cutoff, regardless of when the job runs. Both windows are
-  // derived in the local zone so a DST change can't shift them by an hour.
-  const dayStart = DateTime.now().setZone(TIMEZONE).startOf('day').minus({ days: 1 });
+function callStatsWindows(slotId, now = DateTime.now().setZone(TIMEZONE)) {
+  const slot = firmStore.callStatsSlot(slotId);
+  const clock = firmStore.callStatsSlotClock(firmCtx(), slot.id);
+  if (slot.window === 'today_so_far') {
+    const dayStart = now.startOf('day');
+    const dayEnd = dayStart.set({ hour: clock.hour, minute: clock.minute, second: 0, millisecond: 0 });
+    const prevStart = dayStart.minus({ days: 7 });
+    const prevEnd = prevStart.set({ hour: clock.hour, minute: clock.minute, second: 0, millisecond: 0 });
+    const through = firmStore.clockLabel(clock);
+    return {
+      slot,
+      clock,
+      dayStart,
+      dayEnd,
+      prevStart,
+      prevEnd,
+      dayLabel: dayStart.toFormat('cccc, LLL d, yyyy'),
+      title: `Call Stats — so far today`,
+      subtitle: `${dayStart.toFormat('cccc, LLL d, yyyy')} · midnight–${through} · vs same hours last week`,
+      periodCol: 'So far today',
+      compareCol: 'Same hours last wk',
+      windowNote: `today so far through ${through}`,
+    };
+  }
+  const dayStart = now.startOf('day').minus({ days: 1 });
   const dayEnd = dayStart.plus({ days: 1 });
-  const prevStart = dayStart.minus({ days: 7 }); // same weekday, also a full day
+  const prevStart = dayStart.minus({ days: 7 });
   const prevEnd = prevStart.plus({ days: 1 });
-  const cur = { createdAfter: dayStart.toUTC().toISO(), createdBefore: dayEnd.toUTC().toISO() };
-  const prev = { createdAfter: prevStart.toUTC().toISO(), createdBefore: prevEnd.toUTC().toISO() };
-  const dayLabel = dayStart.toFormat('cccc, LLL d, yyyy');
+  return {
+    slot,
+    clock,
+    dayStart,
+    dayEnd,
+    prevStart,
+    prevEnd,
+    dayLabel: dayStart.toFormat('cccc, LLL d, yyyy'),
+    title: 'Yesterday Call Stats',
+    subtitle: `${dayStart.toFormat('cccc, LLL d, yyyy')} · vs same weekday last week`,
+    periodCol: 'Yesterday',
+    compareCol: 'Same day last wk',
+    windowNote: 'full prior day',
+  };
+}
+
+/**
+ * Call stats email — incoming-call-outcomes + per-user table. `opts.slot` is
+ * morning (prior calendar day), midday, or afternoon (today so far through the
+ * configured clock). Recipients are the list for that slot.
+ */
+async function runDailyCallStatsReport(opts = {}) {
+  const slotId = firmStore.callStatsSlot(opts.slot).id;
+  const recipients = firmStore.callStatsSlotRecipients(firmCtx(), slotId);
+  if (opts.scheduled && !recipients.length) {
+    console.log(`  Call stats ${slotId}: no recipients — skipping.`);
+    return;
+  }
+
+  // Windows are derived in the local zone so a DST change can't shift them.
+  const win = callStatsWindows(slotId);
+  const cur = { createdAfter: win.dayStart.toUTC().toISO(), createdBefore: win.dayEnd.toUTC().toISO() };
+  const prev = { createdAfter: win.prevStart.toUTC().toISO(), createdBefore: win.prevEnd.toUTC().toISO() };
+  const dayLabel = win.dayLabel;
 
   console.log(`\n${'═'.repeat(52)}`);
-  console.log('  Yesterday Call Stats');
-  console.log(`  Day: ${dayLabel} (vs same weekday last week)`);
-  console.log(`  Window:  ${dayStart.toFormat('LLL d, h:mm a')} – ${dayEnd.toFormat('LLL d, h:mm a')} ${TIMEZONE} (full day)`);
-  console.log(`  Compare: ${prevStart.toFormat('ccc, LLL d, h:mm a')} – ${prevEnd.toFormat('LLL d, h:mm a')} ${TIMEZONE} (full day)`);
+  console.log(`  ${win.title}  [${win.slot.label}]`);
+  console.log(`  Day: ${win.subtitle}`);
+  console.log(`  Window:  ${win.dayStart.toFormat('LLL d, h:mm a')} – ${win.dayEnd.toFormat('LLL d, h:mm a')} ${TIMEZONE} (${win.windowNote})`);
+  console.log(`  Compare: ${win.prevStart.toFormat('ccc, LLL d, h:mm a')} – ${win.prevEnd.toFormat('LLL d, h:mm a')} ${TIMEZONE}`);
   console.log('═'.repeat(52));
 
   const excludeLineNames = firmCtx().statsExcludeInboxes;
   const includeUsers = firmCtx().statsIncludeUsers;
   const apiKey = firmCtx().quoApiKey;
 
-  console.log(`\n[1/3] Fetching yesterday (excluding inboxes: ${excludeLineNames.join(', ') || 'none'})...`);
+  console.log(`\n[1/3] Fetching ${win.windowNote} (excluding inboxes: ${excludeLineNames.join(', ') || 'none'})...`);
   const curData = await fetchDailyCallStats({ apiKey, ...cur, excludeLineNames });
   console.log(`  ${curData.calls.length} call(s), ${curData.messages.length} message(s) across ${curData.includedLines.length} inbox(es).`);
   console.log('\n[2/3] Fetching same weekday last week (for comparison)...');
@@ -4444,7 +4490,7 @@ async function runDailyCallStatsReport() {
   const ignoreIncomingLines = firmCtx().statsIgnoreIncomingInboxes;
   const curAgg = aggregateCallStats({ ...curData, volumeExcludeLines: transferLines, ignoreIncomingLines });
   const prevAgg = aggregateCallStats({ ...prevData, volumeExcludeLines: transferLines, ignoreIncomingLines });
-  console.log(`  Ignoring inbound (auto-forward duplicates) on: ${ignoreIncomingLines.join(', ') || 'none'} (dropped ${curAgg.ignoredInbound || 0} yesterday)`);
+  console.log(`  Ignoring inbound (auto-forward duplicates) on: ${ignoreIncomingLines.join(', ') || 'none'} (dropped ${curAgg.ignoredInbound || 0} in this window)`);
   console.log(`  Answered calls by line: ${Object.entries(curAgg.answeredByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`);
   console.log(`  (transfer lines counted for per-user answered, excluded from incoming volume: ${transferLines.join(', ') || 'none'})`);
 
@@ -4500,9 +4546,9 @@ async function runDailyCallStatsReport() {
     ignoreIncomingLines,
     usersFilterActive,
   };
-  const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed);
+  const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed, win);
   const plainLines = [
-    `Yesterday Call Stats — ${dayLabel} (vs same weekday last week)`,
+    `${win.title} — ${win.subtitle}`,
     '',
     `** MISSED CALLS (Missed + Answered by agent + Agent abandoned): ${missed.cur} ** — goal under ${missed.goal} (last wk ${missed.prev})`,
     '',
@@ -4520,19 +4566,18 @@ async function runDailyCallStatsReport() {
     ),
   ];
   const plainText = plainLines.join('\n');
-  const subject = `${firmCtx().firmName} — Yesterday Call Stats — ${dayLabel}`;
+  const subject = `${firmCtx().firmName} — ${win.title} — ${dayLabel}`;
 
-  const recipients = firmCtx().statsEmailTo;
   if (!recipients.length || !EMAIL_CONFIGURED) {
-    console.log('\n  Email not configured (set the Yesterday Call Stats recipients in admin, or STATS_EMAIL_TO + Gmail OAuth) — printing report:\n');
+    console.log('\n  Email not configured (set this send’s recipients in admin, or STATS_EMAIL_TO + Gmail OAuth) — printing report:\n');
     console.log(plainText);
   } else {
     await sendEmail({ htmlBody: html, plainText, subject, to: recipients });
-    console.log(`\n  Sent Yesterday Call Stats to: ${recipients.join(', ')}`);
+    console.log(`\n  Sent ${win.title} [${slotId}] to: ${recipients.join(', ')}`);
   }
 
   console.log(`\n${'═'.repeat(52)}`);
-  console.log('Yesterday Call Stats complete.');
+  console.log(`${win.title} complete.`);
 }
 
 if (require.main === module) {
@@ -4548,7 +4593,11 @@ if (require.main === module) {
   // Optional: `node report.js daily --firm <id>` scopes to one firm; otherwise all active firms.
   const firmFlag = process.argv.indexOf('--firm');
   const firmId = firmFlag !== -1 ? process.argv[firmFlag + 1] : undefined;
-  runForAllFirms(run, firmId ? { firmId } : {}).catch((err) => {
+  const slotFlag = process.argv.indexOf('--slot');
+  const slotFromFlag = slotFlag !== -1 ? process.argv[slotFlag + 1] : undefined;
+  const slotFromPos = ['morning', 'midday', 'afternoon'].includes(process.argv[3]) ? process.argv[3] : undefined;
+  const slot = slotFromFlag || slotFromPos;
+  runForAllFirms(run, { ...(firmId ? { firmId } : {}), ...(slot ? { slot } : {}) }).catch((err) => {
     console.error('\nError:', err.response?.data || err.message);
     process.exit(1);
   });

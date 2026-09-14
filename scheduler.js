@@ -12,6 +12,7 @@ const {
   runDailyCallStatsReport,
   runForAllFirms,
 } = require('./report');
+const firmStore = require('./firmStore');
 
 // Daily: previous calendar day — Daily Intake & Lead Report + Quo CSV (Slack + sheet).
 const SCHEDULE = process.env.CRON_SCHEDULE || '0 7 * * *';
@@ -24,9 +25,18 @@ const MONTHLY_INSIGHTS_CRON = process.env.MONTHLY_INSIGHTS_CRON || '0 1 1 * *';
 const MISSED_CLIENT_CALLS_CRON = process.env.MISSED_CLIENT_CALLS_CRON || '0 7 * * *';
 // Review Intelligence: trailing 24h — daily Google-review candidates (default: 6:00 PM local).
 const REVIEW_INTELLIGENCE_CRON = process.env.REVIEW_INTELLIGENCE_CRON || '0 18 * * *';
-// Yesterday Call Stats: previous calendar day's Quo dashboard recap (default: 7:30 AM local).
-const CALL_STATS_CRON = process.env.CALL_STATS_CRON || '30 7 * * *';
+// Call stats: three sends (morning = prior day; midday + afternoon = today so far).
+// Times and recipient lists are per-firm on /review/firms/edit. CALL_STATS_CRON
+// only supplies the default morning clock if a firm leaves that field blank.
 const TIMEZONE = process.env.TIMEZONE || 'America/Chicago';
+const callStatsFired = new Map();
+
+function callStatsDefaultsLabel() {
+  return firmStore.CALL_STATS_SLOTS.map((s) => {
+    const clock = firmStore.resolveClockTime(s.defaultTime, s.defaultTime);
+    return `${s.id} ${firmStore.clockLabel(clock)}`;
+  }).join(' · ');
+}
 
 console.log('══════════════════════════════════════════════');
 console.log('  Quo Report Scheduler');
@@ -36,7 +46,7 @@ console.log(`  Weekly sentiment : ${WEEKLY_SENTIMENT_CRON}`);
 console.log(`  Monthly newsletter : ${MONTHLY_INSIGHTS_CRON}`);
 console.log(`  Missed client calls : ${MISSED_CLIENT_CALLS_CRON}`);
 console.log(`  Review intelligence : ${REVIEW_INTELLIGENCE_CRON}`);
-console.log(`  Yesterday call stats: ${CALL_STATS_CRON}`);
+console.log(`  Call stats sends : ${callStatsDefaultsLabel()} (per-firm lists/times override)`);
 console.log(`  Timezone         : ${TIMEZONE}`);
 console.log(`  Started          : ${new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' })}`);
 console.log('══════════════════════════════════════════════\n');
@@ -63,11 +73,6 @@ if (!cron.validate(MISSED_CLIENT_CALLS_CRON)) {
 
 if (!cron.validate(REVIEW_INTELLIGENCE_CRON)) {
   console.error(`Invalid REVIEW_INTELLIGENCE_CRON: "${REVIEW_INTELLIGENCE_CRON}"`);
-  process.exit(1);
-}
-
-if (!cron.validate(CALL_STATS_CRON)) {
-  console.error(`Invalid CALL_STATS_CRON: "${CALL_STATS_CRON}"`);
   process.exit(1);
 }
 
@@ -141,16 +146,51 @@ cron.schedule(
   { timezone: TIMEZONE }
 );
 
-cron.schedule(
-  CALL_STATS_CRON,
-  async () => {
-    const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
-    console.log(`\n[${ts}] Cron triggered — Yesterday Call Stats...`);
-    try {
-      await runForAllFirms(runDailyCallStatsReport);
-    } catch (err) {
-      console.error(`[${ts}] Yesterday Call Stats failed:`, err.message);
+async function runDueCallStatsSends() {
+  const now = DateTime.now().setZone(TIMEZONE);
+  const hm = now.toFormat('HH:mm');
+  const dateKey = now.toISODate();
+  let firms;
+  try {
+    firms = await firmStore.loadActiveFirms();
+  } catch (err) {
+    console.error(`[${now.toFormat('ccc LLL d, h:mm a')}] Call stats schedule: could not load firms: ${err.message}`);
+    return;
+  }
+  const due = [];
+  for (const firm of firms) {
+    const ctx = firmStore.reportConfigForFirm(firm);
+    for (const slot of firmStore.CALL_STATS_SLOTS) {
+      if (firmStore.clockToHm(firmStore.callStatsSlotClock(ctx, slot.id)) !== hm) continue;
+      if (!firmStore.callStatsSlotRecipients(ctx, slot.id).length) continue;
+      const lock = `${dateKey}|${ctx.id}|${slot.id}`;
+      if (callStatsFired.has(lock)) continue;
+      due.push({ firmId: ctx.id, firmName: ctx.firmName, slot: slot.id, lock });
     }
+  }
+  for (const [k] of callStatsFired) {
+    if (!k.startsWith(`${dateKey}|`) && !k.startsWith(`${now.minus({ days: 1 }).toISODate()}|`)) {
+      callStatsFired.delete(k);
+    }
+  }
+  for (const item of due) {
+    callStatsFired.set(item.lock, Date.now());
+    const ts = now.toFormat("ccc LLL d, h:mm a ZZZZ");
+    console.log(`\n[${ts}] Cron triggered — Call stats ${item.slot} for ${item.firmName}...`);
+    try {
+      await runForAllFirms(runDailyCallStatsReport, { firmId: item.firmId, slot: item.slot, scheduled: true });
+    } catch (err) {
+      console.error(`[${ts}] Call stats ${item.slot} failed:`, err.message);
+    }
+  }
+}
+
+cron.schedule(
+  '* * * * *',
+  () => {
+    runDueCallStatsSends().catch((err) => {
+      console.error('[call stats schedule]', err.message);
+    });
   },
   { timezone: TIMEZONE }
 );
@@ -204,10 +244,22 @@ for (const [label, expr] of [
   ['Monthly newsletter', MONTHLY_INSIGHTS_CRON],
   ['Missed client calls', MISSED_CLIENT_CALLS_CRON],
   ['Review intelligence', REVIEW_INTELLIGENCE_CRON],
-  ['Yesterday call stats', CALL_STATS_CRON],
 ]) {
   const n = nextRun(expr, TIMEZONE);
   console.log(`  ${label.padEnd(20)}: ${n ? n.toFormat("ccc, LLL d 'at' h:mm a ZZZZ") : '(unknown)'}`);
+}
+for (const slot of firmStore.CALL_STATS_SLOTS) {
+  const clock = firmStore.resolveClockTime(slot.defaultTime, slot.defaultTime);
+  let dt = DateTime.now().setZone(TIMEZONE).set({ second: 0, millisecond: 0 }).plus({ minutes: 1 });
+  let next = null;
+  for (let i = 0; i < 48 * 60; i++) {
+    if (dt.hour === clock.hour && dt.minute === clock.minute) {
+      next = dt;
+      break;
+    }
+    dt = dt.plus({ minutes: 1 });
+  }
+  console.log(`  ${`Call stats ${slot.id}`.padEnd(20)}: ${next ? next.toFormat("ccc, LLL d 'at' h:mm a ZZZZ") : '(unknown)'} (${slot.window === 'prior_day' ? 'prior day' : 'today so far'})`);
 }
 console.log('');
 

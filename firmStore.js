@@ -98,6 +98,98 @@ function firstList(...vals) {
   return parseList(firstNonEmpty(...vals));
 }
 
+/** Morning send time from CALL_STATS_CRON (`30 7 * * *` → 7:30), else 7:30. */
+function morningTimeFromCron() {
+  const parts = String(process.env.CALL_STATS_CRON || '').trim().split(/\s+/);
+  if (parts.length >= 2 && /^\d+$/.test(parts[0]) && /^\d+$/.test(parts[1])) {
+    return `${Number(parts[1])}:${String(Number(parts[0])).padStart(2, '0')}`;
+  }
+  return '7:30';
+}
+
+/**
+ * Parse a clock time from settings (`7:30`, `13:00`, `1:00 PM`, `1pm`).
+ * @returns {{ hour: number, minute: number } | null}
+ */
+function parseClockTime(raw) {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  let m = s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/i);
+  if (m) {
+    let hour = parseInt(m[1], 10);
+    const minute = parseInt(m[2] || '0', 10);
+    const ap = m[3].toLowerCase();
+    if (hour === 12) hour = 0;
+    if (ap === 'pm') hour += 12;
+    if (hour > 23 || minute > 59) return null;
+    return { hour, minute };
+  }
+  m = s.match(/^(\d{1,2}):(\d{2})$/);
+  if (m) {
+    const hour = parseInt(m[1], 10);
+    const minute = parseInt(m[2], 10);
+    if (hour > 23 || minute > 59) return null;
+    return { hour, minute };
+  }
+  return null;
+}
+
+function clockToHm(clock) {
+  if (!clock) return '';
+  return `${String(clock.hour).padStart(2, '0')}:${String(clock.minute).padStart(2, '0')}`;
+}
+
+function clockLabel(clock) {
+  if (!clock) return '';
+  return DateTime.fromObject({ hour: clock.hour, minute: clock.minute }).toFormat('h:mm a');
+}
+
+function resolveClockTime(raw, fallbackRaw) {
+  return parseClockTime(raw) || parseClockTime(fallbackRaw) || { hour: 7, minute: 30 };
+}
+
+const CALL_STATS_SLOTS = [
+  {
+    id: 'morning',
+    label: 'Morning (prior day)',
+    defaultTime: morningTimeFromCron(),
+    emailField: 'statsEmailTo',
+    timeField: 'statsMorningTime',
+    window: 'prior_day',
+  },
+  {
+    id: 'midday',
+    label: 'Midday (today so far)',
+    defaultTime: '13:00',
+    emailField: 'statsMiddayEmailTo',
+    timeField: 'statsMiddayTime',
+    window: 'today_so_far',
+  },
+  {
+    id: 'afternoon',
+    label: 'Afternoon (today so far)',
+    defaultTime: '17:00',
+    emailField: 'statsAfternoonEmailTo',
+    timeField: 'statsAfternoonTime',
+    window: 'today_so_far',
+  },
+];
+
+function callStatsSlot(slotId) {
+  return CALL_STATS_SLOTS.find((s) => s.id === slotId) || CALL_STATS_SLOTS[0];
+}
+
+function callStatsSlotClock(ctx, slotId) {
+  const slot = callStatsSlot(slotId);
+  return resolveClockTime(ctx && ctx[slot.timeField], slot.defaultTime);
+}
+
+function callStatsSlotRecipients(ctx, slotId) {
+  const slot = callStatsSlot(slotId);
+  const list = ctx && ctx[slot.emailField];
+  return Array.isArray(list) ? list : [];
+}
+
 /**
  * Normalized per-firm reporting context used by the jobs. Every field falls
  * back to the matching env constant when the firm column is blank, so a
@@ -129,6 +221,11 @@ function reportConfigForFirm(firm) {
     // env fallbacks, then built-in defaults. Recipients do NOT fall back to the
     // default report list (this email goes to a specific audience).
     statsEmailTo: firstList(f.stats_email_to, env.STATS_EMAIL_TO),
+    statsMiddayEmailTo: firstList(f.stats_midday_email_to, env.STATS_MIDDAY_EMAIL_TO),
+    statsAfternoonEmailTo: firstList(f.stats_afternoon_email_to, env.STATS_AFTERNOON_EMAIL_TO),
+    statsMorningTime: firstNonEmpty(f.stats_morning_time, env.STATS_MORNING_TIME, morningTimeFromCron()),
+    statsMiddayTime: firstNonEmpty(f.stats_midday_time, env.STATS_MIDDAY_TIME, '1:00 PM'),
+    statsAfternoonTime: firstNonEmpty(f.stats_afternoon_time, env.STATS_AFTERNOON_TIME, '5:00 PM'),
     // Lines dropped entirely. Default mirrors the Quo dashboard's inbox filter
     // (Leads, RJL Main Line, RJL Outbound, RGV Number, Intake) so the numbers
     // reconcile against it.
@@ -396,6 +493,14 @@ module.exports = {
   normalizeHost,
   landingConfigForFirm,
   reportConfigForFirm,
+  CALL_STATS_SLOTS,
+  parseClockTime,
+  resolveClockTime,
+  clockToHm,
+  clockLabel,
+  callStatsSlot,
+  callStatsSlotClock,
+  callStatsSlotRecipients,
   loadFirms,
   loadActiveFirms,
   getDefaultFirm,

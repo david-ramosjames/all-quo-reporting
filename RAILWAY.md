@@ -80,6 +80,8 @@ Quo’s public list-calls API misses forwarded / transferred legs. The trustwort
 
 Rows land in **`quo_calls`** / **`quo_messages`**. History before the webhook was turned on is not backfilled — the email can use the ledger once it has a full day.
 
+Call Stats sends three times (times and lists are per firm on `/review/firms/edit`): morning prior-day recap (default 7:30 AM), then today-so-far at 1:00 PM and 5:00 PM. A blank recipient list skips that send.
+
 ## 5c. Slack approval-to-send (Events API)
 
 The daily Slack post shows one message per review candidate. Approving one texts that client their link. To enable:
