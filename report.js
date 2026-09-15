@@ -23,6 +23,7 @@ const {
 const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage } = require('./slack');
 const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require('./reviewOpportunities');
 const firmStore = require('./firmStore');
+const pg = require('./pgStore');
 const reviewRequests = require('./reviewRequests');
 const quoSend = require('./quoSend');
 const { aggregateLanguages, detectLanguage } = require('./languageDetect');
@@ -4201,16 +4202,10 @@ function callOutcomeBucket(c) {
   const status = String(c.status || '').toLowerCase();
   const agent = Boolean(c.aiHandled);
   if (status.includes('voicemail')) return 'Voicemail';
-  // Quo export uses status=forwarded for the auto-forward tap (RJL Outbound →
-  // Main Line). That record is also dropped by ignoreIncomingLines; this keeps
-  // any leftover tap out of "Answered by user".
   if (status.includes('forward')) return 'Forwarded';
+  if (agent || status === 'ai-handled' || status.includes('ai-agent')) return 'Answered by agent';
   if (status === 'completed' || status === 'answered') {
-    if (agent) return 'Answered by agent';
-    // A "completed" inbound call that nobody answered was forwarded off this
-    // line — Quo reports these as status=forwarded, but the API returns them as
-    // completed with no answeredBy (and duration 0). Without this they inflate
-    // "Answered by user".
+    // API often returns forwarded taps as completed with no answeredBy.
     if (!c.answeredBy) return 'Forwarded';
     return 'Answered by user';
   }
@@ -4244,14 +4239,12 @@ function pctChangeLabel(cur, prev) {
 
 /** Aggregate raw call/message records into outcome + per-user tallies. */
 function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomingLines }) {
-  // Lines that auto-forward every inbound call: Quo writes a duplicate record on
-  // the forwarding line, so its inbound copies are dropped outright (the call is
-  // already counted on the line that actually took it). Outbound is unaffected.
+  // Lines unchecked on the Quo dashboard (typically the auto-forward line): omit
+  // inbound AND outbound so the email matches the four-inbox view.
   const ignoreIn = new Set(
     (ignoreIncomingLines || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean)
   );
-  const isIgnoredInbound = (c) =>
-    isIncomingDirection(c.direction) && ignoreIn.has(String(c.lineName || '').trim().toLowerCase());
+  const isIgnoredLine = (c) => ignoreIn.has(String(c.lineName || '').trim().toLowerCase());
   // Transfer lines are excluded from INCOMING VOLUME (a transferred call already
   // counted once on the line it arrived on, so counting the transfer leg would
   // double-count it) but still count for PER-USER attribution — the person who
@@ -4266,7 +4259,7 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
   let ignoredInbound = 0;
   for (const c of calls) {
     if (!isIncomingDirection(c.direction)) continue;
-    if (isIgnoredInbound(c)) {
+    if (isIgnoredLine(c)) {
       ignoredInbound += 1;
       continue;
     }
@@ -4284,7 +4277,7 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
     return perUser.get(id);
   };
   for (const c of calls) {
-    if (isIgnoredInbound(c)) continue;
+    if (isIgnoredLine(c)) continue;
     const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
     const inbound = isIncomingDirection(c.direction);
     // Attribute by the direction-specific actor: who ANSWERED an inbound call vs
@@ -4316,12 +4309,12 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
 
 /**
  * The headline "Missed Calls" number the LAs are measured on:
- * Missed + Answered by agent + Agent abandoned (all incoming). Goal is to keep
- * this near zero — every one is a client who didn't reach a person.
+ * Missed + Voicemail + Answered by agent + Agent abandoned (all incoming).
+ * Goal is a count (under N), set per send so midday can be tighter than the full day.
  */
 function missedCallsTotal(agg) {
   const o = agg.outcomes || {};
-  return (o['Missed'] || 0) + (o['Answered by agent'] || 0) + (o['Agent abandoned'] || 0);
+  return (o['Missed'] || 0) + (o['Voicemail'] || 0) + (o['Answered by agent'] || 0) + (o['Agent abandoned'] || 0);
 }
 
 function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed, view = {}) {
@@ -4377,13 +4370,16 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     ${userBody}
   </table>`;
 
-  const goal = missed.goal;
+  const goal = Number(missed.goal) || 10;
   const metGoal = missed.cur < goal;
   const missedColor = metGoal ? '#067647' : '#b42318';
+  const ofIncoming = missed.curIn
+    ? `${Math.round((missed.cur / missed.curIn) * 100)}% of incoming`
+    : '';
   const missedCallout = `<div style="border:2px solid ${missedColor};border-radius:8px;padding:12px 16px;margin-top:14px;max-width:460px">
-      <div style="font-size:12px;color:#57606a;text-transform:uppercase;letter-spacing:.5px">Missed Calls &mdash; Missed + Answered by Agent + Agent Abandoned</div>
+      <div style="font-size:12px;color:#57606a;text-transform:uppercase;letter-spacing:.5px">Missed Calls &mdash; Missed + Voicemail + Answered by Agent + Agent Abandoned</div>
       <div style="margin-top:4px"><span style="font-size:36px;font-weight:800;color:${missedColor}">${missed.cur}</span>
-        <span style="font-size:14px;font-weight:600;color:#57606a;margin-left:6px">${escapeHtml(pctChangeLabel(missed.cur, missed.prev))} vs last wk (${missed.prev})</span></div>
+        <span style="font-size:14px;font-weight:600;color:#57606a;margin-left:6px">${escapeHtml(ofIncoming)}${ofIncoming ? ' · ' : ''}${escapeHtml(pctChangeLabel(missed.cur, missed.prev))} vs last wk (${missed.prev})</span></div>
       <div style="font-size:13px;color:${missedColor};font-weight:600;margin-top:2px">Goal: under ${goal} &mdash; ${metGoal ? 'on target ✓' : 'above goal'}</div>
     </div>`;
 
@@ -4403,6 +4399,124 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
       <p>Inboxes excluded: ${escapeHtml((meta.excludedLines || []).join(', ') || 'none')}. Incoming auto-forwards ignored on: ${escapeHtml((meta.ignoreIncomingLines || []).join(', ') || 'none')} (the call is counted on the line that received it). Users shown: ${meta.usersFilterActive ? 'filtered to the configured team' : 'everyone with activity'}. Each number's change is vs the same weekday one week ago.</p>
     </div>
   </body></html>`;
+}
+
+function isoTs(v) {
+  if (!v) return '';
+  if (v instanceof Date) return v.toISOString();
+  return String(v);
+}
+
+function lineMapFromStats(data) {
+  const map = { ...(data.lineById || {}) };
+  for (const c of data.calls || []) {
+    if (c.phoneNumberId && c.lineName) map[c.phoneNumberId] = c.lineName;
+  }
+  return map;
+}
+
+function statsCallFromLedger(row, lineById) {
+  const pnId = row.phone_number_id || '';
+  const parts = row.participants && typeof row.participants === 'object' ? row.participants : {};
+  return {
+    id: row.call_id,
+    phoneNumberId: pnId,
+    lineName: row.line_name || lineById[pnId] || '',
+    participants: parts.external || parts.workspace || [],
+    answeredBy: row.answered_by || null,
+    initiatedBy: row.initiated_by || null,
+    userId: row.user_id || null,
+    direction: row.direction || '',
+    status: row.status || '',
+    aiHandled: row.ai_handled ? 'ai-agent' : null,
+    duration: Number(row.duration_sec || 0),
+    createdAt: isoTs(row.created_at),
+    answeredAt: isoTs(row.answered_at) || null,
+    forwardedFrom: row.forwarded_from || null,
+    forwardedTo: row.forwarded_to || null,
+    from: parts.from || null,
+    to: parts.to || null,
+  };
+}
+
+/**
+ * Quo list-calls drops auto-forward / transfer legs. Merge webhook ledger rows
+ * for the same window so Main Line answers and Intake transfer legs show up.
+ */
+async function enrichStatsFromLedger(data, window, excludeLineNames) {
+  if (!pg.isEnabled()) return data;
+  try {
+    await pg.ensureSchema();
+    const exclude = new Set((excludeLineNames || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+    const lineById = lineMapFromStats(data);
+    const callKey = (id, pn) => `${id || ''}::${pn || ''}`;
+    const byKey = new Map((data.calls || []).map((c) => [callKey(c.id, c.phoneNumberId), c]));
+    const ledgerCalls = await pg.listQuoCallsInWindow(window.createdAfter, window.createdBefore);
+    let added = 0;
+    let patched = 0;
+    for (const row of ledgerCalls) {
+      const mapped = statsCallFromLedger(row, lineById);
+      if (exclude.has(String(mapped.lineName || '').trim().toLowerCase())) continue;
+      if (!mapped.lineName) continue;
+      const key = callKey(mapped.id, mapped.phoneNumberId);
+      const existing = byKey.get(key);
+      if (existing) {
+        let changed = false;
+        if (!existing.answeredBy && mapped.answeredBy) {
+          existing.answeredBy = mapped.answeredBy;
+          changed = true;
+        }
+        if (!existing.initiatedBy && mapped.initiatedBy) {
+          existing.initiatedBy = mapped.initiatedBy;
+          changed = true;
+        }
+        if ((mapped.duration || 0) > (existing.duration || 0)) {
+          existing.duration = mapped.duration;
+          changed = true;
+        }
+        if (mapped.status && mapped.status !== existing.status) {
+          existing.status = mapped.status;
+          changed = true;
+        }
+        if (changed) patched += 1;
+        continue;
+      }
+      if (!mapped.id) continue;
+      data.calls.push(mapped);
+      byKey.set(key, mapped);
+      added += 1;
+    }
+    const ledgerMsgs = await pg.listQuoMessagesInWindow(window.createdAfter, window.createdBefore);
+    const seenMsg = new Set((data.messages || []).map((m) => `${m.phoneNumberId || ''}::${m.createdAt || ''}::${m.userId || ''}`));
+    let msgAdded = 0;
+    for (const row of ledgerMsgs) {
+      const pnId = row.phone_number_id || '';
+      const lineName = lineById[pnId] || '';
+      if (exclude.has(String(lineName).trim().toLowerCase())) continue;
+      const msg = {
+        phoneNumberId: pnId,
+        lineName,
+        userId: row.user_id || null,
+        direction: row.direction || '',
+        createdAt: isoTs(row.created_at),
+      };
+      const k = `${msg.phoneNumberId}::${msg.createdAt}::${msg.userId || ''}`;
+      if (seenMsg.has(k)) continue;
+      seenMsg.add(k);
+      data.messages.push(msg);
+      msgAdded += 1;
+    }
+    if (added || patched || msgAdded) {
+      console.log(`  [stats] webhook ledger: +${added} call(s), patched ${patched}, +${msgAdded} message(s) (${ledgerCalls.length} ledger call rows)`);
+    } else if (ledgerCalls.length) {
+      console.log(`  [stats] webhook ledger: ${ledgerCalls.length} call row(s) already present in the API fetch`);
+    } else {
+      console.log('  [stats] webhook ledger: no rows in this window (Quo → /webhooks/quo not yet recording)');
+    }
+  } catch (err) {
+    console.warn(`  [stats] webhook ledger merge skipped: ${err.message}`);
+  }
+  return data;
 }
 
 function callStatsWindows(slotId, now = DateTime.now().setZone(TIMEZONE)) {
@@ -4480,17 +4594,25 @@ async function runDailyCallStatsReport(opts = {}) {
   const apiKey = firmCtx().quoApiKey;
 
   console.log(`\n[1/3] Fetching ${win.windowNote} (excluding inboxes: ${excludeLineNames.join(', ') || 'none'})...`);
-  const curData = await fetchDailyCallStats({ apiKey, ...cur, excludeLineNames });
+  const curData = await enrichStatsFromLedger(
+    await fetchDailyCallStats({ apiKey, ...cur, excludeLineNames }),
+    cur,
+    excludeLineNames
+  );
   console.log(`  ${curData.calls.length} call(s), ${curData.messages.length} message(s) across ${curData.includedLines.length} inbox(es).`);
   console.log('\n[2/3] Fetching same weekday last week (for comparison)...');
-  const prevData = await fetchDailyCallStats({ apiKey, ...prev, excludeLineNames });
+  const prevData = await enrichStatsFromLedger(
+    await fetchDailyCallStats({ apiKey, ...prev, excludeLineNames }),
+    prev,
+    excludeLineNames
+  );
   console.log(`  ${prevData.calls.length} call(s), ${prevData.messages.length} message(s).`);
 
   const transferLines = firmCtx().statsTransferInboxes;
   const ignoreIncomingLines = firmCtx().statsIgnoreIncomingInboxes;
   const curAgg = aggregateCallStats({ ...curData, volumeExcludeLines: transferLines, ignoreIncomingLines });
   const prevAgg = aggregateCallStats({ ...prevData, volumeExcludeLines: transferLines, ignoreIncomingLines });
-  console.log(`  Ignoring inbound (auto-forward duplicates) on: ${ignoreIncomingLines.join(', ') || 'none'} (dropped ${curAgg.ignoredInbound || 0} in this window)`);
+  console.log(`  Omitting dashboard-unchecked lines: ${ignoreIncomingLines.join(', ') || 'none'} (dropped ${curAgg.ignoredInbound || 0} in this window)`);
   console.log(`  Answered calls by line: ${Object.entries(curAgg.answeredByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`);
   console.log(`  (transfer lines counted for per-user answered, excluded from incoming volume: ${transferLines.join(', ') || 'none'})`);
 
@@ -4530,9 +4652,15 @@ async function runDailyCallStatsReport(opts = {}) {
   // Answered is the number the team is coached on, so lead with it.
   userRows.sort((a, b) => b.answered - a.answered || b.total - a.total);
 
-  const missed = { cur: missedCallsTotal(curAgg), prev: missedCallsTotal(prevAgg), goal: firmCtx().statsMissedGoal };
+  const missed = {
+    cur: missedCallsTotal(curAgg),
+    prev: missedCallsTotal(prevAgg),
+    curIn: curAgg.totalIncoming,
+    prevIn: prevAgg.totalIncoming,
+    goal: firmStore.callStatsSlotGoal(firmCtx(), slotId),
+  };
 
-  console.log(`\n[3/3] MISSED CALLS (Missed+Agent-answered+Agent-abandoned): ${missed.cur} (goal <${missed.goal}, last wk ${missed.prev})`);
+  console.log(`\n[3/3] MISSED CALLS (Missed+Voicemail+Agent-answered+Agent-abandoned): ${missed.cur} (goal <${missed.goal}, last wk ${missed.prev})`);
   console.log(`  Incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming}) · users in table: ${userRows.length}`);
   for (const b of CALL_OUTCOME_ORDER) {
     if (curAgg.outcomes[b]) console.log(`   ${b}: ${curAgg.outcomes[b]}`);
@@ -4550,7 +4678,7 @@ async function runDailyCallStatsReport(opts = {}) {
   const plainLines = [
     `${win.title} — ${win.subtitle}`,
     '',
-    `** MISSED CALLS (Missed + Answered by agent + Agent abandoned): ${missed.cur} ** — goal under ${missed.goal} (last wk ${missed.prev})`,
+    `** MISSED CALLS (Missed + Voicemail + Answered by agent + Agent abandoned): ${missed.cur} ** — goal under ${missed.goal} (last wk ${missed.prev})`,
     '',
     'Incoming Call Outcomes:',
     ...CALL_OUTCOME_ORDER.filter((b) => curAgg.outcomes[b] || prevAgg.outcomes[b]).map((b) => {

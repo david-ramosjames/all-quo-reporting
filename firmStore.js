@@ -148,6 +148,14 @@ function resolveClockTime(raw, fallbackRaw) {
   return parseClockTime(raw) || parseClockTime(fallbackRaw) || { hour: 7, minute: 30 };
 }
 
+function parseMissedGoal(raw, fallback = 10) {
+  const s = String(raw == null ? '' : raw).replace(/%/g, '').trim();
+  if (s === '') return fallback;
+  const n = parseInt(s, 10);
+  if (!Number.isFinite(n) || n < 0) return fallback;
+  return n;
+}
+
 const CALL_STATS_SLOTS = [
   {
     id: 'morning',
@@ -155,6 +163,7 @@ const CALL_STATS_SLOTS = [
     defaultTime: morningTimeFromCron(),
     emailField: 'statsEmailTo',
     timeField: 'statsMorningTime',
+    goalField: 'statsMissedGoal',
     window: 'prior_day',
   },
   {
@@ -163,6 +172,7 @@ const CALL_STATS_SLOTS = [
     defaultTime: '13:00',
     emailField: 'statsMiddayEmailTo',
     timeField: 'statsMiddayTime',
+    goalField: 'statsMissedGoalMidday',
     window: 'today_so_far',
   },
   {
@@ -171,6 +181,7 @@ const CALL_STATS_SLOTS = [
     defaultTime: '17:00',
     emailField: 'statsAfternoonEmailTo',
     timeField: 'statsAfternoonTime',
+    goalField: 'statsMissedGoalAfternoon',
     window: 'today_so_far',
   },
 ];
@@ -190,6 +201,13 @@ function callStatsSlotRecipients(ctx, slotId) {
   return Array.isArray(list) ? list : [];
 }
 
+function callStatsSlotGoal(ctx, slotId) {
+  const slot = callStatsSlot(slotId);
+  const n = ctx && ctx[slot.goalField];
+  if (Number.isFinite(Number(n)) && Number(n) >= 0) return Number(n);
+  return Number(ctx && ctx.statsMissedGoal) || 10;
+}
+
 /**
  * Normalized per-firm reporting context used by the jobs. Every field falls
  * back to the matching env constant when the firm column is blank, so a
@@ -200,6 +218,7 @@ function callStatsSlotRecipients(ctx, slotId) {
 function reportConfigForFirm(firm) {
   const f = firm || {};
   const env = process.env;
+  const missedGoal = parseMissedGoal(firstNonEmpty(f.stats_missed_goal, env.STATS_MISSED_GOAL, '10'));
   return {
     id: f.id || DEFAULT_FIRM_ID,
     firmName: f.firm_name || COMPANY_NAME,
@@ -226,24 +245,26 @@ function reportConfigForFirm(firm) {
     statsMorningTime: firstNonEmpty(f.stats_morning_time, env.STATS_MORNING_TIME, morningTimeFromCron()),
     statsMiddayTime: firstNonEmpty(f.stats_midday_time, env.STATS_MIDDAY_TIME, '1:00 PM'),
     statsAfternoonTime: firstNonEmpty(f.stats_afternoon_time, env.STATS_AFTERNOON_TIME, '5:00 PM'),
+    statsMissedGoal: missedGoal,
+    statsMissedGoalMidday: parseMissedGoal(firstNonEmpty(f.stats_missed_goal_midday, env.STATS_MISSED_GOAL_MIDDAY), missedGoal),
+    statsMissedGoalAfternoon: parseMissedGoal(firstNonEmpty(f.stats_missed_goal_afternoon, env.STATS_MISSED_GOAL_AFTERNOON), missedGoal),
     // Lines dropped entirely. Default mirrors the Quo dashboard's inbox filter
-    // (Leads, RJL Main Line, RJL Outbound, RGV Number, Intake) so the numbers
+    // (Leads, RJL Main Line, RGV Number, Intake) so the numbers
     // reconcile against it.
-    statsExcludeInboxes: firstList(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES, 'RJL Transfers,Extra Number,SA Law Firm,Trucking Chicas'),
+    statsExcludeInboxes: firstList(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES, 'RJL Transfers,Extra Number,SA Law Firm,Trucking Chicas,RJL Outbound'),
     // Optional: lines counted toward who ANSWERED but not toward incoming
     // volume. Empty by default — move a line here (and out of the exclude list)
     // to credit staff for transferred calls without double-counting volume.
     statsTransferInboxes: firstList(f.stats_transfer_inboxes, env.STATS_TRANSFER_INBOXES),
     // Lines that auto-forward every inbound call elsewhere. Quo writes a second
-    // record on the forwarding line, so counting it double-counts the call —
-    // ignore inbound on these lines (outbound still counts).
+    // record on the forwarding line AND the dashboard unchecks the line, so we
+    // omit the whole line (inbound and outbound) from this email.
     statsIgnoreIncomingInboxes: firstList(f.stats_ignore_incoming_inboxes, env.STATS_IGNORE_INCOMING_INBOXES, 'RJL Outbound'),
     statsIncludeUsers: firstList(
       f.stats_include_users,
       env.STATS_INCLUDE_USERS,
       'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Valeria Chang'
     ),
-    statsMissedGoal: Math.max(0, parseInt(firstNonEmpty(f.stats_missed_goal, env.STATS_MISSED_GOAL, '10'), 10) || 10),
     sheets: {
       sheetsId: firstNonEmpty(f.sheets_id, env.GOOGLE_SHEETS_ID),
       sheetsRange: firstNonEmpty(f.sheets_range, env.GOOGLE_SHEETS_RANGE),
@@ -501,6 +522,8 @@ module.exports = {
   callStatsSlot,
   callStatsSlotClock,
   callStatsSlotRecipients,
+  callStatsSlotGoal,
+  parseMissedGoal,
   loadFirms,
   loadActiveFirms,
   getDefaultFirm,
