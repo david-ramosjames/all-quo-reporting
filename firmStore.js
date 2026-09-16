@@ -98,6 +98,26 @@ function firstList(...vals) {
   return parseList(firstNonEmpty(...vals));
 }
 
+/** Quo dashboard inboxes that stay in the report (everything else is dropped). */
+const DEFAULT_STATS_EXCLUDE = 'Extra Number,SA Law Firm,Trucking Chicas,RJL Outbound';
+const LEGACY_STATS_EXCLUDE = new Set(
+  ['RJL Transfers', 'Extra Number', 'SA Law Firm', 'Trucking Chicas', 'RJL Outbound'].map((s) => s.toLowerCase())
+);
+
+function statsExcludeInboxesFrom(firmVal, envVal) {
+  const raw = firstNonEmpty(firmVal, envVal);
+  if (!raw) return parseList(DEFAULT_STATS_EXCLUDE);
+  const list = parseList(raw);
+  const lower = list.map((s) => s.toLowerCase());
+  // Old canned default kept Transfers off; the Quo dashboard now includes it.
+  const isLegacyDefault =
+    lower.includes('rjl transfers') &&
+    lower.every((s) => LEGACY_STATS_EXCLUDE.has(s)) &&
+    lower.length <= LEGACY_STATS_EXCLUDE.size;
+  if (isLegacyDefault) return parseList(DEFAULT_STATS_EXCLUDE);
+  return list;
+}
+
 /** Morning send time from CALL_STATS_CRON (`30 7 * * *` → 7:30), else 7:30. */
 function morningTimeFromCron() {
   const parts = String(process.env.CALL_STATS_CRON || '').trim().split(/\s+/);
@@ -248,10 +268,9 @@ function reportConfigForFirm(firm) {
     statsMissedGoal: missedGoal,
     statsMissedGoalMidday: parseMissedGoal(firstNonEmpty(f.stats_missed_goal_midday, env.STATS_MISSED_GOAL_MIDDAY), missedGoal),
     statsMissedGoalAfternoon: parseMissedGoal(firstNonEmpty(f.stats_missed_goal_afternoon, env.STATS_MISSED_GOAL_AFTERNOON), missedGoal),
-    // Lines dropped entirely. Default mirrors the Quo dashboard's inbox filter
-    // (Leads, RJL Main Line, RGV Number, Intake) so the numbers
-    // reconcile against it.
-    statsExcludeInboxes: firstList(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES, 'RJL Transfers,Extra Number,SA Law Firm,Trucking Chicas,RJL Outbound'),
+    // Lines dropped entirely. Default matches the Quo dashboard inbox filter
+    // (Leads, RJL Main Line, RGV Number, RJL Transfers, Intake).
+    statsExcludeInboxes: statsExcludeInboxesFrom(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES),
     // Optional: lines counted toward who ANSWERED but not toward incoming
     // volume. Empty by default — move a line here (and out of the exclude list)
     // to credit staff for transferred calls without double-counting volume.

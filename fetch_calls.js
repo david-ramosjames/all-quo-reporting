@@ -880,6 +880,7 @@ async function fetchDailyCallStats(options = {}) {
     if (m.id && seenMsgIds.has(m.id)) return;
     if (m.id) seenMsgIds.add(m.id);
     messages.push({
+      id: m.id || null,
       phoneNumberId,
       lineName: lineMap[phoneNumberId] || '',
       userId: idOf(m.userId) || idOf(m.user?.id) || null,
@@ -1102,6 +1103,7 @@ async function fetchDailyCallStats(options = {}) {
     calls,
     messages,
     userMap,
+    lineById: lineMap,
     includedLines: includedLines.map((l) => l.name || l.number || l.id),
     excludedLines: excludedLines.map((l) => l.name || l.number || l.id),
   };

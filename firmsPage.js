@@ -59,9 +59,9 @@ const FIRM_FIELDS = [
     help: 'Goal for the afternoon (today so far) send. Blank = use the morning / full-day goal.' },
 
   { key: 'stats_exclude_inboxes', label: 'Call stats — inboxes to exclude entirely', type: 'text', group: 'Yesterday Call Stats',
-    help: 'Comma-separated Quo line names dropped from the report completely — must match the line name exactly. Blank = default (RJL Transfers, Extra Number, SA Law Firm, Trucking Chicas, RJL Outbound), matching the four inboxes checked on the Quo dashboard (Leads, RJL Main Line, RGV Number, Intake).' },
+    help: 'Comma-separated Quo line names dropped from the report completely — must match the line name exactly. Blank = default (Extra Number, SA Law Firm, Trucking Chicas, RJL Outbound), matching the five inboxes checked on the Quo dashboard (Leads, RJL Main Line, RGV Number, RJL Transfers, Intake).' },
   { key: 'stats_transfer_inboxes', label: 'Call stats — transfer lines', type: 'text', group: 'Yesterday Call Stats',
-    help: 'Optional. Lines listed here count toward who ANSWERED but are left out of incoming call volume (no double-counting a transferred call). Blank by default — to credit staff for transferred calls, put RJL Transfers here AND remove it from the exclude list above.' },
+    help: 'Optional. Lines listed here count toward who ANSWERED but are left out of incoming call volume (no double-counting a transferred call). Leave blank to match the Quo dashboard (Transfers inbound counts in the total).' },
   { key: 'stats_ignore_incoming_inboxes', label: 'Call stats — ignore INCOMING on these lines', type: 'text', group: 'Yesterday Call Stats',
     help: 'Lines unchecked on the Quo dashboard (typically the auto-forward line). Inbound is a duplicate of the line that actually rang; outbound on these lines is omitted too so the per-user table matches an unchecked inbox. Blank = default (RJL Outbound).' },
   { key: 'stats_include_users', label: 'Call stats — users in the per-user table', type: 'text', group: 'Yesterday Call Stats',

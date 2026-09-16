@@ -4396,7 +4396,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     ${userTable}
 
     <div class="note" style="margin-top:20px;border-top:1px solid #d0d7de;padding-top:10px">
-      <p>Inboxes excluded: ${escapeHtml((meta.excludedLines || []).join(', ') || 'none')}. Incoming auto-forwards ignored on: ${escapeHtml((meta.ignoreIncomingLines || []).join(', ') || 'none')} (the call is counted on the line that received it). Users shown: ${meta.usersFilterActive ? 'filtered to the configured team' : 'everyone with activity'}. Each number's change is vs the same weekday one week ago.</p>
+      <p>Inboxes included: ${escapeHtml((meta.includedLines || []).join(', ') || 'none')}. Each number's change is vs the same weekday one week ago.</p>
     </div>
   </body></html>`;
 }
@@ -4487,13 +4487,19 @@ async function enrichStatsFromLedger(data, window, excludeLineNames) {
       added += 1;
     }
     const ledgerMsgs = await pg.listQuoMessagesInWindow(window.createdAfter, window.createdBefore);
-    const seenMsg = new Set((data.messages || []).map((m) => `${m.phoneNumberId || ''}::${m.createdAt || ''}::${m.userId || ''}`));
+    const seenMsgIds = new Set((data.messages || []).map((m) => m.id).filter(Boolean));
+    const seenMsg = new Set(
+      (data.messages || []).map((m) => `${m.phoneNumberId || ''}::${isoTs(m.createdAt)}::${m.userId || ''}`)
+    );
     let msgAdded = 0;
     for (const row of ledgerMsgs) {
       const pnId = row.phone_number_id || '';
       const lineName = lineById[pnId] || '';
       if (exclude.has(String(lineName).trim().toLowerCase())) continue;
+      const messageId = row.message_id || '';
+      if (messageId && seenMsgIds.has(messageId)) continue;
       const msg = {
+        id: messageId || null,
         phoneNumberId: pnId,
         lineName,
         userId: row.user_id || null,
@@ -4501,7 +4507,8 @@ async function enrichStatsFromLedger(data, window, excludeLineNames) {
         createdAt: isoTs(row.created_at),
       };
       const k = `${msg.phoneNumberId}::${msg.createdAt}::${msg.userId || ''}`;
-      if (seenMsg.has(k)) continue;
+      if (!messageId && seenMsg.has(k)) continue;
+      if (messageId) seenMsgIds.add(messageId);
       seenMsg.add(k);
       data.messages.push(msg);
       msgAdded += 1;
@@ -4670,9 +4677,7 @@ async function runDailyCallStatsReport(opts = {}) {
   }
 
   const meta = {
-    excludedLines: curData.excludedLines,
-    ignoreIncomingLines,
-    usersFilterActive,
+    includedLines: curData.includedLines,
   };
   const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed, win);
   const plainLines = [
