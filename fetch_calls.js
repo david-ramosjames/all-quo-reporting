@@ -835,10 +835,15 @@ async function fetchDailyCallStats(options = {}) {
     const answeredBy = idOf(c.answeredBy);
     const initiatedBy = idOf(c.initiatedBy);
     const parts = Array.isArray(c.participants) ? c.participants : [];
+    const own = numberMap[pnId] || '';
+    const others = conversationCounterparties(parts, own);
+    const isWorkspaceNum = (p) => Object.values(numberMap).some((n) => samePhone(n, p));
+    const callerPhone = inbound
+      ? (others.find((p) => !isWorkspaceNum(p)) || others[0] || '')
+      : '';
     if (inbound) {
       inboundByLine[lineName] = (inboundByLine[lineName] || 0) + 1;
-      const own = numberMap[pnId] || '';
-      const other = parts.find((p) => !samePhone(p, own)) || parts[0] || '(unknown)';
+      const other = callerPhone || others[0] || '(unknown)';
       (inboundPartiesByLine[lineName] ||= new Set()).add(other);
     } else {
       outboundByLine[lineName] = (outboundByLine[lineName] || 0) + 1;
@@ -871,6 +876,7 @@ async function fetchDailyCallStats(options = {}) {
       forwardedFrom: c.forwardedFrom || null,
       forwardedTo: c.forwardedTo || null,
       callRoute: c.callRoute || null,
+      callerPhone,
     });
   };
 
@@ -1109,6 +1115,19 @@ async function fetchDailyCallStats(options = {}) {
   };
 }
 
+async function fetchContactMap(apiKey) {
+  const key = apiKey || API_KEY;
+  if (!key) throw new Error('QUO_API_KEY is not set.');
+  return buildContactMap(makeClient(key));
+}
+
 if (require.main === module) main();
 
-module.exports = { runExport, fetchDailyCallStats };
+module.exports = {
+  runExport,
+  fetchDailyCallStats,
+  buildContactMap,
+  fetchContactMap,
+  lookupContactName,
+  lookupContactId,
+};

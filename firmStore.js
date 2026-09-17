@@ -86,6 +86,44 @@ function parseList(v) {
   return String(v == null ? '' : v).split(',').map((s) => s.trim()).filter(Boolean);
 }
 
+function isValidEmailAddress(email) {
+  const s = String(email || '');
+  const at = s.lastIndexOf('@');
+  if (at < 1) return false;
+  const domain = s.slice(at + 1);
+  if (!domain || domain.includes('..') || domain.startsWith('.') || domain.endsWith('.')) return false;
+  if (!/^[A-Z0-9](?:[A-Z0-9\-]*[A-Z0-9])?(?:\.[A-Z0-9](?:[A-Z0-9\-]*[A-Z0-9])?)+$/i.test(domain)) return false;
+  return true;
+}
+
+/**
+ * Pull actual email addresses out of a paste. Invalid tokens (no TLD, `..` in
+ * the domain, etc.) are dropped — Gmail rejects the whole send as
+ * "Invalid To header" if any To address is malformed.
+ */
+function parseEmailList(v) {
+  const raw = String(v == null ? '' : v);
+  const emails = [];
+  const seen = new Set();
+  const parts = raw.split(/[,;\n\r]+/).map((s) => s.trim()).filter(Boolean);
+  for (const part of parts) {
+    const angle = part.match(/<([^>]+)>/);
+    const candidate = (angle ? angle[1] : part).trim().replace(/^mailto:/i, '');
+    const loose = ((candidate.match(/[A-Z0-9._%+\-]+@[^\s>]+/i) || [])[0] || '').replace(/[.,;:]+$/g, '');
+    if (loose && isValidEmailAddress(loose)) {
+      const key = loose.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      emails.push(loose);
+      continue;
+    }
+    if (part.includes('@')) {
+      console.warn(`  Skipping invalid email address: ${part}`);
+    }
+  }
+  return emails;
+}
+
 function firstNonEmpty(...vals) {
   for (const v of vals) {
     if (v !== undefined && v !== null && String(v).trim() !== '') return v;
@@ -96,6 +134,10 @@ function firstNonEmpty(...vals) {
 /** Parse the first non-empty comma-list among the candidates into an array. */
 function firstList(...vals) {
   return parseList(firstNonEmpty(...vals));
+}
+
+function firstEmailList(...vals) {
+  return parseEmailList(firstNonEmpty(...vals));
 }
 
 /** Quo dashboard inboxes that stay in the report (everything else is dropped). */
@@ -221,6 +263,20 @@ function callStatsSlotRecipients(ctx, slotId) {
   return Array.isArray(list) ? list : [];
 }
 
+const SLOT_EMAIL_SOURCE = {
+  statsEmailTo: ['stats_email_to', 'STATS_EMAIL_TO'],
+  statsMiddayEmailTo: ['stats_midday_email_to', 'STATS_MIDDAY_EMAIL_TO'],
+  statsAfternoonEmailTo: ['stats_afternoon_email_to', 'STATS_AFTERNOON_EMAIL_TO'],
+};
+
+/** Unparsed recipient field for a slot (firm column, then env). */
+function callStatsSlotRawRecipientText(firm, slotId) {
+  const slot = callStatsSlot(slotId);
+  const src = SLOT_EMAIL_SOURCE[slot.emailField];
+  if (!src) return '';
+  return firstNonEmpty(firm && firm[src[0]], process.env[src[1]]);
+}
+
 function callStatsSlotGoal(ctx, slotId) {
   const slot = callStatsSlot(slotId);
   const n = ctx && ctx[slot.goalField];
@@ -249,19 +305,19 @@ function reportConfigForFirm(firm) {
     emailFrom: firstNonEmpty(f.email_from, env.EMAIL_FROM),
     // Default report recipients (also the daily-report list). Per-report-type
     // lists below fall back to this default, then to the env EMAIL_TO.
-    emailTo: f.report_email_to ? parseList(f.report_email_to) : parseList(env.EMAIL_TO),
-    weeklyEmailTo: firstList(f.weekly_email_to, f.report_email_to, env.EMAIL_TO),
-    monthlyEmailTo: firstList(f.monthly_email_to, f.report_email_to, env.EMAIL_TO),
-    missedEmailTo: firstList(f.missed_calls_email_to, env.MISSED_CLIENT_CALLS_EMAIL_TO, f.report_email_to, env.EMAIL_TO),
+    emailTo: firstEmailList(f.report_email_to, env.EMAIL_TO),
+    weeklyEmailTo: firstEmailList(f.weekly_email_to, f.report_email_to, env.EMAIL_TO),
+    monthlyEmailTo: firstEmailList(f.monthly_email_to, f.report_email_to, env.EMAIL_TO),
+    missedEmailTo: firstEmailList(f.missed_calls_email_to, env.MISSED_CLIENT_CALLS_EMAIL_TO, f.report_email_to, env.EMAIL_TO),
     slackBotToken: firstNonEmpty(f.slack_bot_token, env.SLACK_BOT_TOKEN),
     slackChannel: firstNonEmpty(f.slack_channel, env.SLACK_CHANNEL, 'lead-calls'),
     reviewSlackChannel: firstNonEmpty(f.review_slack_channel, env.REVIEW_SLACK_CHANNEL, 'review-opportunities'),
     // Yesterday Call Stats email — per-firm columns (set on /review/firms/edit),
     // env fallbacks, then built-in defaults. Recipients do NOT fall back to the
     // default report list (this email goes to a specific audience).
-    statsEmailTo: firstList(f.stats_email_to, env.STATS_EMAIL_TO),
-    statsMiddayEmailTo: firstList(f.stats_midday_email_to, env.STATS_MIDDAY_EMAIL_TO),
-    statsAfternoonEmailTo: firstList(f.stats_afternoon_email_to, env.STATS_AFTERNOON_EMAIL_TO),
+    statsEmailTo: firstEmailList(f.stats_email_to, env.STATS_EMAIL_TO),
+    statsMiddayEmailTo: firstEmailList(f.stats_midday_email_to, env.STATS_MIDDAY_EMAIL_TO),
+    statsAfternoonEmailTo: firstEmailList(f.stats_afternoon_email_to, env.STATS_AFTERNOON_EMAIL_TO),
     statsMorningTime: firstNonEmpty(f.stats_morning_time, env.STATS_MORNING_TIME, morningTimeFromCron()),
     statsMiddayTime: firstNonEmpty(f.stats_midday_time, env.STATS_MIDDAY_TIME, '1:00 PM'),
     statsAfternoonTime: firstNonEmpty(f.stats_afternoon_time, env.STATS_AFTERNOON_TIME, '5:00 PM'),
@@ -541,7 +597,9 @@ module.exports = {
   callStatsSlot,
   callStatsSlotClock,
   callStatsSlotRecipients,
+  callStatsSlotRawRecipientText,
   callStatsSlotGoal,
+  parseEmailList,
   parseMissedGoal,
   loadFirms,
   loadActiveFirms,

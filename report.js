@@ -5,7 +5,7 @@ const { DateTime } = require('luxon');
 const MailComposer = require('nodemailer/lib/mail-composer');
 const { google } = require('googleapis');
 const OpenAI = require('openai');
-const { runExport, fetchDailyCallStats } = require('./fetch_calls');
+const { runExport, fetchDailyCallStats, fetchContactMap, lookupContactName, lookupContactId } = require('./fetch_calls');
 const {
   generateDailyLeadReportPrompt,
   buildWeeklyClientBundleSentimentPrompt,
@@ -1822,13 +1822,18 @@ function buildEmailHtml(analysis, stats, dateLabel) {
 }
 
 async function sendEmail({ htmlBody, plainText, subject, attachments = [], to, from }) {
-  const recipients = (Array.isArray(to) && to.length ? to : firmCtx().emailTo).join(', ');
+  const rawTo = Array.isArray(to) && to.length ? to : firmCtx().emailTo;
+  const recipients = firmStore.parseEmailList(Array.isArray(rawTo) ? rawTo.join(',') : rawTo);
+  if (!recipients.length) {
+    throw new Error('Invalid To header: no valid email addresses (use name@domain.com, not display names)');
+  }
   const mail = {
     from: from || firmCtx().emailFrom || EMAIL_FROM,
     to: recipients,
     subject,
     text: plainText,
     html: htmlBody,
+    newline: '\r\n',
   };
   if (attachments.length) mail.attachments = attachments;
 
@@ -1843,10 +1848,17 @@ async function sendEmail({ htmlBody, plainText, subject, attachments = [], to, f
     .replace(/=+$/, '');
 
   const gmail = google.gmail({ version: 'v1', auth: makeAuthClient() });
-  await gmail.users.messages.send({
-    userId: 'me',
-    requestBody: { raw: encodedMessage },
-  });
+  try {
+    await gmail.users.messages.send({
+      userId: 'me',
+      requestBody: { raw: encodedMessage },
+    });
+  } catch (err) {
+    if (/invalid to header/i.test(err.message || '')) {
+      throw new Error(`Invalid To header (${recipients.join(', ')}). Use comma-separated addresses like name@domain.com.`);
+    }
+    throw err;
+  }
 }
 
 // ── Monthly client newsletter content (30-day window, batched JSON → pooled brief) ─
@@ -4197,6 +4209,8 @@ const CALL_OUTCOME_ORDER = [
   'Other',
 ];
 
+const MISSED_KPI_BUCKETS = new Set(['Missed', 'Voicemail', 'Answered by agent', 'Agent abandoned']);
+
 /** Bucket one INCOMING call into a dashboard outcome (best-effort from status). */
 function callOutcomeBucket(c) {
   const status = String(c.status || '').toLowerCase();
@@ -4257,6 +4271,8 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
   const outcomes = {};
   let totalIncoming = 0;
   let ignoredInbound = 0;
+  let missedKnown = 0;
+  let missedUnknown = 0;
   for (const c of calls) {
     if (!isIncomingDirection(c.direction)) continue;
     if (isIgnoredLine(c)) {
@@ -4267,6 +4283,10 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
     totalIncoming += 1;
     const b = callOutcomeBucket(c);
     outcomes[b] = (outcomes[b] || 0) + 1;
+    if (MISSED_KPI_BUCKETS.has(b)) {
+      if (c.knownContact) missedKnown += 1;
+      else missedUnknown += 1;
+    }
   }
   /** Answered-call counts per Quo line — diagnoses where answered calls land. */
   const answeredByLine = {};
@@ -4304,7 +4324,7 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
     if (!m.userId || isIncomingDirection(m.direction)) continue; // sent = outgoing
     ensure(m.userId).messages += 1;
   }
-  return { outcomes, totalIncoming, perUser, answeredByLine, ignoredInbound };
+  return { outcomes, totalIncoming, perUser, answeredByLine, ignoredInbound, missedKnown, missedUnknown };
 }
 
 /**
@@ -4315,6 +4335,21 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
 function missedCallsTotal(agg) {
   const o = agg.outcomes || {};
   return (o['Missed'] || 0) + (o['Voicemail'] || 0) + (o['Answered by agent'] || 0) + (o['Agent abandoned'] || 0);
+}
+
+function statsCallerPhone(c) {
+  if (c && c.callerPhone) return c.callerPhone;
+  if (c && isIncomingDirection(c.direction) && c.from) return c.from;
+  const parts = Array.isArray(c && c.participants) ? c.participants : [];
+  return parts[0] || '';
+}
+
+function tagStatsCallsKnownContact(calls, contactMap) {
+  for (const c of calls || []) {
+    const phone = statsCallerPhone(c);
+    c.callerPhone = phone;
+    c.knownContact = Boolean(lookupContactName(contactMap, phone) || lookupContactId(contactMap, phone));
+  }
 }
 
 function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed, view = {}) {
@@ -4376,11 +4411,12 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
   const ofIncoming = missed.curIn
     ? `${Math.round((missed.cur / missed.curIn) * 100)}% of incoming`
     : '';
-  const missedCallout = `<div style="border:2px solid ${missedColor};border-radius:8px;padding:12px 16px;margin-top:14px;max-width:460px">
+  const missedCallout = `<div style="border:2px solid ${missedColor};border-radius:8px;padding:12px 16px;margin-top:14px;max-width:540px">
       <div style="font-size:12px;color:#57606a;text-transform:uppercase;letter-spacing:.5px">Missed Calls &mdash; Missed + Voicemail + Answered by Agent + Agent Abandoned</div>
       <div style="margin-top:4px"><span style="font-size:36px;font-weight:800;color:${missedColor}">${missed.cur}</span>
         <span style="font-size:14px;font-weight:600;color:#57606a;margin-left:6px">${escapeHtml(ofIncoming)}${ofIncoming ? ' · ' : ''}${escapeHtml(pctChangeLabel(missed.cur, missed.prev))} vs last wk (${missed.prev})</span></div>
       <div style="font-size:13px;color:${missedColor};font-weight:600;margin-top:2px">Goal: under ${goal} &mdash; ${metGoal ? 'on target ✓' : 'above goal'}</div>
+      ${missed.known != null ? `<div style="font-size:13px;color:#57606a;margin-top:6px">Of these: <strong>${missed.known}</strong> known contacts · <strong>${missed.unknown}</strong> not in contacts${missed.prevKnown != null ? ` <span class="chg">· last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts</span>` : ''}</div>` : ''}
     </div>`;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
@@ -4418,11 +4454,16 @@ function lineMapFromStats(data) {
 function statsCallFromLedger(row, lineById) {
   const pnId = row.phone_number_id || '';
   const parts = row.participants && typeof row.participants === 'object' ? row.participants : {};
+  const externals = Array.isArray(parts.external) ? parts.external : [];
+  const inbound = /^(incoming|inbound)$/i.test(String(row.direction || ''));
+  const callerPhone = inbound
+    ? (parts.from || externals[0] || '')
+    : '';
   return {
     id: row.call_id,
     phoneNumberId: pnId,
     lineName: row.line_name || lineById[pnId] || '',
-    participants: parts.external || parts.workspace || [],
+    participants: externals.length ? externals : (parts.workspace || []),
     answeredBy: row.answered_by || null,
     initiatedBy: row.initiated_by || null,
     userId: row.user_id || null,
@@ -4436,6 +4477,7 @@ function statsCallFromLedger(row, lineById) {
     forwardedTo: row.forwarded_to || null,
     from: parts.from || null,
     to: parts.to || null,
+    callerPhone,
   };
 }
 
@@ -4476,6 +4518,10 @@ async function enrichStatsFromLedger(data, window, excludeLineNames) {
         }
         if (mapped.status && mapped.status !== existing.status) {
           existing.status = mapped.status;
+          changed = true;
+        }
+        if (!existing.callerPhone && mapped.callerPhone) {
+          existing.callerPhone = mapped.callerPhone;
           changed = true;
         }
         if (changed) patched += 1;
@@ -4615,6 +4661,18 @@ async function runDailyCallStatsReport(opts = {}) {
   );
   console.log(`  ${prevData.calls.length} call(s), ${prevData.messages.length} message(s).`);
 
+  let contactLookupOk = false;
+  try {
+    const contactMap = await fetchContactMap(apiKey);
+    tagStatsCallsKnownContact(curData.calls, contactMap);
+    tagStatsCallsKnownContact(prevData.calls, contactMap);
+    contactLookupOk = true;
+    const knownN = curData.calls.filter((c) => c.knownContact).length;
+    console.log(`  Quo contacts: ${knownN} of ${curData.calls.length} call(s) matched a saved contact.`);
+  } catch (err) {
+    console.warn(`  [stats] contact lookup skipped: ${err.message}`);
+  }
+
   const transferLines = firmCtx().statsTransferInboxes;
   const ignoreIncomingLines = firmCtx().statsIgnoreIncomingInboxes;
   const curAgg = aggregateCallStats({ ...curData, volumeExcludeLines: transferLines, ignoreIncomingLines });
@@ -4665,9 +4723,16 @@ async function runDailyCallStatsReport(opts = {}) {
     curIn: curAgg.totalIncoming,
     prevIn: prevAgg.totalIncoming,
     goal: firmStore.callStatsSlotGoal(firmCtx(), slotId),
+    known: contactLookupOk ? curAgg.missedKnown : null,
+    unknown: contactLookupOk ? curAgg.missedUnknown : null,
+    prevKnown: contactLookupOk ? prevAgg.missedKnown : null,
+    prevUnknown: contactLookupOk ? prevAgg.missedUnknown : null,
   };
 
   console.log(`\n[3/3] MISSED CALLS (Missed+Voicemail+Agent-answered+Agent-abandoned): ${missed.cur} (goal <${missed.goal}, last wk ${missed.prev})`);
+  if (contactLookupOk) {
+    console.log(`  Of these: ${missed.known} known contacts · ${missed.unknown} not in contacts (last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts)`);
+  }
   console.log(`  Incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming}) · users in table: ${userRows.length}`);
   for (const b of CALL_OUTCOME_ORDER) {
     if (curAgg.outcomes[b]) console.log(`   ${b}: ${curAgg.outcomes[b]}`);
@@ -4684,6 +4749,9 @@ async function runDailyCallStatsReport(opts = {}) {
     `${win.title} — ${win.subtitle}`,
     '',
     `** MISSED CALLS (Missed + Voicemail + Answered by agent + Agent abandoned): ${missed.cur} ** — goal under ${missed.goal} (last wk ${missed.prev})`,
+    ...(missed.known != null
+      ? [`  Of these: ${missed.known} known contacts · ${missed.unknown} not in contacts (last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts)`]
+      : []),
     '',
     'Incoming Call Outcomes:',
     ...CALL_OUTCOME_ORDER.filter((b) => curAgg.outcomes[b] || prevAgg.outcomes[b]).map((b) => {

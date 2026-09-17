@@ -162,7 +162,15 @@ async function runDueCallStatsSends() {
     const ctx = firmStore.reportConfigForFirm(firm);
     for (const slot of firmStore.CALL_STATS_SLOTS) {
       if (firmStore.clockToHm(firmStore.callStatsSlotClock(ctx, slot.id)) !== hm) continue;
-      if (!firmStore.callStatsSlotRecipients(ctx, slot.id).length) continue;
+      if (!firmStore.callStatsSlotRecipients(ctx, slot.id).length) {
+        const raw = firmStore.callStatsSlotRawRecipientText(firm, slot.id);
+        if (String(raw).trim()) {
+          console.warn(
+            `[${now.toFormat('ccc LLL d, h:mm a')}] Call stats ${slot.id} for ${ctx.firmName}: skipping — recipient field has no valid email addresses (need name@domain.com, not names).`
+          );
+        }
+        continue;
+      }
       const lock = `${dateKey}|${ctx.id}|${slot.id}`;
       if (callStatsFired.has(lock)) continue;
       due.push({ firmId: ctx.id, firmName: ctx.firmName, slot: slot.id, lock });
