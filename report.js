@@ -4253,12 +4253,12 @@ function pctChangeLabel(cur, prev) {
 
 /** Aggregate raw call/message records into outcome + per-user tallies. */
 function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomingLines }) {
-  // Lines unchecked on the Quo dashboard (typically the auto-forward line): omit
-  // inbound AND outbound so the email matches the four-inbox view.
+  // Auto-forward line (RJL Outbound): omit INCOMING only. Outbound calls, talk
+  // time, and sent messages on that line are real staff work and still count.
   const ignoreIn = new Set(
     (ignoreIncomingLines || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean)
   );
-  const isIgnoredLine = (c) => ignoreIn.has(String(c.lineName || '').trim().toLowerCase());
+  const isIgnoredIncomingLine = (c) => ignoreIn.has(String(c.lineName || '').trim().toLowerCase());
   // Transfer lines are excluded from INCOMING VOLUME (a transferred call already
   // counted once on the line it arrived on, so counting the transfer leg would
   // double-count it) but still count for PER-USER attribution — the person who
@@ -4275,7 +4275,7 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
   let missedUnknown = 0;
   for (const c of calls) {
     if (!isIncomingDirection(c.direction)) continue;
-    if (isIgnoredLine(c)) {
+    if (isIgnoredIncomingLine(c)) {
       ignoredInbound += 1;
       continue;
     }
@@ -4297,9 +4297,9 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
     return perUser.get(id);
   };
   for (const c of calls) {
-    if (isIgnoredLine(c)) continue;
-    const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
     const inbound = isIncomingDirection(c.direction);
+    if (inbound && isIgnoredIncomingLine(c)) continue;
+    const completed = ['completed', 'answered'].includes(String(c.status || '').toLowerCase());
     // Attribute by the direction-specific actor: who ANSWERED an inbound call vs
     // who PLACED an outbound one. `userId` is the line/route owner, not the
     // person who handled the call, so it's only a last-resort fallback outbound.
@@ -4432,7 +4432,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     ${userTable}
 
     <div class="note" style="margin-top:20px;border-top:1px solid #d0d7de;padding-top:10px">
-      <p>Inboxes included: ${escapeHtml((meta.includedLines || []).join(', ') || 'none')}. Each number's change is vs the same weekday one week ago.</p>
+      <p>Incoming inboxes: ${escapeHtml((meta.includedLines || []).join(', ') || 'none')}.${(meta.outboundAlsoLines || []).length ? ` Outgoing calls and sent messages also include ${escapeHtml(meta.outboundAlsoLines.join(', '))}.` : ''} Each number's change is vs the same weekday one week ago.</p>
     </div>
   </body></html>`;
 }
@@ -4677,7 +4677,7 @@ async function runDailyCallStatsReport(opts = {}) {
   const ignoreIncomingLines = firmCtx().statsIgnoreIncomingInboxes;
   const curAgg = aggregateCallStats({ ...curData, volumeExcludeLines: transferLines, ignoreIncomingLines });
   const prevAgg = aggregateCallStats({ ...prevData, volumeExcludeLines: transferLines, ignoreIncomingLines });
-  console.log(`  Omitting dashboard-unchecked lines: ${ignoreIncomingLines.join(', ') || 'none'} (dropped ${curAgg.ignoredInbound || 0} in this window)`);
+  console.log(`  Ignoring incoming on: ${ignoreIncomingLines.join(', ') || 'none'} (dropped ${curAgg.ignoredInbound || 0} inbound; outbound + sent messages still count)`);
   console.log(`  Answered calls by line: ${Object.entries(curAgg.answeredByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`);
   console.log(`  (transfer lines counted for per-user answered, excluded from incoming volume: ${transferLines.join(', ') || 'none'})`);
 
@@ -4741,8 +4741,13 @@ async function runDailyCallStatsReport(opts = {}) {
     console.log(`   - ${u.name}: total ${u.total}, out ${u.outgoing}, answered ${u.answered}, ${formatCallDuration(u.seconds)}, msgs ${u.messages}`);
   }
 
+  const ignoreIncomingSet = new Set(ignoreIncomingLines.map((s) => String(s).trim().toLowerCase()));
+  const incomingLines = (curData.includedLines || []).filter(
+    (n) => !ignoreIncomingSet.has(String(n).trim().toLowerCase())
+  );
   const meta = {
-    includedLines: curData.includedLines,
+    includedLines: incomingLines,
+    outboundAlsoLines: ignoreIncomingLines,
   };
   const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed, win);
   const plainLines = [

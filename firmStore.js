@@ -140,8 +140,9 @@ function firstEmailList(...vals) {
   return parseEmailList(firstNonEmpty(...vals));
 }
 
-/** Quo dashboard inboxes that stay in the report (everything else is dropped). */
-const DEFAULT_STATS_EXCLUDE = 'Extra Number,SA Law Firm,Trucking Chicas,RJL Outbound';
+/** Lines dropped from the report entirely. RJL Outbound is not here — inbound
+ *  on that line is ignored separately so outbound + sent messages still count. */
+const DEFAULT_STATS_EXCLUDE = 'Extra Number,SA Law Firm,Trucking Chicas';
 const LEGACY_STATS_EXCLUDE = new Set(
   ['RJL Transfers', 'Extra Number', 'SA Law Firm', 'Trucking Chicas', 'RJL Outbound'].map((s) => s.toLowerCase())
 );
@@ -151,9 +152,10 @@ function statsExcludeInboxesFrom(firmVal, envVal) {
   if (!raw) return parseList(DEFAULT_STATS_EXCLUDE);
   const list = parseList(raw);
   const lower = list.map((s) => s.toLowerCase());
-  // Old canned default kept Transfers off; the Quo dashboard now includes it.
+  // Canned defaults used to drop Outbound (and sometimes Transfers). Keep
+  // Outbound in the fetch so outbound calls / texts / talk time count.
   const isLegacyDefault =
-    lower.includes('rjl transfers') &&
+    lower.includes('rjl outbound') &&
     lower.every((s) => LEGACY_STATS_EXCLUDE.has(s)) &&
     lower.length <= LEGACY_STATS_EXCLUDE.size;
   if (isLegacyDefault) return parseList(DEFAULT_STATS_EXCLUDE);
@@ -325,15 +327,16 @@ function reportConfigForFirm(firm) {
     statsMissedGoalMidday: parseMissedGoal(firstNonEmpty(f.stats_missed_goal_midday, env.STATS_MISSED_GOAL_MIDDAY), missedGoal),
     statsMissedGoalAfternoon: parseMissedGoal(firstNonEmpty(f.stats_missed_goal_afternoon, env.STATS_MISSED_GOAL_AFTERNOON), missedGoal),
     // Lines dropped entirely. Default matches the Quo dashboard inbox filter
-    // (Leads, RJL Main Line, RGV Number, RJL Transfers, Intake).
+    // for incoming (Leads, RJL Main Line, RGV Number, RJL Transfers, Intake).
+    // RJL Outbound stays in the fetch so outbound + sent messages count.
     statsExcludeInboxes: statsExcludeInboxesFrom(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES),
     // Optional: lines counted toward who ANSWERED but not toward incoming
     // volume. Empty by default — move a line here (and out of the exclude list)
     // to credit staff for transferred calls without double-counting volume.
     statsTransferInboxes: firstList(f.stats_transfer_inboxes, env.STATS_TRANSFER_INBOXES),
-    // Lines that auto-forward every inbound call elsewhere. Quo writes a second
-    // record on the forwarding line AND the dashboard unchecks the line, so we
-    // omit the whole line (inbound and outbound) from this email.
+    // Auto-forward line: inbound is a duplicate of the line that actually rang,
+    // so it stays out of incoming volume / missed KPI. Outbound calls, talk
+    // time, and sent messages on these lines still count in the per-user table.
     statsIgnoreIncomingInboxes: firstList(f.stats_ignore_incoming_inboxes, env.STATS_IGNORE_INCOMING_INBOXES, 'RJL Outbound'),
     statsIncludeUsers: firstList(
       f.stats_include_users,
