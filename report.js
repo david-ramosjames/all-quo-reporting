@@ -4328,13 +4328,16 @@ function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomin
 }
 
 /**
- * The headline "Missed Calls" number the LAs are measured on:
- * Missed + Voicemail + Answered by agent + Agent abandoned (all incoming).
- * Goal is a count (under N), set per send so midday can be tighter than the full day.
+ * Missed-calls secondary count: Missed + Voicemail + Answered by agent +
+ * Agent abandoned. The headline goal is answered-by-user % of incoming.
  */
 function missedCallsTotal(agg) {
   const o = agg.outcomes || {};
   return (o['Missed'] || 0) + (o['Voicemail'] || 0) + (o['Answered by agent'] || 0) + (o['Agent abandoned'] || 0);
+}
+
+function answeredByUserCount(agg) {
+  return (agg.outcomes && agg.outcomes['Answered by user']) || 0;
 }
 
 function statsCallerPhone(c) {
@@ -4405,18 +4408,25 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     ${userBody}
   </table>`;
 
-  const goal = Number(missed.goal) || 10;
-  const metGoal = missed.cur < goal;
-  const missedColor = metGoal ? '#067647' : '#b42318';
-  const ofIncoming = missed.curIn
-    ? `${Math.round((missed.cur / missed.curIn) * 100)}% of incoming`
+  const goal = Number(missed.goal) || 85;
+  const total = missed.curIn || 0;
+  const answered = missed.answered || 0;
+  const pct = total ? (answered / total) * 100 : null;
+  const metGoal = pct != null && pct >= goal;
+  const missedColor = pct == null ? '#57606a' : (metGoal ? '#067647' : '#b42318');
+  const pctLabel = pct == null ? '—' : `${Math.round(pct)}%`;
+  const prevPct = missed.prevIn ? Math.round(((missed.prevAnswered || 0) / missed.prevIn) * 100) : null;
+  const vsLast = pct != null && prevPct != null
+    ? `${pctChangeLabel(Math.round(pct), prevPct)} vs last wk (${prevPct}%)`
     : '';
+  const ofIncoming = total ? `${answered} of ${total} incoming` : '';
   const missedCallout = `<div style="border:2px solid ${missedColor};border-radius:8px;padding:12px 16px;margin-top:14px;max-width:540px">
-      <div style="font-size:12px;color:#57606a;text-transform:uppercase;letter-spacing:.5px">Missed Calls &mdash; Missed + Voicemail + Answered by Agent + Agent Abandoned</div>
-      <div style="margin-top:4px"><span style="font-size:36px;font-weight:800;color:${missedColor}">${missed.cur}</span>
-        <span style="font-size:14px;font-weight:600;color:#57606a;margin-left:6px">${escapeHtml(ofIncoming)}${ofIncoming ? ' · ' : ''}${escapeHtml(pctChangeLabel(missed.cur, missed.prev))} vs last wk (${missed.prev})</span></div>
-      <div style="font-size:13px;color:${missedColor};font-weight:600;margin-top:2px">Goal: under ${goal} &mdash; ${metGoal ? 'on target ✓' : 'above goal'}</div>
-      ${missed.known != null ? `<div style="font-size:13px;color:#57606a;margin-top:6px">Of these: <strong>${missed.known}</strong> known contacts · <strong>${missed.unknown}</strong> not in contacts${missed.prevKnown != null ? ` <span class="chg">· last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts</span>` : ''}</div>` : ''}
+      <div style="font-size:12px;color:#57606a;text-transform:uppercase;letter-spacing:.5px">Answered by user</div>
+      <div style="margin-top:4px"><span style="font-size:36px;font-weight:800;color:${missedColor}">${escapeHtml(pctLabel)}</span>
+        <span style="font-size:14px;font-weight:600;color:#57606a;margin-left:6px">${escapeHtml(ofIncoming)}${ofIncoming && vsLast ? ' · ' : ''}${escapeHtml(vsLast)}</span></div>
+      <div style="font-size:13px;color:${missedColor};font-weight:600;margin-top:2px">Goal: ${goal}%+ answered by user &mdash; ${pct == null ? 'no incoming' : (metGoal ? 'on target ✓' : 'below goal')}</div>
+      <div style="font-size:13px;color:#57606a;margin-top:10px;padding-top:8px;border-top:1px solid #d0d7de">Missed calls (Missed + Voicemail + Answered by agent + Agent abandoned): <strong>${missed.cur}</strong>${missed.prev != null ? ` <span class="chg">· last wk ${missed.prev}</span>` : ''}</div>
+      ${missed.known != null ? `<div style="font-size:13px;color:#57606a;margin-top:4px">Of these: <strong>${missed.known}</strong> known contacts · <strong>${missed.unknown}</strong> not in contacts${missed.prevKnown != null ? ` <span class="chg">· last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts</span>` : ''}</div>` : ''}
     </div>`;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
@@ -4722,6 +4732,8 @@ async function runDailyCallStatsReport(opts = {}) {
     prev: missedCallsTotal(prevAgg),
     curIn: curAgg.totalIncoming,
     prevIn: prevAgg.totalIncoming,
+    answered: answeredByUserCount(curAgg),
+    prevAnswered: answeredByUserCount(prevAgg),
     goal: firmStore.callStatsSlotGoal(firmCtx(), slotId),
     known: contactLookupOk ? curAgg.missedKnown : null,
     unknown: contactLookupOk ? curAgg.missedUnknown : null,
@@ -4729,7 +4741,10 @@ async function runDailyCallStatsReport(opts = {}) {
     prevUnknown: contactLookupOk ? prevAgg.missedUnknown : null,
   };
 
-  console.log(`\n[3/3] MISSED CALLS (Missed+Voicemail+Agent-answered+Agent-abandoned): ${missed.cur} (goal <${missed.goal}, last wk ${missed.prev})`);
+  const answeredPct = missed.curIn ? Math.round((missed.answered / missed.curIn) * 100) : null;
+  const prevAnsweredPct = missed.prevIn ? Math.round((missed.prevAnswered / missed.prevIn) * 100) : null;
+  console.log(`\n[3/3] ANSWERED BY USER: ${answeredPct == null ? '—' : answeredPct + '%'} (${missed.answered} of ${missed.curIn}, goal ${missed.goal}%+, last wk ${prevAnsweredPct == null ? '—' : prevAnsweredPct + '%'})`);
+  console.log(`  Missed calls (Missed+Voicemail+Agent-answered+Agent-abandoned): ${missed.cur} (last wk ${missed.prev})`);
   if (contactLookupOk) {
     console.log(`  Of these: ${missed.known} known contacts · ${missed.unknown} not in contacts (last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts)`);
   }
@@ -4753,7 +4768,8 @@ async function runDailyCallStatsReport(opts = {}) {
   const plainLines = [
     `${win.title} — ${win.subtitle}`,
     '',
-    `** MISSED CALLS (Missed + Voicemail + Answered by agent + Agent abandoned): ${missed.cur} ** — goal under ${missed.goal} (last wk ${missed.prev})`,
+    `** ANSWERED BY USER: ${answeredPct == null ? '—' : answeredPct + '%'} ** (${missed.answered} of ${missed.curIn} incoming) — goal ${missed.goal}%+ (last wk ${prevAnsweredPct == null ? '—' : prevAnsweredPct + '%'})`,
+    `  Missed calls (Missed + Voicemail + Answered by agent + Agent abandoned): ${missed.cur} (last wk ${missed.prev})`,
     ...(missed.known != null
       ? [`  Of these: ${missed.known} known contacts · ${missed.unknown} not in contacts (last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts)`]
       : []),

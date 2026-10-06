@@ -212,12 +212,14 @@ function resolveClockTime(raw, fallbackRaw) {
   return parseClockTime(raw) || parseClockTime(fallbackRaw) || { hour: 7, minute: 30 };
 }
 
-function parseMissedGoal(raw, fallback = 10) {
+function parseAnsweredGoalPct(raw, fallback = 85) {
   const s = String(raw == null ? '' : raw).replace(/%/g, '').trim();
   if (s === '') return fallback;
   const n = parseInt(s, 10);
   if (!Number.isFinite(n) || n < 0) return fallback;
-  return n;
+  // Old missed-count goals were small integers (e.g. 10). Answered-by-user is a %.
+  if (n > 0 && n < 50) return fallback;
+  return Math.min(100, n);
 }
 
 const CALL_STATS_SLOTS = [
@@ -283,7 +285,7 @@ function callStatsSlotGoal(ctx, slotId) {
   const slot = callStatsSlot(slotId);
   const n = ctx && ctx[slot.goalField];
   if (Number.isFinite(Number(n)) && Number(n) >= 0) return Number(n);
-  return Number(ctx && ctx.statsMissedGoal) || 10;
+  return Number(ctx && ctx.statsMissedGoal) || 85;
 }
 
 /**
@@ -296,7 +298,7 @@ function callStatsSlotGoal(ctx, slotId) {
 function reportConfigForFirm(firm) {
   const f = firm || {};
   const env = process.env;
-  const missedGoal = parseMissedGoal(firstNonEmpty(f.stats_missed_goal, env.STATS_MISSED_GOAL, '10'));
+  const missedGoal = parseAnsweredGoalPct(firstNonEmpty(f.stats_missed_goal, env.STATS_MISSED_GOAL, '85'));
   return {
     id: f.id || DEFAULT_FIRM_ID,
     firmName: f.firm_name || COMPANY_NAME,
@@ -324,8 +326,8 @@ function reportConfigForFirm(firm) {
     statsMiddayTime: firstNonEmpty(f.stats_midday_time, env.STATS_MIDDAY_TIME, '1:00 PM'),
     statsAfternoonTime: firstNonEmpty(f.stats_afternoon_time, env.STATS_AFTERNOON_TIME, '5:00 PM'),
     statsMissedGoal: missedGoal,
-    statsMissedGoalMidday: parseMissedGoal(firstNonEmpty(f.stats_missed_goal_midday, env.STATS_MISSED_GOAL_MIDDAY), missedGoal),
-    statsMissedGoalAfternoon: parseMissedGoal(firstNonEmpty(f.stats_missed_goal_afternoon, env.STATS_MISSED_GOAL_AFTERNOON), missedGoal),
+    statsMissedGoalMidday: parseAnsweredGoalPct(firstNonEmpty(f.stats_missed_goal_midday, env.STATS_MISSED_GOAL_MIDDAY), missedGoal),
+    statsMissedGoalAfternoon: parseAnsweredGoalPct(firstNonEmpty(f.stats_missed_goal_afternoon, env.STATS_MISSED_GOAL_AFTERNOON), missedGoal),
     // Lines dropped entirely. Default matches the Quo dashboard inbox filter
     // for incoming (Leads, RJL Main Line, RGV Number, RJL Transfers, Intake).
     // RJL Outbound stays in the fetch so outbound + sent messages count.
@@ -603,7 +605,8 @@ module.exports = {
   callStatsSlotRawRecipientText,
   callStatsSlotGoal,
   parseEmailList,
-  parseMissedGoal,
+  parseAnsweredGoalPct,
+  parseMissedGoal: parseAnsweredGoalPct,
   loadFirms,
   loadActiveFirms,
   getDefaultFirm,
