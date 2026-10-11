@@ -4340,6 +4340,32 @@ function answeredByUserCount(agg) {
   return (agg.outcomes && agg.outcomes['Answered by user']) || 0;
 }
 
+function filterCallsByLineNames(calls, lineNames) {
+  const set = new Set((lineNames || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+  if (!set.size) return [];
+  return (calls || []).filter((c) => set.has(String(c.lineName || '').trim().toLowerCase()));
+}
+
+function buildIncomingOutcomesTable(curAgg, prevAgg, view = {}) {
+  const totalIn = curAgg.totalIncoming || 0;
+  const shareOf = (n) => (totalIn ? `${Math.round((n / totalIn) * 100)}%` : '—');
+  const outcomeRows = CALL_OUTCOME_ORDER
+    .map((b) => ({ b, cur: curAgg.outcomes[b] || 0, prev: prevAgg.outcomes[b] || 0 }))
+    .filter((r) => r.cur || r.prev)
+    .map(
+      (r) =>
+        `<tr><td>${escapeHtml(r.b)}</td><td class="num">${r.cur}</td>` +
+        `<td class="num">${shareOf(r.cur)}</td>` +
+        `<td class="num">${r.prev}</td><td class="num chg">${escapeHtml(pctChangeLabel(r.cur, r.prev))}</td></tr>`
+    )
+    .join('');
+  return `<table>
+    <tr><th>Incoming call outcome</th><th class="num">${escapeHtml(view.periodCol || 'Yesterday')}</th><th class="num">% of total</th><th class="num">${escapeHtml(view.compareCol || 'Same day last wk')}</th><th class="num">Change</th></tr>
+    ${outcomeRows || '<tr><td colspan="5" class="note">No incoming calls.</td></tr>'}
+    <tr class="total"><td>Total incoming</td><td class="num">${curAgg.totalIncoming || 0}</td><td class="num">${totalIn ? '100%' : '—'}</td><td class="num">${prevAgg.totalIncoming || 0}</td><td class="num chg">${escapeHtml(pctChangeLabel(curAgg.totalIncoming || 0, prevAgg.totalIncoming || 0))}</td></tr>
+  </table>`;
+}
+
 function statsCallerPhone(c) {
   if (c && c.callerPhone) return c.callerPhone;
   if (c && isIncomingDirection(c.direction) && c.from) return c.from;
@@ -4369,23 +4395,18 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     td.hi { font-weight: 800; font-size: 16px; }
   `.trim();
 
-  const totalIn = curAgg.totalIncoming || 0;
-  const shareOf = (n) => (totalIn ? `${Math.round((n / totalIn) * 100)}%` : '—');
-  const outcomeRows = CALL_OUTCOME_ORDER
-    .map((b) => ({ b, cur: curAgg.outcomes[b] || 0, prev: prevAgg.outcomes[b] || 0 }))
-    .filter((r) => r.cur || r.prev)
-    .map(
-      (r) =>
-        `<tr><td>${escapeHtml(r.b)}</td><td class="num">${r.cur}</td>` +
-        `<td class="num">${shareOf(r.cur)}</td>` +
-        `<td class="num">${r.prev}</td><td class="num chg">${escapeHtml(pctChangeLabel(r.cur, r.prev))}</td></tr>`
-    )
-    .join('');
-  const outcomeTable = `<table>
-    <tr><th>Incoming call outcome</th><th class="num">${escapeHtml(view.periodCol || 'Yesterday')}</th><th class="num">% of total</th><th class="num">${escapeHtml(view.compareCol || 'Same day last wk')}</th><th class="num">Change</th></tr>
-    ${outcomeRows || '<tr><td colspan="5" class="note">No incoming calls.</td></tr>'}
-    <tr class="total"><td>Total incoming</td><td class="num">${curAgg.totalIncoming}</td><td class="num">${totalIn ? '100%' : '—'}</td><td class="num">${prevAgg.totalIncoming}</td><td class="num chg">${escapeHtml(pctChangeLabel(curAgg.totalIncoming, prevAgg.totalIncoming))}</td></tr>
-  </table>`;
+  const outcomeTable = buildIncomingOutcomesTable(curAgg, prevAgg, view);
+  const leadsAgg = (meta && meta.leadsCur) || { outcomes: {}, totalIncoming: 0 };
+  const leadsPrevAgg = (meta && meta.leadsPrev) || { outcomes: {}, totalIncoming: 0 };
+  const leadsLines = (meta && meta.leadsLines) || [];
+  const leadsAnswered = answeredByUserCount(leadsAgg);
+  const leadsIn = leadsAgg.totalIncoming || 0;
+  const leadsPct = leadsIn ? `${Math.round((leadsAnswered / leadsIn) * 100)}%` : '—';
+  const leadsOutcomeTable = leadsLines.length
+    ? `<h3>Incoming Call Outcomes — ${escapeHtml(leadsLines.join(' + '))}</h3>
+    <p class="note" style="margin:0 0 4px">Lead-related inboxes only. Overall numbers above stay the primary goal. Answered by user: <strong>${escapeHtml(leadsPct)}</strong>${leadsIn ? ` (${leadsAnswered} of ${leadsIn})` : ''}.</p>
+    ${buildIncomingOutcomesTable(leadsAgg, leadsPrevAgg, view)}`
+    : '';
 
   const cell = (cur, prev, cls = '') =>
     `<td class="num${cls}">${cur}<div class="chg">${escapeHtml(pctChangeLabel(cur, prev))}</div></td>`;
@@ -4440,6 +4461,8 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
 
     <h3>By User <span style="font-weight:400;font-size:13px;color:#57606a">— sorted by Answered calls</span></h3>
     ${userTable}
+
+    ${leadsOutcomeTable}
 
     <div class="note" style="margin-top:20px;border-top:1px solid #d0d7de;padding-top:10px">
       <p>Incoming inboxes: ${escapeHtml((meta.includedLines || []).join(', ') || 'none')}.${(meta.outboundAlsoLines || []).length ? ` Outgoing calls and sent messages also include ${escapeHtml(meta.outboundAlsoLines.join(', '))}.` : ''} Each number's change is vs the same weekday one week ago.</p>
@@ -4685,8 +4708,21 @@ async function runDailyCallStatsReport(opts = {}) {
 
   const transferLines = firmCtx().statsTransferInboxes;
   const ignoreIncomingLines = firmCtx().statsIgnoreIncomingInboxes;
+  const leadsLines = firmCtx().statsLeadsInboxes;
   const curAgg = aggregateCallStats({ ...curData, volumeExcludeLines: transferLines, ignoreIncomingLines });
   const prevAgg = aggregateCallStats({ ...prevData, volumeExcludeLines: transferLines, ignoreIncomingLines });
+  const curLeadsAgg = aggregateCallStats({
+    calls: filterCallsByLineNames(curData.calls, leadsLines),
+    messages: [],
+    volumeExcludeLines: transferLines,
+    ignoreIncomingLines,
+  });
+  const prevLeadsAgg = aggregateCallStats({
+    calls: filterCallsByLineNames(prevData.calls, leadsLines),
+    messages: [],
+    volumeExcludeLines: transferLines,
+    ignoreIncomingLines,
+  });
   console.log(`  Ignoring incoming on: ${ignoreIncomingLines.join(', ') || 'none'} (dropped ${curAgg.ignoredInbound || 0} inbound; outbound + sent messages still count)`);
   console.log(`  Answered calls by line: ${Object.entries(curAgg.answeredByLine).map(([l, n]) => `${l}=${n}`).join(' · ') || 'none'}`);
   console.log(`  (transfer lines counted for per-user answered, excluded from incoming volume: ${transferLines.join(', ') || 'none'})`);
@@ -4748,7 +4784,10 @@ async function runDailyCallStatsReport(opts = {}) {
   if (contactLookupOk) {
     console.log(`  Of these: ${missed.known} known contacts · ${missed.unknown} not in contacts (last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts)`);
   }
+  const leadsAnsweredN = answeredByUserCount(curLeadsAgg);
+  const leadsInN = curLeadsAgg.totalIncoming || 0;
   console.log(`  Incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming}) · users in table: ${userRows.length}`);
+  console.log(`  Leads+Intake (${leadsLines.join(', ') || 'none'}): ${leadsInN} incoming, answered by user ${leadsInN ? Math.round((leadsAnsweredN / leadsInN) * 100) : 0}% (${leadsAnsweredN})`);
   for (const b of CALL_OUTCOME_ORDER) {
     if (curAgg.outcomes[b]) console.log(`   ${b}: ${curAgg.outcomes[b]}`);
   }
@@ -4763,6 +4802,9 @@ async function runDailyCallStatsReport(opts = {}) {
   const meta = {
     includedLines: incomingLines,
     outboundAlsoLines: ignoreIncomingLines,
+    leadsLines,
+    leadsCur: curLeadsAgg,
+    leadsPrev: prevLeadsAgg,
   };
   const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed, win);
   const plainLines = [
@@ -4786,6 +4828,15 @@ async function runDailyCallStatsReport(opts = {}) {
     ...userRows.map(
       (u) => `  ${u.name}: answered ${u.answered} · ${u.total} total / ${u.outgoing} out / ${formatCallDuration(u.seconds)} / ${u.messages} msgs`
     ),
+    '',
+    `Incoming Call Outcomes — ${leadsLines.join(' + ') || 'Leads + Intake'}:`,
+    `  Answered by user: ${leadsInN ? Math.round((leadsAnsweredN / leadsInN) * 100) : 0}% (${leadsAnsweredN} of ${leadsInN})`,
+    ...CALL_OUTCOME_ORDER.filter((b) => curLeadsAgg.outcomes[b] || prevLeadsAgg.outcomes[b]).map((b) => {
+      const n = curLeadsAgg.outcomes[b] || 0;
+      const share = curLeadsAgg.totalIncoming ? `${Math.round((n / curLeadsAgg.totalIncoming) * 100)}%` : '—';
+      return `  ${b}: ${n} (${share} of total, last wk ${prevLeadsAgg.outcomes[b] || 0})`;
+    }),
+    `  Total incoming: ${curLeadsAgg.totalIncoming} (last wk ${prevLeadsAgg.totalIncoming})`,
   ];
   const plainText = plainLines.join('\n');
   const subject = `${firmCtx().firmName} — ${win.title} — ${dayLabel}`;

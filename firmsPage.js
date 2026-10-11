@@ -64,6 +64,8 @@ const FIRM_FIELDS = [
     help: 'Optional. Lines listed here count toward who ANSWERED but are left out of incoming call volume (no double-counting a transferred call). Leave blank to match the Quo dashboard (Transfers inbound counts in the total).' },
   { key: 'stats_ignore_incoming_inboxes', label: 'Call stats — ignore INCOMING on these lines', type: 'text', group: 'Yesterday Call Stats',
     help: 'Lines whose INCOMING calls are left out of volume and the missed-calls headline (typically the auto-forward line). Outbound calls, talk time, and sent messages on these lines still count in the per-user table. Blank = default (RJL Outbound).' },
+  { key: 'stats_leads_inboxes', label: 'Call stats — Leads + Intake inboxes', type: 'text', group: 'Yesterday Call Stats',
+    help: 'Comma-separated Quo line names for the extra Incoming Call Outcomes table at the bottom (lead-related lines only). Must match the line name exactly. Blank = Leads, Intake.' },
   { key: 'stats_include_users', label: 'Call stats — users in the per-user table', type: 'text', group: 'Yesterday Call Stats',
     help: 'Comma-separated names exactly as they appear in Quo. Blank = default set (the 5 legal assistants + Intake).' },
 

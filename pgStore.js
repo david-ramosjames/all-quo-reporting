@@ -93,6 +93,7 @@ ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_midday_time text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_afternoon_time text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_missed_goal_midday text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_missed_goal_afternoon text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_leads_inboxes text;
 CREATE TABLE IF NOT EXISTS review_requests (
   id uuid PRIMARY KEY,
   token text UNIQUE NOT NULL,
@@ -272,6 +273,7 @@ const FIRM_UPSERT_COLUMNS = [
   'stats_midday_email_to', 'stats_afternoon_email_to',
   'stats_morning_time', 'stats_midday_time', 'stats_afternoon_time',
   'stats_missed_goal_midday', 'stats_missed_goal_afternoon',
+  'stats_leads_inboxes',
 ];
 
 async function upsertFirm(f) {

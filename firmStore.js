@@ -340,6 +340,8 @@ function reportConfigForFirm(firm) {
     // so it stays out of incoming volume / missed KPI. Outbound calls, talk
     // time, and sent messages on these lines still count in the per-user table.
     statsIgnoreIncomingInboxes: firstList(f.stats_ignore_incoming_inboxes, env.STATS_IGNORE_INCOMING_INBOXES, 'RJL Outbound'),
+    // Secondary outcomes table at the bottom of Call Stats (lead-related inboxes).
+    statsLeadsInboxes: firstList(f.stats_leads_inboxes, env.STATS_LEADS_INBOXES, 'Leads,Intake'),
     statsIncludeUsers: firstList(
       f.stats_include_users,
       env.STATS_INCLUDE_USERS,
