@@ -69,6 +69,11 @@ const FIRM_FIELDS = [
   { key: 'stats_include_users', label: 'Call stats — users in the per-user table', type: 'text', group: 'Yesterday Call Stats',
     help: 'Comma-separated names exactly as they appear in Quo. Blank = default set (the 5 legal assistants + Intake).' },
 
+  { key: 'intake_grading_email_to', label: 'Intake grading recipients', type: 'text', group: 'Intake Call Grading',
+    help: 'Comma-separated email addresses. Nightly 6:00 PM (local) scores of Leads + Intake calls handled by a person. Blank = skip this send. Does NOT fall back to the default report recipients.' },
+  { key: 'intake_grading_time', label: 'Intake grading send time', type: 'text', group: 'Intake Call Grading', placeholder: '6:00 PM',
+    help: 'Local time (America/Chicago unless TIMEZONE is set). Window is midnight through this clock. Blank = 6:00 PM.' },
+
   { key: 'slack_bot_token', label: 'Slack bot token', type: 'secret', group: 'Slack',
     help: 'Optional. Falls back to the global token. Set only if this firm posts to a different Slack workspace.' },
   { key: 'slack_channel', label: 'Lead-calls Slack channel', type: 'text', group: 'Slack', placeholder: 'lead-calls' },

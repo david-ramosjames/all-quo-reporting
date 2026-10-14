@@ -10,6 +10,7 @@ const {
   runClientLanguageReport,
   runIntakeMarketingReport,
   runDailyCallStatsReport,
+  runIntakeGradingReport,
   runForAllFirms,
 } = require('./report');
 const firmStore = require('./firmStore');
@@ -30,6 +31,7 @@ const REVIEW_INTELLIGENCE_CRON = process.env.REVIEW_INTELLIGENCE_CRON || '0 18 *
 // only supplies the default morning clock if a firm leaves that field blank.
 const TIMEZONE = process.env.TIMEZONE || 'America/Chicago';
 const callStatsFired = new Map();
+const intakeGradingFired = new Map();
 
 function callStatsDefaultsLabel() {
   return firmStore.CALL_STATS_SLOTS.map((s) => {
@@ -47,6 +49,7 @@ console.log(`  Monthly newsletter : ${MONTHLY_INSIGHTS_CRON}`);
 console.log(`  Missed client calls : ${MISSED_CLIENT_CALLS_CRON}`);
 console.log(`  Review intelligence : ${REVIEW_INTELLIGENCE_CRON}`);
 console.log(`  Call stats sends : ${callStatsDefaultsLabel()} (per-firm lists/times override)`);
+console.log(`  Intake grading   : 6:00 PM (per-firm list/time override)`);
 console.log(`  Timezone         : ${TIMEZONE}`);
 console.log(`  Started          : ${new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' })}`);
 console.log('══════════════════════════════════════════════\n');
@@ -193,11 +196,51 @@ async function runDueCallStatsSends() {
   }
 }
 
+async function runDueIntakeGrading() {
+  const now = DateTime.now().setZone(TIMEZONE);
+  const hm = now.toFormat('HH:mm');
+  const dateKey = now.toISODate();
+  let firms;
+  try {
+    firms = await firmStore.loadActiveFirms();
+  } catch (err) {
+    console.error(`[${now.toFormat('ccc LLL d, h:mm a')}] Intake grading schedule: could not load firms: ${err.message}`);
+    return;
+  }
+  for (const firm of firms) {
+    const ctx = firmStore.reportConfigForFirm(firm);
+    const clock = firmStore.resolveClockTime(ctx.intakeGradingTime, '6:00 PM');
+    if (firmStore.clockToHm(clock) !== hm) continue;
+    const lock = `${dateKey}|${ctx.id}|intake-grading`;
+    if (intakeGradingFired.has(lock)) continue;
+    if (!(ctx.intakeGradingEmailTo || []).length) {
+      intakeGradingFired.set(lock, Date.now());
+      continue;
+    }
+    intakeGradingFired.set(lock, Date.now());
+    const ts = now.toFormat("ccc LLL d, h:mm a ZZZZ");
+    console.log(`\n[${ts}] Cron triggered — Intake grading for ${ctx.firmName}...`);
+    try {
+      await runForAllFirms(runIntakeGradingReport, { firmId: ctx.id, scheduled: true });
+    } catch (err) {
+      console.error(`[${ts}] Intake grading failed:`, err.message);
+    }
+  }
+  for (const [k] of intakeGradingFired) {
+    if (!k.startsWith(`${dateKey}|`) && !k.startsWith(`${now.minus({ days: 1 }).toISODate()}|`)) {
+      intakeGradingFired.delete(k);
+    }
+  }
+}
+
 cron.schedule(
   '* * * * *',
   () => {
     runDueCallStatsSends().catch((err) => {
       console.error('[call stats schedule]', err.message);
+    });
+    runDueIntakeGrading().catch((err) => {
+      console.error('[intake grading schedule]', err.message);
     });
   },
   { timezone: TIMEZONE }
@@ -269,6 +312,19 @@ for (const slot of firmStore.CALL_STATS_SLOTS) {
   }
   console.log(`  ${`Call stats ${slot.id}`.padEnd(20)}: ${next ? next.toFormat("ccc, LLL d 'at' h:mm a ZZZZ") : '(unknown)'} (${slot.window === 'prior_day' ? 'prior day' : 'today so far'})`);
 }
+{
+  const clock = firmStore.resolveClockTime('6:00 PM', '6:00 PM');
+  let dt = DateTime.now().setZone(TIMEZONE).set({ second: 0, millisecond: 0 }).plus({ minutes: 1 });
+  let next = null;
+  for (let i = 0; i < 48 * 60; i++) {
+    if (dt.hour === clock.hour && dt.minute === clock.minute) {
+      next = dt;
+      break;
+    }
+    dt = dt.plus({ minutes: 1 });
+  }
+  console.log(`  ${'Intake grading'.padEnd(20)}: ${next ? next.toFormat("ccc, LLL d 'at' h:mm a ZZZZ") : '(unknown)'} (today so far)`);
+}
 console.log('');
 
 console.log('Scheduler running. Waiting for next trigger...');
@@ -301,6 +357,7 @@ if (process.env.DISABLE_MANUAL_TRIGGER_UI === 'true' || process.env.DISABLE_MANU
       language: (opts) => runForAllFirms(runClientLanguageReport, opts),
       marketing: (opts) => runForAllFirms(runIntakeMarketingReport, opts),
       callstats: (opts) => runForAllFirms(runDailyCallStatsReport, opts),
+      grading: (opts) => runForAllFirms(runIntakeGradingReport, opts),
     },
   });
 }

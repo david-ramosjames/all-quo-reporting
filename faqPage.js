@@ -67,6 +67,13 @@ const JOBS = [
     out: 'Email',
   },
   {
+    name: 'Intake Call Grading',
+    when: () => 'Daily · 6:00 PM (today so far)',
+    what:
+      'Scores Leads + Intake calls handled by a person against the RJL intake rubric (greeting, compassion, qualification, close, etc.). Too-short recordings are skipped. Email includes per-person averages and a Quo link for each call.',
+    out: 'Email + CSV',
+  },
+  {
     name: 'Review Intelligence',
     when: () => cronPhrase(sched('REVIEW_INTELLIGENCE_CRON', '0 18 * * *')),
     what:

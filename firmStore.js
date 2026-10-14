@@ -342,6 +342,8 @@ function reportConfigForFirm(firm) {
     statsIgnoreIncomingInboxes: firstList(f.stats_ignore_incoming_inboxes, env.STATS_IGNORE_INCOMING_INBOXES, 'RJL Outbound'),
     // Secondary outcomes table at the bottom of Call Stats (lead-related inboxes).
     statsLeadsInboxes: firstList(f.stats_leads_inboxes, env.STATS_LEADS_INBOXES, 'Leads,Intake'),
+    intakeGradingEmailTo: firstEmailList(f.intake_grading_email_to, env.INTAKE_GRADING_EMAIL_TO),
+    intakeGradingTime: firstNonEmpty(f.intake_grading_time, env.INTAKE_GRADING_TIME, '6:00 PM'),
     statsIncludeUsers: firstList(
       f.stats_include_users,
       env.STATS_INCLUDE_USERS,

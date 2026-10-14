@@ -15,10 +15,10 @@ const slackEvents = require('./slackEvents');
 const quoWebhooks = require('./quoWebhooks');
 
 /**
- * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review' | 'language' | 'marketing' | 'callstats'} JobId
+ * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review' | 'language' | 'marketing' | 'callstats' | 'grading'} JobId
  */
 
-const JOB_IDS = ['daily', 'weekly', 'monthly', 'missed', 'review', 'language', 'marketing', 'callstats'];
+const JOB_IDS = ['daily', 'weekly', 'monthly', 'missed', 'review', 'language', 'marketing', 'callstats', 'grading'];
 
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -219,6 +219,7 @@ function buildIndexHtml(message, email) {
         </select>
       </div>
       <button type="button" data-job="callstats">Run Call Stats (uses the send selected above → that list)</button>
+      <button type="button" data-job="grading">Run Intake Call Grading (today so far · Leads + Intake · rubric scores → email)</button>
     </div>
     <p class="hint">Firms &amp; per-firm config: <a href="/review/firms" style="color:#60a5fa">/review/firms</a> · Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a> · what does this all do? <a href="/faq" style="color:#60a5fa">/faq</a></p>
     <p class="hint">Jobs run in the background so the browser does not time out. Only one job at a time.</p>

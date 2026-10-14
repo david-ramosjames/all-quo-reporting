@@ -501,7 +501,7 @@ async function runExport(options = {}) {
   const client = makeClient(apiKey);
 
   // Weekly/monthly: always include outbound + transfer lines when a subset filter is used (daily unchanged).
-  if ((weeklyComm || monthlyComm) && pnFilter?.length) {
+  if ((weeklyComm || monthlyComm) && pnFilter?.length && !options.skipWeeklyMonthlyExtra) {
     const extra = getWeeklyMonthlyPhoneExtraTokens();
     if (extra.length) {
       pnFilter = [...new Set([...pnFilter, ...extra])];
@@ -605,9 +605,16 @@ async function runExport(options = {}) {
       const contactId = lookupContactId(contactMap, phone);
       const duration  = call.duration ?? '';
       const link      = `https://my.openphone.com/inbox/${conv.phoneNumberId}/c/${conv.id}?at=${call.id}`;
+      const idOf = (v) => {
+        if (!v) return null;
+        if (typeof v === 'object') return v.id || v.userId || null;
+        return String(v);
+      };
 
       const baseRow = {
         recordType: 'call',
+        id: call.id || null,
+        phoneNumberId: conv.phoneNumberId,
         timestamp,
         line: lineName,
         phone,
@@ -620,6 +627,9 @@ async function runExport(options = {}) {
         status: call.status,
         direction: call.direction,
         aiHandled: call.aiHandled || null,
+        answeredBy: idOf(call.answeredBy),
+        initiatedBy: idOf(call.initiatedBy),
+        userId: idOf(call.userId),
       };
 
       if (defaultExport) {
@@ -1121,6 +1131,29 @@ async function fetchContactMap(apiKey) {
   return buildContactMap(makeClient(key));
 }
 
+async function fetchWorkspaceUserMap(apiKey) {
+  const key = apiKey || API_KEY;
+  if (!key) throw new Error('QUO_API_KEY is not set.');
+  const client = makeClient(key);
+  const userMap = {};
+  const rememberUser = (u) => {
+    if (!u || !u.id) return;
+    userMap[u.id] =
+      [u.firstName, u.lastName].filter(Boolean).join(' ') || u.name || u.email || u.id;
+  };
+  try {
+    for (const pn of await listPhoneNumbers(client)) {
+      for (const u of pn.users || []) rememberUser(u);
+    }
+  } catch { /* line users are optional */ }
+  try {
+    for (const u of await listAllUsers(client)) rememberUser(u);
+  } catch (err) {
+    console.warn(`  Could not list workspace users: ${err.response?.data?.message || err.message}`);
+  }
+  return userMap;
+}
+
 if (require.main === module) main();
 
 module.exports = {
@@ -1130,4 +1163,5 @@ module.exports = {
   fetchContactMap,
   lookupContactName,
   lookupContactId,
+  fetchWorkspaceUserMap,
 };

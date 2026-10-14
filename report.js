@@ -5,7 +5,7 @@ const { DateTime } = require('luxon');
 const MailComposer = require('nodemailer/lib/mail-composer');
 const { google } = require('googleapis');
 const OpenAI = require('openai');
-const { runExport, fetchDailyCallStats, fetchContactMap, lookupContactName, lookupContactId } = require('./fetch_calls');
+const { runExport, fetchDailyCallStats, fetchContactMap, lookupContactName, lookupContactId, fetchWorkspaceUserMap } = require('./fetch_calls');
 const {
   generateDailyLeadReportPrompt,
   buildWeeklyClientBundleSentimentPrompt,
@@ -19,6 +19,7 @@ const {
   INTAKE_MARKETING_ENUMS,
   buildIntakeMarketingBatchPrompt,
   buildIntakeMarketingBriefPrompt,
+  buildIntakeGradingPrompt,
 } = require('./prompts');
 const { fetchSlackMessages, formatSlackForPrompt, postSlackMessage } = require('./slack');
 const { upsertReviewOpportunity, isConfigured: reviewStoreConfigured } = require('./reviewOpportunities');
@@ -120,6 +121,10 @@ const REVIEW_REPORT_ALWAYS_SHOW_BEST =
   String(process.env.REVIEW_REPORT_ALWAYS_SHOW_BEST ?? 'true').trim().toLowerCase() !== 'false';
 /** Token budget for the per-client review-scoring JSON call. */
 const OPENAI_REVIEW_MAX_TOKENS = clampInt(process.env.OPENAI_REVIEW_MAX_COMPLETION_TOKENS, 4096, 512, 32000);
+const OPENAI_INTAKE_GRADING_MAX_TOKENS = clampInt(process.env.OPENAI_INTAKE_GRADING_MAX_COMPLETION_TOKENS, 6000, 1024, 32000);
+const INTAKE_GRADING_MIN_SECONDS = clampInt(process.env.INTAKE_GRADING_MIN_SECONDS, 90, 30, 600);
+const INTAKE_GRADING_MIN_TRANSCRIPT_CHARS = clampInt(process.env.INTAKE_GRADING_MIN_TRANSCRIPT_CHARS, 350, 80, 5000);
+const INTAKE_GRADING_MAX_CALLS = clampInt(process.env.INTAKE_GRADING_MAX_CALLS, 60, 1, 200);
 /** Client-language lookback: how many days of transcripts + SMS to scan. */
 const CLIENT_LANGUAGE_LOOKBACK_DAYS = clampInt(process.env.CLIENT_LANGUAGE_LOOKBACK_DAYS, 90, 1, 365);
 const CLIENT_LANGUAGES_TAB = process.env.GOOGLE_CLIENT_LANGUAGES_TAB || 'Client Languages';
@@ -4853,6 +4858,338 @@ async function runDailyCallStatsReport(opts = {}) {
   console.log(`${win.title} complete.`);
 }
 
+function intakeGradingBand(score) {
+  if (!Number.isFinite(score)) return null;
+  if (score >= 90) return 'excellent';
+  if (score >= 80) return 'good';
+  if (score >= 70) return 'coaching needed';
+  return 'priority coaching';
+}
+
+function intakeGradingBandColor(band) {
+  const b = String(band || '').toLowerCase();
+  if (b.includes('excellent')) return '#067647';
+  if (b.includes('good')) return '#175cd3';
+  if (b.includes('priority')) return '#b42318';
+  if (b.includes('coaching')) return '#b54708';
+  return '#57606a';
+}
+
+function normalizeIntakeGrade(obj, callId) {
+  if (!obj || typeof obj !== 'object') return null;
+  let status = String(obj.grading_status || '').toLowerCase();
+  if (!['graded', 'insufficient_evidence', 'out_of_scope'].includes(status)) {
+    status = obj.overall_score == null ? 'insufficient_evidence' : 'graded';
+  }
+  let score = obj.overall_score;
+  if (score != null) {
+    score = Number(score);
+    if (!Number.isFinite(score)) score = null;
+    else score = Math.max(0, Math.min(100, Math.round(score)));
+  }
+  if (status === 'graded' && score == null) status = 'insufficient_evidence';
+  const flags = Array.isArray(obj.critical_flags) ? obj.critical_flags : [];
+  return {
+    call_id: String(obj.call_id || callId || ''),
+    grading_status: status,
+    overall_score: status === 'graded' ? score : null,
+    score_band: status === 'graded' ? String(obj.score_band || intakeGradingBand(score) || '') : null,
+    classification: obj.classification && typeof obj.classification === 'object' ? obj.classification : {},
+    coverage: obj.coverage == null || obj.coverage === '' ? null : Number(obj.coverage),
+    confidence: obj.confidence || null,
+    categories: Array.isArray(obj.categories) ? obj.categories : [],
+    critical_flags: flags,
+    strengths: Array.isArray(obj.strengths) ? obj.strengths.slice(0, 3).map((s) => String(s || '').trim()).filter(Boolean) : [],
+    coaching_priorities: Array.isArray(obj.coaching_priorities)
+      ? obj.coaching_priorities.slice(0, 3).map((s) => String(s || '').trim()).filter(Boolean)
+      : [],
+    summary: String(obj.summary || '').trim(),
+  };
+}
+
+async function gradeOneIntakeCall(call) {
+  const prompt = buildIntakeGradingPrompt({ call });
+  const text = await runChatCompletion(
+    prompt,
+    OPENAI_INTAKE_GRADING_MAX_TOKENS,
+    `Intake grade ${call.id || call.phone || ''}`,
+    { jsonObject: true, throwOnEmpty: true }
+  );
+  let parsed;
+  try {
+    parsed = JSON.parse(stripMarkdownJsonFence(text));
+  } catch {
+    return null;
+  }
+  return normalizeIntakeGrade(parsed, call.id);
+}
+
+function buildIntakeGradingEmailHtml(dayLabel, windowNote, userSummaries, rows, excluded) {
+  const css = `
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; background: #ffffff; }
+    h2 { margin: 0 0 2px; } h3 { margin: 26px 0 8px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 8px; background: #ffffff; }
+    th, td { border: 1px solid #d0d7de; padding: 7px 10px; text-align: left; font-size: 14px; background: #ffffff; vertical-align: top; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    .note { color: #57606a; font-size: 12px; margin-top: 8px; }
+    .muted { color: #57606a; font-size: 13px; }
+    a { color: #0969da; }
+  `.trim();
+
+  const summaryBody = userSummaries.length
+    ? userSummaries.map((u) => {
+        const color = intakeGradingBandColor(u.band);
+        return `<tr>
+          <td>${escapeHtml(u.name)}</td>
+          <td class="num">${u.graded}</td>
+          <td class="num" style="font-weight:800;color:${color}">${u.avg == null ? '—' : u.avg}</td>
+          <td>${escapeHtml(u.band || '—')}</td>
+          <td class="num">${u.flags}</td>
+        </tr>`;
+      }).join('')
+    : '<tr><td colspan="5" class="note">No scoreable intake calls in this window.</td></tr>';
+
+  const callRows = rows.map((r) => {
+    const color = intakeGradingBandColor(r.grade && r.grade.score_band);
+    const score = r.grade && r.grade.overall_score != null ? r.grade.overall_score : '—';
+    const band = (r.grade && r.grade.score_band) || r.grade.grading_status || '—';
+    const coaching = (r.grade.coaching_priorities || []).map((c) => escapeHtml(c)).join('<br>') || '—';
+    const flags = (r.grade.critical_flags || [])
+      .map((f) => escapeHtml(typeof f === 'string' ? f : (f.type || f.id || JSON.stringify(f))))
+      .join(', ') || '—';
+    const who = r.contact ? `${escapeHtml(r.contact)}` : escapeHtml(r.phone || '');
+    return `<tr>
+      <td>${escapeHtml(r.handlerName)}<div class="muted">${escapeHtml(formatTimestamp(r.timestamp))}<br>${escapeHtml(r.line || '')}</div></td>
+      <td>${who}<div class="muted">${escapeHtml(formatCallDuration(r.duration))}</div></td>
+      <td class="num" style="font-weight:800;color:${color}">${score}</td>
+      <td>${escapeHtml(band)}</td>
+      <td>${escapeHtml(r.grade.summary || '—')}</td>
+      <td>${coaching}</td>
+      <td>${flags}</td>
+      <td><a href="${escapeHtml(r.link)}">Open in Quo</a></td>
+    </tr>`;
+  }).join('');
+
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
+    <h2>Intake Call Grading</h2>
+    <p class="muted" style="margin:2px 0 0">${escapeHtml(dayLabel)} · ${escapeHtml(windowNote)}</p>
+    <p class="note">Scored with the RJL Intake Call Grading rubric. Calls shorter than ${INTAKE_GRADING_MIN_SECONDS}s or without enough transcript are excluded.</p>
+
+    <h3>Summary by person</h3>
+    <table>
+      <tr><th>Handler</th><th class="num">Graded calls</th><th class="num">Avg score</th><th>Band</th><th class="num">Critical flags</th></tr>
+      ${summaryBody}
+    </table>
+
+    <h3>Graded calls</h3>
+    <table>
+      <tr><th>Handler / time</th><th>Caller</th><th class="num">Score</th><th>Band</th><th>Summary</th><th>Coaching</th><th>Flags</th><th>Quo</th></tr>
+      ${callRows || '<tr><td colspan="8" class="note">None graded.</td></tr>'}
+    </table>
+
+    <p class="note">Excluded (too short / no transcript / Sona): ${excluded.short} · Out of scope or insufficient evidence: ${excluded.unscored}</p>
+  </body></html>`;
+}
+
+/**
+ * Nightly intake QA: grade Leads + Intake inbound calls handled by a person,
+ * skip recordings too short to score, and email per-handler averages + Quo links.
+ */
+async function runIntakeGradingReport(opts = {}) {
+  const recipients = firmCtx().intakeGradingEmailTo || [];
+  if (opts.scheduled && !recipients.length) {
+    console.log('  Intake grading: no recipients — skipping.');
+    return;
+  }
+
+  const now = DateTime.now().setZone(TIMEZONE);
+  const clock = firmStore.resolveClockTime(firmCtx().intakeGradingTime, '6:00 PM');
+  const dayStart = now.startOf('day');
+  const dayEnd = opts.scheduled
+    ? dayStart.set({ hour: clock.hour, minute: clock.minute, second: 0, millisecond: 0 })
+    : now;
+  const createdAfter = dayStart.toUTC().toISO();
+  const createdBefore = dayEnd.toUTC().toISO();
+  const dayLabel = dayStart.toFormat('cccc, LLL d, yyyy');
+  const windowNote = `${dayStart.toFormat('h:mm a')} – ${dayEnd.toFormat('h:mm a')} ${TIMEZONE}`;
+  const leadsLines = firmCtx().statsLeadsInboxes;
+  const lineSet = new Set(leadsLines.map((s) => String(s).trim().toLowerCase()));
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('  Intake Call Grading');
+  console.log(`  ${dayLabel} · ${windowNote}`);
+  console.log(`  Inboxes: ${leadsLines.join(', ') || 'none'}`);
+  console.log('═'.repeat(52));
+
+  if (!OPENAI_API_KEY) {
+    console.log('  OPENAI_API_KEY is not set — cannot grade calls.');
+    return;
+  }
+
+  console.log('\n[1/3] Fetching today\'s intake calls with transcripts...');
+  const [{ callData }, userMap] = await Promise.all([
+    runExport({
+      apiKey: firmCtx().quoApiKey,
+      phoneNumbersFilter: leadsLines.length ? leadsLines : firmCtx().quoPhoneNumbers,
+      createdAfter,
+      createdBefore,
+      weeklyCommunications: true,
+      includeMessages: false,
+      fetchTranscriptForWeekly: true,
+      skipWeeklyMonthlyExtra: true,
+    }),
+    fetchWorkspaceUserMap(firmCtx().quoApiKey).catch((err) => {
+      console.warn(`  User map skipped: ${err.message}`);
+      return {};
+    }),
+  ]);
+
+  const excluded = { short: 0, unscored: 0 };
+  const candidates = [];
+  for (const c of callData || []) {
+    if (c.recordType === 'sms') continue;
+    if (!isIncomingDirection(c.direction)) continue;
+    if (lineSet.size && !lineSet.has(String(c.line || '').trim().toLowerCase())) continue;
+    if (c.aiHandled) {
+      excluded.short += 1;
+      continue;
+    }
+    const actorId = c.answeredBy || c.userId;
+    if (!actorId) {
+      excluded.short += 1;
+      continue;
+    }
+    const dur = Number(c.duration || 0);
+    const tr = String(c.transcript || '').trim();
+    if (!Number.isFinite(dur) || dur < INTAKE_GRADING_MIN_SECONDS || tr.length < INTAKE_GRADING_MIN_TRANSCRIPT_CHARS) {
+      excluded.short += 1;
+      continue;
+    }
+    candidates.push({
+      ...c,
+      handlerId: actorId,
+      handlerName: userMap[actorId] || actorId,
+      duration: dur,
+    });
+  }
+  candidates.sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+  const toGrade = candidates.slice(0, INTAKE_GRADING_MAX_CALLS);
+  if (candidates.length > toGrade.length) {
+    console.warn(`  Capped at ${INTAKE_GRADING_MAX_CALLS} calls (${candidates.length} qualified).`);
+  }
+  console.log(`  ${toGrade.length} call(s) to grade · excluded too short/no handler: ${excluded.short}`);
+
+  console.log('\n[2/3] Grading with the RJL intake rubric...');
+  const graded = [];
+  for (let i = 0; i < toGrade.length; i++) {
+    const call = toGrade[i];
+    process.stdout.write(`  [${i + 1}/${toGrade.length}] ${call.handlerName} ${formatCallDuration(call.duration)} ... `);
+    try {
+      const grade = await gradeOneIntakeCall(call);
+      if (!grade || grade.grading_status !== 'graded') {
+        excluded.unscored += 1;
+        console.log(grade ? grade.grading_status : 'parse-failed');
+        continue;
+      }
+      graded.push({ ...call, grade });
+      console.log(`${grade.overall_score} ${grade.score_band || ''}`);
+    } catch (err) {
+      excluded.unscored += 1;
+      console.log(`error: ${err.message}`);
+    }
+  }
+
+  const byUser = new Map();
+  for (const r of graded) {
+    if (!byUser.has(r.handlerName)) {
+      byUser.set(r.handlerName, { name: r.handlerName, scores: [], flags: 0 });
+    }
+    const u = byUser.get(r.handlerName);
+    u.scores.push(r.grade.overall_score);
+    u.flags += (r.grade.critical_flags || []).length;
+  }
+  const userSummaries = [...byUser.values()]
+    .map((u) => {
+      const avg = u.scores.length
+        ? Math.round(u.scores.reduce((a, b) => a + b, 0) / u.scores.length)
+        : null;
+      return {
+        name: u.name,
+        graded: u.scores.length,
+        avg,
+        band: intakeGradingBand(avg),
+        flags: u.flags,
+      };
+    })
+    .sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1) || b.graded - a.graded);
+
+  console.log('\n[3/3] Handler averages:');
+  for (const u of userSummaries) {
+    console.log(`   - ${u.name}: avg ${u.avg} (${u.band}) · ${u.graded} call(s) · ${u.flags} flag(s)`);
+  }
+
+  const html = buildIntakeGradingEmailHtml(dayLabel, windowNote, userSummaries, graded, excluded);
+  const plainLines = [
+    `Intake Call Grading — ${dayLabel}`,
+    windowNote,
+    '',
+    'Summary by person:',
+    ...userSummaries.map((u) => `  ${u.name}: avg ${u.avg} (${u.band}) · ${u.graded} graded · ${u.flags} flags`),
+    '',
+    'Graded calls:',
+    ...graded.map(
+      (r) =>
+        `  ${r.handlerName} · ${r.grade.overall_score} ${r.grade.score_band || ''} · ${r.contact || r.phone} · ${r.link}`
+    ),
+    '',
+    `Excluded too short / no transcript / Sona: ${excluded.short}`,
+    `Out of scope or insufficient evidence: ${excluded.unscored}`,
+  ];
+  const csvLines = [
+    ['handler', 'score', 'band', 'time', 'inbox', 'contact', 'phone', 'duration_sec', 'flags', 'summary', 'quo_link'].join(','),
+    ...graded.map((r) =>
+      [
+        r.handlerName,
+        r.grade.overall_score,
+        r.grade.score_band || '',
+        r.timestamp || '',
+        r.line || '',
+        r.contact || '',
+        r.phone || '',
+        r.duration,
+        (r.grade.critical_flags || []).length,
+        String(r.grade.summary || '').replace(/"/g, '""'),
+        r.link || '',
+      ]
+        .map((v) => `"${String(v == null ? '' : v)}"`)
+        .join(',')
+    ),
+  ];
+  const subject = `${firmCtx().firmName} — Intake Call Grading — ${dayLabel}`;
+
+  if (!recipients.length || !EMAIL_CONFIGURED) {
+    console.log('\n  Email not configured (set Intake grading recipients in admin) — printing report:\n');
+    console.log(plainLines.join('\n'));
+  } else {
+    await sendEmail({
+      htmlBody: html,
+      plainText: plainLines.join('\n'),
+      subject,
+      to: recipients,
+      attachments: [
+        {
+          filename: `intake-grading-${dayStart.toFormat('yyyy-LL-dd')}.csv`,
+          content: csvLines.join('\n'),
+        },
+      ],
+    });
+    console.log(`\n  Sent intake grading to: ${recipients.join(', ')}`);
+  }
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('Intake Call Grading complete.');
+}
+
 if (require.main === module) {
   const arg = process.argv[2];
   let run = runDailyReport;
@@ -4863,6 +5200,7 @@ if (require.main === module) {
   if (arg === '--language' || arg === 'language') run = runClientLanguageReport;
   if (arg === '--marketing' || arg === 'marketing') run = runIntakeMarketingReport;
   if (arg === '--callstats' || arg === 'callstats') run = runDailyCallStatsReport;
+  if (arg === '--intake-grading' || arg === 'intake-grading' || arg === 'grading') run = runIntakeGradingReport;
   // Optional: `node report.js daily --firm <id>` scopes to one firm; otherwise all active firms.
   const firmFlag = process.argv.indexOf('--firm');
   const firmId = firmFlag !== -1 ? process.argv[firmFlag + 1] : undefined;
@@ -4885,6 +5223,7 @@ module.exports = {
   runClientLanguageReport,
   runIntakeMarketingReport,
   runDailyCallStatsReport,
+  runIntakeGradingReport,
   aggregateCallStats,
   buildCallStatsEmailHtml,
   runForAllFirms,

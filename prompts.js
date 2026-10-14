@@ -860,6 +860,37 @@ Tone: sharp, practical, and specific to the data — not generic marketing advic
 `.trim();
 }
 
+const fs = require('fs');
+const path = require('path');
+
+function loadIntakeGradingRubric() {
+  return fs.readFileSync(path.join(__dirname, 'intakeGradingRubric.md'), 'utf8');
+}
+
+function buildIntakeGradingPrompt({ call }) {
+  const rubric = loadIntakeGradingRubric();
+  const transcript = String(call.transcript || '').trim();
+  return `${rubric}
+
+## This call
+
+Grade only the intake agent's performance on this recording.
+
+- call_id: ${String(call.id || '')}
+- handler: ${String(call.handlerName || 'unknown')}
+- inbox: ${String(call.line || '')}
+- duration_sec: ${call.duration ?? ''}
+- contact: ${String(call.contact || '(unknown)')}
+- phone: ${String(call.phone || '')}
+- timestamp: ${String(call.timestamp || '')}
+- transcript_complete: ${transcript.length >= 400 ? 'true' : 'false'}
+
+TRANSCRIPT:
+${transcript}
+
+Return strict JSON only for this call_id.`;
+}
+
 module.exports = {
   generateDailyLeadReportPrompt,
   buildTranscriptSentimentPrompt,
@@ -875,4 +906,5 @@ module.exports = {
   INTAKE_MARKETING_ENUMS,
   buildIntakeMarketingBatchPrompt,
   buildIntakeMarketingBriefPrompt,
+  buildIntakeGradingPrompt,
 };
