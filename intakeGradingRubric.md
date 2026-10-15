@@ -14,9 +14,19 @@ Distinguish `met`, `partial`, `missed`, `not_applicable`, and `not_observable`. 
 
 Accept `call_id`, `transcript`, `transcript_complete`, `call_type`, `language`, `hold_events`, `crm_events`, `contract_events`, `follow_up_events`, and `known_disposition`. Only transcript is required. Missing external logs are not evidence that an off-call action failed.
 
-First classify the call: `new_lead`, `known_lead`, `contract_follow_up`, `referral_or_decline`, `existing_client`, `administrative`, or `unknown`; then identify `signable`, `declined`, `undecided`, or `unknown` case path. This rubric primarily evaluates new leads. Return `out_of_scope` for purely administrative or existing-client conversations.
+First classify the call, then pick **exactly one grading track**. Do not mix scorecards.
 
-## Scorecard (100 points)
+**Track `injury_lead`** — use only when this is a legitimate personal-injury lead or consult: new/known PI inquiry, contract follow-up, or an undecided/signable injury matter (including third-party work injury that may be PI). Goal: qualify, show firm value, and advance the case (agreement now, same-day attorney review, or a concrete next step).
+
+**Track `other`** — everything else that is not a PI lead: property-damage-only, ordinary workers' compensation, family/criminal/immigration/employment/med-mal/landlord-tenant/contract disputes, vendor or treating-provider message relay, wrong number, existing-client file admin, or a clearly excluded non-PI matter. Goal: identify scope quickly, explain respectfully, offer an approved referral when appropriate, and close cleanly. **Do not** penalize missing a value pitch, “what matters most,” or a contract offer on this track.
+
+Return `out_of_scope` only when there is no intake interaction to judge (dead air, hold-only, attorney already running the call with the agent silent). Grade `other` instead of dropping non-PI or administrative conversations.
+
+Also set `call_type` (`new_lead`, `known_lead`, `contract_follow_up`, `referral_or_decline`, `existing_client`, `administrative`, `unknown`) and `case_path` (`signable`, `declined`, `undecided`, `unknown`).
+
+## Track A — Injury lead scorecard (100 points)
+
+Use **only** when `classification.track` is `injury_lead`.
 
 | ID | Category | Points | Expectations | Handbook |
 |---|---|---:|---|---|
@@ -25,9 +35,21 @@ First classify the call: `new_lead`, `known_lead`, `contract_follow_up`, `referr
 | C3 | Control and listening | 15 | Sets expectations, listens without unnecessary interruption, asks focused questions, redirects politely, avoids unnecessary holds/silence. | 3–6 |
 | C4 | Qualification and judgment | 15 | Learns incident, timing, injury, and liability-relevant facts; avoids premature rejection; escalates uncertain case eligibility to attorney. | 6, 9–11 |
 | C5 | Tailored firm value | 15 | Asks “What matters to you most when choosing an attorney?” where appropriate; listens; offers 2–3 relevant RJL value propositions; accurately describes services. | 7–8, 16, 22 |
-| C6 | Catch, release, or next step | 20 | Signable: confidently offers to send agreement now and explains process; undecided: attorney involvement or specific same-day next step; declined: respectful explanation and appropriate referral. | 8–10, 12–18 |
+| C6 | Catch, release, or next step | 20 | Signable: confidently offers to send agreement now and explains process; undecided: attorney involvement or specific same-day next step; declined PI: respectful explanation and appropriate referral. | 8–10, 12–18 |
 | C7 | Lead source | 5 | Asks how caller heard of firm; probes vague referrals; never invents source. | 4, 11, 17–18 |
 | C8 | Close and handoff | 5 | Warm final offer of help; clear next step; if signed, direct phone number 512-537-3369 and intro expectations. | 10, 18, 21 |
+
+## Track B — Other / non-PI scorecard (100 points)
+
+Use **only** when `classification.track` is `other`. Do not score C1–C8 on this track.
+
+| ID | Category | Points | Expectations | Handbook |
+|---|---|---:|---|---|
+| O1 | Greeting and professionalism | 20 | Identifies as Ramos James Law; calm and respectful; Spanish throughout for Spanish-speaking caller. Name is preferred but not required on a 60-second message-relay. | 5, 11, 21 |
+| O2 | Listening and facts | 20 | Lets the caller explain; gathers enough facts to decide scope (what happened, injury vs property/admin, who is calling). Does not interrogate like a PI intake. | 3–6 |
+| O3 | Correct scope decision | 30 | Correctly treats non-PI as out of practice **or** escalates if facts suggest possible PI / third-party work injury. Never dump a potentially signable injury case to a referral. | 9–11 |
+| O4 | Explanation and referral | 20 | Explains the decline in plain language; offers an **approved** referral or Central Texas Lawyer Referral Service 512-472-8303 / text when appropriate; asks permission before sharing caller information. No contract pitch required. | 9–11 |
+| O5 | Close and next step | 10 | Confirms what happens next (referral text, message passed, callback window) and ends warmly. | 10, 18 |
 
 For each applicable, observable category: `met` = full points; `partial` = half points; `missed` = zero. Use category-level judgment for multiple subrequirements and explain partial grades. `not_applicable` and `not_observable` do not enter the denominator. **Score = round(100 × earned / observable applicable weight)**. Report `coverage = observable applicable weight / all applicable weight`. If observable weight is under 50, output `insufficient_evidence` and null score. Proposed bands: 90–100 excellent; 80–89 good; 70–79 coaching needed; below 70 priority coaching. Low confidence if coverage < 0.75.
 
@@ -35,7 +57,7 @@ For each applicable, observable category: `met` = full points; `partial` = half 
 
 **Potentially signable PI:** Intake should move confidently to electronic contract while caller is engaged, not simply ask if they want to hire the firm. If fees are discussed in detail, handbook terms are **1/3 plus expenses without suit, 40% plus expenses with suit, 45% plus expenses at trial**; contingent payment when the firm wins. Explain attorney/paralegal next steps when appropriate. Never promise a recovery. If caller asks about property damage, RJL guides/reviews PD handling **through the client**, rather than taking over the PD claim. For medical networks, say no up-front/out-of-pocket payment, **not** that treatment is free. (pp. 7–10)
 
-**Declined/non-PI:** The handbook excludes family, criminal, immigration, employment, medical malpractice, consumer fraud, landlord-tenant, contracts, and property-damage-only matters. Explain respectfully and offer an appropriate **preapproved** referral, or Central Texas Lawyer Referral Service **512-472-8303**, including text offer if appropriate. For PD-only, offer RJL's PDF. Ask permission before sharing caller information with another attorney. If referring to a firm, remind caller to mention Laura Ramos James where appropriate. Do not require a contract pitch for a clearly excluded case. (pp. 9–11)
+**Declined/non-PI:** These almost always belong on track `other`. The handbook excludes family, criminal, immigration, employment, medical malpractice, consumer fraud, landlord-tenant, contracts, and property-damage-only matters. Explain respectfully and offer an appropriate **preapproved** referral, or Central Texas Lawyer Referral Service **512-472-8303**, including text offer if appropriate. For PD-only, offer RJL's PDF. Ask permission before sharing caller information with another attorney. If referring to a firm, remind caller to mention Laura Ramos James where appropriate. Do not require a contract pitch, value proposition, or full PI qualification for a clearly excluded case. (pp. 9–11)
 
 **Uncertain case / work injury:** Do not decline solely because no treatment, police report, insurance, compelling evidence, or another firm previously said no. If caller says not injured, ask when event happened and leave door open for delayed symptoms. Ordinary workers' compensation claim against employer is excluded; **third-party workplace injury and certain work-vehicle accidents may be accepted** and require attorney review. (pp. 9–11)
 
@@ -81,13 +103,14 @@ Flag only if evidenced; include severity (`high`/`medium`), quote or log evidenc
 
 ## Output: strict JSON only
 
-Return a **valid JSON object**, no fences or explanation. Include all eight categories, even when inapplicable:
+Return a **valid JSON object**, no fences or explanation. Include every category from the chosen track (C1–C8 or O1–O5), even when inapplicable:
 
 ```json
 {
   "call_id": "string",
   "grading_status": "graded|insufficient_evidence|out_of_scope",
   "classification": {
+    "track": "injury_lead|other",
     "call_type": "new_lead",
     "case_path": "undecided",
     "language": "en",
@@ -121,13 +144,13 @@ Return a **valid JSON object**, no fences or explanation. Include all eight cate
 }
 ```
 
-Rules: **Populate C1–C8** with exact weights above. For `not_applicable`/`not_observable`, `earned_points` is null. `observable_applicable_points` sums category weights with `met`/`partial`/`missed`; `applicable_possible_points` additionally includes applicable `not_observable` weights. `coverage` is their ratio, or null if denominator is zero. Score and band null for out-of-scope/insufficient-evidence calls. For `partial` or `missed`, include a concrete coaching suggestion. Quote only verbatim text, or use `quote: null` and `type: "omission"`. Include up to three strengths and three highest-impact coaching priorities. Never claim a contract was **sent**, referral **completed**, or appointment **scheduled** unless the transcript explicitly establishes it or supporting records confirm it; distinguish an agent's promise from verification.
+Rules: Set `classification.track` first. **Injury leads: populate C1–C8 only.** **Other calls: populate O1–O5 only.** Use the exact weights above. For `not_applicable`/`not_observable`, `earned_points` is null. `observable_applicable_points` sums category weights with `met`/`partial`/`missed`; `applicable_possible_points` additionally includes applicable `not_observable` weights. `coverage` is their ratio, or null if denominator is zero. Score and band null for out-of-scope/insufficient-evidence calls. For `partial` or `missed`, include a concrete coaching suggestion. Quote only verbatim text, or use `quote: null` and `type: "omission"`. Include up to three strengths and three highest-impact coaching priorities. Never claim a contract was **sent**, referral **completed**, or appointment **scheduled** unless the transcript explicitly establishes it or supporting records confirm it; distinguish an agent's promise from verification. Coaching must match the track: convert/qualify on injury leads; scope + referral + next step on other calls.
 
 ## Evaluation procedure
 
-1. Read entire transcript and metadata; identify speakers, call type, case path, and recording limitations.
-2. Note observed evidence for each category and conditional requirement.
+1. Read entire transcript and metadata; classify **track** (`injury_lead` vs `other`), call type, case path, and recording limitations.
+2. Apply only the matching scorecard. Do not score value proposition or contract-push on `other`.
 3. Assign category statuses and points; exclude truly inapplicable/unobservable items.
 4. Check confirmed critical issues and external actions needing verification.
 5. Compute denominator, coverage, normalized score, and confidence; validate arithmetic.
-6. Produce strict JSON with specific, fair, actionable coaching.
+6. Produce strict JSON with specific, fair, actionable coaching for that track.

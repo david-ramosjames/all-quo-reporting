@@ -4875,6 +4875,71 @@ function intakeGradingBandColor(band) {
   return '#57606a';
 }
 
+function intakeGradingBandBg(band) {
+  const b = String(band || '').toLowerCase();
+  if (b.includes('excellent')) return '#ecfdf3';
+  if (b.includes('good')) return '#eff8ff';
+  if (b.includes('priority')) return '#fef3f2';
+  if (b.includes('coaching')) return '#fffaeb';
+  return '#f6f8fa';
+}
+
+function intakeGradeTrack(grade) {
+  const raw = String(grade && grade.classification && grade.classification.track || '').toLowerCase().replace(/[-\s]+/g, '_');
+  if (raw === 'injury_lead' || raw === 'pi_lead' || raw === 'qualified_lead') return 'injury_lead';
+  if (raw === 'other' || raw === 'non_pi' || raw === 'not_a_lead') return 'other';
+  const ct = String(grade && grade.classification && grade.classification.call_type || '').toLowerCase();
+  const path = String(grade && grade.classification && grade.classification.case_path || '').toLowerCase();
+  if (path === 'declined' || /referral|admin|existing/.test(ct)) return 'other';
+  if (/lead|consult|contract/.test(ct) || path === 'signable' || path === 'undecided') return 'injury_lead';
+  return 'other';
+}
+
+function formatIntakeFlag(f) {
+  if (!f) return '';
+  if (typeof f === 'string') return f.replace(/_/g, ' ');
+  const type = f.type || f.flag || f.id || '';
+  return String(type).replace(/_/g, ' ');
+}
+
+function avgInts(nums) {
+  if (!nums.length) return null;
+  return Math.round(nums.reduce((a, b) => a + b, 0) / nums.length);
+}
+
+function isIntakeGradingLine(line, lineSet) {
+  const n = String(line || '').trim().toLowerCase();
+  if (!n) return false;
+  if (lineSet.size && lineSet.has(n)) return true;
+  return /\b(lead|intake)s?\b/.test(n);
+}
+
+function looksLikeQuoUserId(v) {
+  return /^US[A-Z0-9]+$/i.test(String(v || '').trim());
+}
+
+/** Who handled the recording: inbound answerer, outbound placer, or Intake line. */
+function resolveIntakeHandler(c, userMap) {
+  const inbound = isIncomingDirection(c.direction);
+  const named = (id) => {
+    if (!id) return null;
+    const name = userMap[id] || id;
+    return { handlerId: id, handlerName: name };
+  };
+  if (inbound) {
+    if (c.answeredBy) return named(c.answeredBy);
+    if (c.userId && /intake/i.test(userMap[c.userId] || '')) return named(c.userId);
+  } else {
+    if (c.initiatedBy) return named(c.initiatedBy);
+    if (c.userId) return named(c.userId);
+  }
+  if (/intake/i.test(String(c.line || ''))) {
+    if (c.userId) return { handlerId: c.userId, handlerName: userMap[c.userId] || 'Intake Specialist' };
+    return { handlerId: 'intake-line', handlerName: 'Intake Specialist' };
+  }
+  return null;
+}
+
 function normalizeIntakeGrade(obj, callId) {
   if (!obj || typeof obj !== 'object') return null;
   let status = String(obj.grading_status || '').toLowerCase();
@@ -4889,12 +4954,13 @@ function normalizeIntakeGrade(obj, callId) {
   }
   if (status === 'graded' && score == null) status = 'insufficient_evidence';
   const flags = Array.isArray(obj.critical_flags) ? obj.critical_flags : [];
-  return {
+  const classification = obj.classification && typeof obj.classification === 'object' ? { ...obj.classification } : {};
+  const grade = {
     call_id: String(obj.call_id || callId || ''),
     grading_status: status,
     overall_score: status === 'graded' ? score : null,
     score_band: status === 'graded' ? String(obj.score_band || intakeGradingBand(score) || '') : null,
-    classification: obj.classification && typeof obj.classification === 'object' ? obj.classification : {},
+    classification,
     coverage: obj.coverage == null || obj.coverage === '' ? null : Number(obj.coverage),
     confidence: obj.confidence || null,
     categories: Array.isArray(obj.categories) ? obj.categories : [],
@@ -4905,6 +4971,8 @@ function normalizeIntakeGrade(obj, callId) {
       : [],
     summary: String(obj.summary || '').trim(),
   };
+  classification.track = intakeGradeTrack(grade);
+  return grade;
 }
 
 async function gradeOneIntakeCall(call) {
@@ -4924,76 +4992,163 @@ async function gradeOneIntakeCall(call) {
   return normalizeIntakeGrade(parsed, call.id);
 }
 
-function buildIntakeGradingEmailHtml(dayLabel, windowNote, userSummaries, rows, excluded) {
-  const css = `
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; background: #ffffff; }
-    h2 { margin: 0 0 2px; } h3 { margin: 26px 0 8px; }
-    table { border-collapse: collapse; width: 100%; margin-top: 8px; background: #ffffff; }
-    th, td { border: 1px solid #d0d7de; padding: 7px 10px; text-align: left; font-size: 14px; background: #ffffff; vertical-align: top; }
-    td.num, th.num { text-align: right; white-space: nowrap; }
-    .note { color: #57606a; font-size: 12px; margin-top: 8px; }
-    .muted { color: #57606a; font-size: 13px; }
-    a { color: #0969da; }
-  `.trim();
+function intakeScoreCell(score, band) {
+  if (score == null) return '<span style="color:#667085">—</span>';
+  const color = intakeGradingBandColor(band);
+  return `<span style="font-size:22px;font-weight:800;color:${color};line-height:1">${score}</span>`;
+}
 
-  const summaryBody = userSummaries.length
+function intakeBadge(label, color, bg) {
+  return `<span style="display:inline-block;padding:3px 8px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:0.02em;color:${color};background:${bg};white-space:nowrap">${escapeHtml(label)}</span>`;
+}
+
+function buildIntakeCallCard(r) {
+  const track = intakeGradeTrack(r.grade);
+  const band = (r.grade && r.grade.score_band) || intakeGradingBand(r.grade && r.grade.overall_score) || '';
+  const color = intakeGradingBandColor(band);
+  const bg = intakeGradingBandBg(band);
+  const score = r.grade && r.grade.overall_score != null ? r.grade.overall_score : null;
+  const who = r.contact || r.phone || 'Unknown caller';
+  const dir = isIncomingDirection(r.direction) ? 'Inbound' : 'Outbound';
+  const coaching = (r.grade.coaching_priorities || []).slice(0, 2);
+  const flags = (r.grade.critical_flags || []).map(formatIntakeFlag).filter(Boolean);
+  const trackBadge = track === 'injury_lead'
+    ? intakeBadge('Injury lead', '#175cd3', '#eff8ff')
+    : intakeBadge('Other / non-PI', '#344054', '#f2f4f7');
+  const bandBadge = band ? intakeBadge(band.replace(/_/g, ' '), color, bg) : '';
+  const coachingHtml = coaching.length
+    ? `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin-top:10px">${coaching.map((c) => `
+        <tr>
+          <td style="width:10px;vertical-align:top;color:${color};font-weight:800;padding:0 6px 4px 0">›</td>
+          <td style="font-size:13px;color:#344054;line-height:1.45;padding:0 0 4px">${escapeHtml(c)}</td>
+        </tr>`).join('')}</table>`
+    : '';
+  const flagHtml = flags.length
+    ? `<div style="margin-top:8px">${flags.map((f) => intakeBadge(f, '#b42318', '#fef3f2')).join(' ')}</div>`
+    : '';
+  return `
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="margin:0 0 12px;background:#ffffff;border:1px solid #e4e7ec;border-radius:10px;border-left:5px solid ${color}">
+    <tr>
+      <td style="width:72px;padding:16px 8px 16px 16px;vertical-align:top;text-align:center">
+        ${intakeScoreCell(score, band)}
+        <div style="font-size:10px;color:#667085;margin-top:4px;text-transform:uppercase;letter-spacing:0.04em">score</div>
+      </td>
+      <td style="padding:16px 16px 16px 8px;vertical-align:top">
+        <div style="font-size:15px;font-weight:700;color:#101828">${escapeHtml(r.handlerName)}</div>
+        <div style="font-size:12px;color:#667085;margin:2px 0 8px">${escapeHtml(formatTimestamp(r.timestamp))} · ${escapeHtml(dir)} · ${escapeHtml(r.line || '')} · ${escapeHtml(formatCallDuration(r.duration))}</div>
+        <div style="margin-bottom:8px">${trackBadge} ${bandBadge}</div>
+        <div style="font-size:13px;font-weight:600;color:#344054;margin-bottom:4px">${escapeHtml(who)}${r.contact && r.phone ? ` <span style="font-weight:400;color:#667085">${escapeHtml(r.phone)}</span>` : ''}</div>
+        <div style="font-size:13px;color:#344054;line-height:1.5">${escapeHtml(r.grade.summary || '—')}</div>
+        ${coachingHtml}
+        ${flagHtml}
+        <div style="margin-top:12px"><a href="${escapeHtml(r.link || '#')}" style="display:inline-block;padding:7px 12px;border-radius:6px;background:#0A1C40;color:#ffffff;font-size:12px;font-weight:700;text-decoration:none">Open in Quo →</a></div>
+      </td>
+    </tr>
+  </table>`;
+}
+
+function buildIntakeGradingEmailHtml(dayLabel, windowNote, userSummaries, rows, excluded, inboxes) {
+  const injuryRows = rows.filter((r) => intakeGradeTrack(r.grade) === 'injury_lead');
+  const otherRows = rows.filter((r) => intakeGradeTrack(r.grade) !== 'injury_lead');
+  const injuryAvg = avgInts(injuryRows.map((r) => r.grade.overall_score).filter((n) => Number.isFinite(n)));
+  const otherAvg = avgInts(otherRows.map((r) => r.grade.overall_score).filter((n) => Number.isFinite(n)));
+  const flagCount = rows.reduce((n, r) => n + (r.grade.critical_flags || []).length, 0);
+  const kpi = (label, value, sub, color) => `
+    <td style="width:25%;padding:4px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#ffffff;border:1px solid #e4e7ec;border-radius:10px">
+        <tr><td style="padding:14px 12px">
+          <div style="font-size:11px;font-weight:700;color:#667085;text-transform:uppercase;letter-spacing:0.04em">${escapeHtml(label)}</div>
+          <div style="font-size:28px;font-weight:800;color:${color || '#0A1C40'};line-height:1.15;margin-top:4px">${value}</div>
+          <div style="font-size:12px;color:#667085;margin-top:4px">${escapeHtml(sub)}</div>
+        </td></tr>
+      </table>
+    </td>`;
+
+  const handlerRows = userSummaries.length
     ? userSummaries.map((u) => {
-        const color = intakeGradingBandColor(u.band);
+        const bandColor = intakeGradingBandColor(u.band);
+        const injuryTxt = u.injury.n ? `<span style="font-weight:800;color:${intakeGradingBandColor(intakeGradingBand(u.injury.avg))}">${u.injury.avg}</span> <span style="color:#667085">(${u.injury.n})</span>` : '<span style="color:#98a2b3">—</span>';
+        const otherTxt = u.other.n ? `<span style="font-weight:800;color:${intakeGradingBandColor(intakeGradingBand(u.other.avg))}">${u.other.avg}</span> <span style="color:#667085">(${u.other.n})</span>` : '<span style="color:#98a2b3">—</span>';
         return `<tr>
-          <td>${escapeHtml(u.name)}</td>
-          <td class="num">${u.graded}</td>
-          <td class="num" style="font-weight:800;color:${color}">${u.avg == null ? '—' : u.avg}</td>
-          <td>${escapeHtml(u.band || '—')}</td>
-          <td class="num">${u.flags}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;font-weight:600;color:#101828">${escapeHtml(u.name)}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;text-align:right">${injuryTxt}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;text-align:right">${otherTxt}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;text-align:right">${u.flags || '—'}</td>
+          <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7">${u.band ? intakeBadge(u.band, bandColor, intakeGradingBandBg(u.band)) : '—'}</td>
         </tr>`;
       }).join('')
-    : '<tr><td colspan="5" class="note">No scoreable intake calls in this window.</td></tr>';
+    : '<tr><td colspan="5" style="padding:16px;color:#667085">No scoreable intake calls in this window.</td></tr>';
 
-  const callRows = rows.map((r) => {
-    const color = intakeGradingBandColor(r.grade && r.grade.score_band);
-    const score = r.grade && r.grade.overall_score != null ? r.grade.overall_score : '—';
-    const band = (r.grade && r.grade.score_band) || r.grade.grading_status || '—';
-    const coaching = (r.grade.coaching_priorities || []).map((c) => escapeHtml(c)).join('<br>') || '—';
-    const flags = (r.grade.critical_flags || [])
-      .map((f) => escapeHtml(typeof f === 'string' ? f : (f.type || f.id || JSON.stringify(f))))
-      .join(', ') || '—';
-    const who = r.contact ? `${escapeHtml(r.contact)}` : escapeHtml(r.phone || '');
-    return `<tr>
-      <td>${escapeHtml(r.handlerName)}<div class="muted">${escapeHtml(formatTimestamp(r.timestamp))}<br>${escapeHtml(r.line || '')}</div></td>
-      <td>${who}<div class="muted">${escapeHtml(formatCallDuration(r.duration))}</div></td>
-      <td class="num" style="font-weight:800;color:${color}">${score}</td>
-      <td>${escapeHtml(band)}</td>
-      <td>${escapeHtml(r.grade.summary || '—')}</td>
-      <td>${coaching}</td>
-      <td>${flags}</td>
-      <td><a href="${escapeHtml(r.link)}">Open in Quo</a></td>
-    </tr>`;
-  }).join('');
+  const section = (title, blurb, list) => `
+    <h3 style="margin:28px 0 6px;font-size:16px;color:#0A1C40">${escapeHtml(title)}</h3>
+    <p style="margin:0 0 12px;font-size:12px;color:#667085">${escapeHtml(blurb)}</p>
+    ${list.length ? list.map(buildIntakeCallCard).join('') : `<p style="color:#667085;font-size:13px">None in this window.</p>`}`;
 
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
-    <h2>Intake Call Grading</h2>
-    <p class="muted" style="margin:2px 0 0">${escapeHtml(dayLabel)} · ${escapeHtml(windowNote)}</p>
-    <p class="note">Scored with the RJL Intake Call Grading rubric. Calls shorter than ${INTAKE_GRADING_MIN_SECONDS}s or without enough transcript are excluded.</p>
-
-    <h3>Summary by person</h3>
-    <table>
-      <tr><th>Handler</th><th class="num">Graded calls</th><th class="num">Avg score</th><th>Band</th><th class="num">Critical flags</th></tr>
-      ${summaryBody}
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f2f4f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#101828">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f4f7">
+<tr><td align="center" style="padding:20px 12px">
+<table role="presentation" width="680" cellpadding="0" cellspacing="0" style="max-width:680px;width:100%">
+  <tr><td style="background:#0A1C40;border-radius:12px 12px 0 0;padding:28px 28px 24px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#45C7F0">Intake Quality Briefing</div>
+    <div style="font-size:26px;font-weight:800;color:#ffffff;margin-top:6px">Call Grading</div>
+    <div style="font-size:14px;color:#d0d5dd;margin-top:6px">${escapeHtml(dayLabel)}</div>
+    <div style="font-size:12px;color:#98a2b3;margin-top:2px">${escapeHtml(windowNote)}</div>
+  </td></tr>
+  <tr><td style="background:#ffffff;padding:20px 20px 8px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        ${kpi('Injury-lead avg', injuryAvg == null ? '—' : injuryAvg, `${injuryRows.length} qualified PI / consults`, intakeGradingBandColor(intakeGradingBand(injuryAvg)))}
+        ${kpi('Other-call avg', otherAvg == null ? '—' : otherAvg, `${otherRows.length} non-PI / not a lead`, intakeGradingBandColor(intakeGradingBand(otherAvg)))}
+        ${kpi('Graded', String(rows.length), `Injury ${injuryRows.length} · Other ${otherRows.length}`, '#0A1C40')}
+        ${kpi('Flags', String(flagCount), 'Items needing review', flagCount ? '#b42318' : '#067647')}
+      </tr>
     </table>
-
-    <h3>Graded calls</h3>
-    <table>
-      <tr><th>Handler / time</th><th>Caller</th><th class="num">Score</th><th>Band</th><th>Summary</th><th>Coaching</th><th>Flags</th><th>Quo</th></tr>
-      ${callRows || '<tr><td colspan="8" class="note">None graded.</td></tr>'}
+    <p style="margin:14px 8px 0;font-size:12px;color:#667085;line-height:1.5">
+      Injury leads are graded on qualification, value, and next-step conversion.
+      Other calls are graded on correct scope, respectful decline, and referral handling — not contract pitching.
+    </p>
+  </td></tr>
+  <tr><td style="background:#ffffff;padding:8px 20px 20px">
+    <h3 style="margin:16px 0 8px;font-size:16px;color:#0A1C40">Team snapshot</h3>
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e4e7ec;border-radius:10px;overflow:hidden">
+      <tr style="background:#f9fafb">
+        <th align="left" style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085">Handler</th>
+        <th align="right" style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085">Injury avg (n)</th>
+        <th align="right" style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085">Other avg (n)</th>
+        <th align="right" style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085">Flags</th>
+        <th align="left" style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085">Band</th>
+      </tr>
+      ${handlerRows}
     </table>
-
-    <p class="note">Excluded (too short / no transcript / Sona): ${excluded.short} · Out of scope or insufficient evidence: ${excluded.unscored}</p>
-  </body></html>`;
+    ${section(
+      'Injury leads & consultations',
+      'Goal: qualify the injury, present RJL value, and advance a contract or same-day attorney review.',
+      injuryRows
+    )}
+    ${section(
+      'Other calls (not a PI lead)',
+      'Goal: confirm the matter is out of scope (or escalate if it might be PI), explain clearly, and offer an approved referral.',
+      otherRows
+    )}
+    <p style="margin:24px 0 0;font-size:12px;color:#667085;line-height:1.55">
+      Inboxes included: ${escapeHtml((inboxes || []).join(', ') || 'Leads, Intake')}.
+      Excluded too short / no transcript / Sona: ${excluded.short}.
+      Out of scope or insufficient evidence: ${excluded.unscored}.
+      Calls under ${INTAKE_GRADING_MIN_SECONDS}s are not scored.
+    </p>
+  </td></tr>
+  <tr><td style="background:#0A1C40;border-radius:0 0 12px 12px;padding:14px 28px;font-size:11px;color:#98a2b3">Ramos James Law · Internal coaching report</td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>`;
 }
 
 /**
- * Nightly intake QA: grade Leads + Intake inbound calls handled by a person,
- * skip recordings too short to score, and email per-handler averages + Quo links.
+ * Nightly intake QA: grade Leads + Intake calls (inbound and outbound) by handler.
+ * Injury leads and other/non-PI calls use different scorecards. Skip short recordings.
  */
 async function runIntakeGradingReport(opts = {}) {
   const recipients = firmCtx().intakeGradingEmailTo || [];
@@ -5048,14 +5203,13 @@ async function runIntakeGradingReport(opts = {}) {
   const candidates = [];
   for (const c of callData || []) {
     if (c.recordType === 'sms') continue;
-    if (!isIncomingDirection(c.direction)) continue;
-    if (lineSet.size && !lineSet.has(String(c.line || '').trim().toLowerCase())) continue;
+    if (!isIntakeGradingLine(c.line, lineSet)) continue;
     if (c.aiHandled) {
       excluded.short += 1;
       continue;
     }
-    const actorId = c.answeredBy || c.userId;
-    if (!actorId) {
+    const handler = resolveIntakeHandler(c, userMap);
+    if (!handler) {
       excluded.short += 1;
       continue;
     }
@@ -5065,10 +5219,14 @@ async function runIntakeGradingReport(opts = {}) {
       excluded.short += 1;
       continue;
     }
+    let handlerName = handler.handlerName;
+    if (looksLikeQuoUserId(handlerName) && /intake/i.test(String(c.line || ''))) {
+      handlerName = 'Intake Specialist';
+    }
     candidates.push({
       ...c,
-      handlerId: actorId,
-      handlerName: userMap[actorId] || actorId,
+      handlerId: handler.handlerId,
+      handlerName,
       duration: dur,
     });
   }
@@ -5077,7 +5235,16 @@ async function runIntakeGradingReport(opts = {}) {
   if (candidates.length > toGrade.length) {
     console.warn(`  Capped at ${INTAKE_GRADING_MAX_CALLS} calls (${candidates.length} qualified).`);
   }
-  console.log(`  ${toGrade.length} call(s) to grade · excluded too short/no handler: ${excluded.short}`);
+  const handlerCounts = {};
+  let inboundN = 0;
+  let outboundN = 0;
+  for (const c of toGrade) {
+    handlerCounts[c.handlerName] = (handlerCounts[c.handlerName] || 0) + 1;
+    if (isIncomingDirection(c.direction)) inboundN += 1;
+    else outboundN += 1;
+  }
+  console.log(`  ${toGrade.length} call(s) to grade · inbound ${inboundN} · outbound ${outboundN} · excluded too short/no handler: ${excluded.short}`);
+  console.log(`  Handlers: ${Object.entries(handlerCounts).map(([n, k]) => `${n}=${k}`).join(' · ') || 'none'}`);
 
   console.log('\n[2/3] Grading with the RJL intake rubric...');
   const graded = [];
@@ -5102,58 +5269,68 @@ async function runIntakeGradingReport(opts = {}) {
   const byUser = new Map();
   for (const r of graded) {
     if (!byUser.has(r.handlerName)) {
-      byUser.set(r.handlerName, { name: r.handlerName, scores: [], flags: 0 });
+      byUser.set(r.handlerName, { name: r.handlerName, injury: [], other: [], flags: 0 });
     }
     const u = byUser.get(r.handlerName);
-    u.scores.push(r.grade.overall_score);
+    const track = intakeGradeTrack(r.grade);
+    (track === 'injury_lead' ? u.injury : u.other).push(r.grade.overall_score);
     u.flags += (r.grade.critical_flags || []).length;
   }
   const userSummaries = [...byUser.values()]
     .map((u) => {
-      const avg = u.scores.length
-        ? Math.round(u.scores.reduce((a, b) => a + b, 0) / u.scores.length)
-        : null;
+      const injuryAvg = avgInts(u.injury);
+      const otherAvg = avgInts(u.other);
+      const headline = injuryAvg != null ? injuryAvg : otherAvg;
       return {
         name: u.name,
-        graded: u.scores.length,
-        avg,
-        band: intakeGradingBand(avg),
+        graded: u.injury.length + u.other.length,
+        injury: { n: u.injury.length, avg: injuryAvg },
+        other: { n: u.other.length, avg: otherAvg },
+        avg: headline,
+        band: intakeGradingBand(headline),
         flags: u.flags,
       };
     })
-    .sort((a, b) => (b.avg ?? -1) - (a.avg ?? -1) || b.graded - a.graded);
+    .sort((a, b) => (b.injury.avg ?? -1) - (a.injury.avg ?? -1) || (b.avg ?? -1) - (a.avg ?? -1) || b.graded - a.graded);
 
   console.log('\n[3/3] Handler averages:');
   for (const u of userSummaries) {
-    console.log(`   - ${u.name}: avg ${u.avg} (${u.band}) · ${u.graded} call(s) · ${u.flags} flag(s)`);
+    console.log(
+      `   - ${u.name}: injury ${u.injury.avg ?? '—'} (${u.injury.n}) · other ${u.other.avg ?? '—'} (${u.other.n}) · ${u.flags} flag(s)`
+    );
   }
 
-  const html = buildIntakeGradingEmailHtml(dayLabel, windowNote, userSummaries, graded, excluded);
+  const html = buildIntakeGradingEmailHtml(dayLabel, windowNote, userSummaries, graded, excluded, leadsLines);
   const plainLines = [
     `Intake Call Grading — ${dayLabel}`,
     windowNote,
     '',
     'Summary by person:',
-    ...userSummaries.map((u) => `  ${u.name}: avg ${u.avg} (${u.band}) · ${u.graded} graded · ${u.flags} flags`),
+    ...userSummaries.map(
+      (u) =>
+        `  ${u.name}: injury ${u.injury.avg ?? '—'} (${u.injury.n}) · other ${u.other.avg ?? '—'} (${u.other.n}) · ${u.flags} flags`
+    ),
     '',
     'Graded calls:',
-    ...graded.map(
-      (r) =>
-        `  ${r.handlerName} · ${r.grade.overall_score} ${r.grade.score_band || ''} · ${r.contact || r.phone} · ${r.link}`
-    ),
+    ...graded.map((r) => {
+      const track = intakeGradeTrack(r.grade);
+      return `  [${track === 'injury_lead' ? 'injury' : 'other'}] ${r.handlerName} · ${r.grade.overall_score} ${r.grade.score_band || ''} · ${r.contact || r.phone} · ${r.link}`;
+    }),
     '',
     `Excluded too short / no transcript / Sona: ${excluded.short}`,
     `Out of scope or insufficient evidence: ${excluded.unscored}`,
   ];
   const csvLines = [
-    ['handler', 'score', 'band', 'time', 'inbox', 'contact', 'phone', 'duration_sec', 'flags', 'summary', 'quo_link'].join(','),
+    ['handler', 'track', 'score', 'band', 'time', 'inbox', 'direction', 'contact', 'phone', 'duration_sec', 'flags', 'summary', 'quo_link'].join(','),
     ...graded.map((r) =>
       [
         r.handlerName,
+        intakeGradeTrack(r.grade),
         r.grade.overall_score,
         r.grade.score_band || '',
         r.timestamp || '',
         r.line || '',
+        r.direction || '',
         r.contact || '',
         r.phone || '',
         r.duration,
@@ -5226,5 +5403,6 @@ module.exports = {
   runIntakeGradingReport,
   aggregateCallStats,
   buildCallStatsEmailHtml,
+  buildIntakeGradingEmailHtml,
   runForAllFirms,
 };

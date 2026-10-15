@@ -876,9 +876,12 @@ function buildIntakeGradingPrompt({ call }) {
 
 Grade only the intake agent's performance on this recording.
 
+Classify track first: injury_lead (qualified PI / consult) or other (not a PI lead). Score with that track's rubric only.
+
 - call_id: ${String(call.id || '')}
 - handler: ${String(call.handlerName || 'unknown')}
 - inbox: ${String(call.line || '')}
+- direction: ${String(call.direction || '')}
 - duration_sec: ${call.duration ?? ''}
 - contact: ${String(call.contact || '(unknown)')}
 - phone: ${String(call.phone || '')}
