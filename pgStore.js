@@ -88,6 +88,7 @@ ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_transfer_inboxes text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_ignore_incoming_inboxes text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_midday_email_to text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_afternoon_email_to text;
+ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_weekend_email_to text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_morning_time text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_midday_time text;
 ALTER TABLE firm_settings ADD COLUMN IF NOT EXISTS stats_afternoon_time text;
@@ -272,7 +273,7 @@ const FIRM_UPSERT_COLUMNS = [
   'active',
   'stats_email_to', 'stats_exclude_inboxes', 'stats_include_users', 'stats_missed_goal',
   'stats_transfer_inboxes', 'stats_ignore_incoming_inboxes',
-  'stats_midday_email_to', 'stats_afternoon_email_to',
+  'stats_midday_email_to', 'stats_afternoon_email_to', 'stats_weekend_email_to',
   'stats_morning_time', 'stats_midday_time', 'stats_afternoon_time',
   'stats_missed_goal_midday', 'stats_missed_goal_afternoon',
   'stats_leads_inboxes',

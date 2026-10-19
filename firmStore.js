@@ -267,11 +267,40 @@ function callStatsSlotRecipients(ctx, slotId) {
   return Array.isArray(list) ? list : [];
 }
 
+/** Calendar day the Call Stats email is *about* (not the send clock). */
+function callStatsCoverageDay(slotId, now = DateTime.now().setZone(TIMEZONE)) {
+  const slot = callStatsSlot(slotId);
+  const day = now.startOf('day');
+  return slot.window === 'today_so_far' ? day : day.minus({ days: 1 });
+}
+
+function callStatsCoverageIsWeekend(slotId, now) {
+  const wd = callStatsCoverageDay(slotId, now).weekday;
+  return wd === 6 || wd === 7;
+}
+
+/**
+ * Recipients for this send. Saturday/Sunday *coverage* (Sat 1pm about Saturday,
+ * Mon 7:30am about Sunday) uses the weekend list. Friday’s recap still uses the
+ * regular slot list even when that email goes out Saturday morning.
+ */
+function callStatsEffectiveRecipients(ctx, slotId, now) {
+  if (callStatsCoverageIsWeekend(slotId, now)) {
+    const list = ctx && ctx.statsWeekendEmailTo;
+    return Array.isArray(list) ? list : [];
+  }
+  return callStatsSlotRecipients(ctx, slotId);
+}
+
 const SLOT_EMAIL_SOURCE = {
   statsEmailTo: ['stats_email_to', 'STATS_EMAIL_TO'],
   statsMiddayEmailTo: ['stats_midday_email_to', 'STATS_MIDDAY_EMAIL_TO'],
   statsAfternoonEmailTo: ['stats_afternoon_email_to', 'STATS_AFTERNOON_EMAIL_TO'],
 };
+
+function callStatsWeekendRawRecipientText(firm) {
+  return firstNonEmpty(firm && firm.stats_weekend_email_to, process.env.STATS_WEEKEND_EMAIL_TO);
+}
 
 /** Unparsed recipient field for a slot (firm column, then env). */
 function callStatsSlotRawRecipientText(firm, slotId) {
@@ -322,6 +351,7 @@ function reportConfigForFirm(firm) {
     statsEmailTo: firstEmailList(f.stats_email_to, env.STATS_EMAIL_TO),
     statsMiddayEmailTo: firstEmailList(f.stats_midday_email_to, env.STATS_MIDDAY_EMAIL_TO),
     statsAfternoonEmailTo: firstEmailList(f.stats_afternoon_email_to, env.STATS_AFTERNOON_EMAIL_TO),
+    statsWeekendEmailTo: firstEmailList(f.stats_weekend_email_to, env.STATS_WEEKEND_EMAIL_TO),
     statsMorningTime: firstNonEmpty(f.stats_morning_time, env.STATS_MORNING_TIME, morningTimeFromCron()),
     statsMiddayTime: firstNonEmpty(f.stats_midday_time, env.STATS_MIDDAY_TIME, '1:00 PM'),
     statsAfternoonTime: firstNonEmpty(f.stats_afternoon_time, env.STATS_AFTERNOON_TIME, '5:00 PM'),
@@ -606,7 +636,11 @@ module.exports = {
   callStatsSlot,
   callStatsSlotClock,
   callStatsSlotRecipients,
+  callStatsEffectiveRecipients,
+  callStatsCoverageDay,
+  callStatsCoverageIsWeekend,
   callStatsSlotRawRecipientText,
+  callStatsWeekendRawRecipientText,
   callStatsSlotGoal,
   parseEmailList,
   parseAnsweredGoalPct,

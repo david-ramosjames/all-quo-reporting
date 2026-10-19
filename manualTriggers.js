@@ -218,7 +218,7 @@ function buildIndexHtml(message, email) {
           <option value="afternoon">Afternoon — today so far (5:00 PM list)</option>
         </select>
       </div>
-      <button type="button" data-job="callstats">Run Call Stats (uses the send selected above → that list)</button>
+      <button type="button" data-job="callstats">Run Call Stats (uses the send selected above; Sat/Sun coverage uses the weekend list)</button>
       <button type="button" data-job="grading">Run Intake Call Grading (today so far · Leads + Intake · rubric scores → email)</button>
     </div>
     <p class="hint">Firms &amp; per-firm config: <a href="/review/firms" style="color:#60a5fa">/review/firms</a> · Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a> · what does this all do? <a href="/faq" style="color:#60a5fa">/faq</a></p>

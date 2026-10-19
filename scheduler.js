@@ -165,11 +165,14 @@ async function runDueCallStatsSends() {
     const ctx = firmStore.reportConfigForFirm(firm);
     for (const slot of firmStore.CALL_STATS_SLOTS) {
       if (firmStore.clockToHm(firmStore.callStatsSlotClock(ctx, slot.id)) !== hm) continue;
-      if (!firmStore.callStatsSlotRecipients(ctx, slot.id).length) {
-        const raw = firmStore.callStatsSlotRawRecipientText(firm, slot.id);
+      const weekendCoverage = firmStore.callStatsCoverageIsWeekend(slot.id, now);
+      if (!firmStore.callStatsEffectiveRecipients(ctx, slot.id, now).length) {
+        const raw = weekendCoverage
+          ? firmStore.callStatsWeekendRawRecipientText(firm)
+          : firmStore.callStatsSlotRawRecipientText(firm, slot.id);
         if (String(raw).trim()) {
           console.warn(
-            `[${now.toFormat('ccc LLL d, h:mm a')}] Call stats ${slot.id} for ${ctx.firmName}: skipping — recipient field has no valid email addresses (need name@domain.com, not names).`
+            `[${now.toFormat('ccc LLL d, h:mm a')}] Call stats ${slot.id} for ${ctx.firmName}: skipping — ${weekendCoverage ? 'weekend coverage' : 'recipient'} field has no valid email addresses (need name@domain.com, not names).`
           );
         }
         continue;

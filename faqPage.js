@@ -63,7 +63,7 @@ const JOBS = [
     name: 'Call Stats',
     when: () => 'Daily · 7:30 AM (prior day) · 1:00 PM · 5:00 PM (today so far)',
     what:
-      'Incoming-call outcomes and per-user activity. Morning is yesterday’s full day; 1:00 PM and 5:00 PM are today so far vs the same hours last week. Each send has its own recipient list on the firm editor.',
+      'Incoming-call outcomes and per-user activity. Morning is yesterday’s full day; 1:00 PM and 5:00 PM are today so far vs the same hours last week. Each weekday send has its own recipient list; emails about Saturday or Sunday use a separate weekend list (Friday’s recap still goes to the regular morning list even if it sends Saturday).',
     out: 'Email',
   },
   {

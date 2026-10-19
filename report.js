@@ -4661,9 +4661,14 @@ function callStatsWindows(slotId, now = DateTime.now().setZone(TIMEZONE)) {
  */
 async function runDailyCallStatsReport(opts = {}) {
   const slotId = firmStore.callStatsSlot(opts.slot).id;
-  const recipients = firmStore.callStatsSlotRecipients(firmCtx(), slotId);
+  const weekendCoverage = firmStore.callStatsCoverageIsWeekend(slotId);
+  const recipients = firmStore.callStatsEffectiveRecipients(firmCtx(), slotId);
   if (opts.scheduled && !recipients.length) {
-    console.log(`  Call stats ${slotId}: no recipients — skipping.`);
+    console.log(
+      weekendCoverage
+        ? `  Call stats ${slotId}: weekend coverage and no weekend recipients — skipping.`
+        : `  Call stats ${slotId}: no recipients — skipping.`
+    );
     return;
   }
 
@@ -4675,7 +4680,7 @@ async function runDailyCallStatsReport(opts = {}) {
 
   console.log(`\n${'═'.repeat(52)}`);
   console.log(`  ${win.title}  [${win.slot.label}]`);
-  console.log(`  Day: ${win.subtitle}`);
+  console.log(`  Day: ${win.subtitle}${weekendCoverage ? '  [weekend coverage list]' : ''}`);
   console.log(`  Window:  ${win.dayStart.toFormat('LLL d, h:mm a')} – ${win.dayEnd.toFormat('LLL d, h:mm a')} ${TIMEZONE} (${win.windowNote})`);
   console.log(`  Compare: ${win.prevStart.toFormat('ccc, LLL d, h:mm a')} – ${win.prevEnd.toFormat('LLL d, h:mm a')} ${TIMEZONE}`);
   console.log('═'.repeat(52));
@@ -4851,7 +4856,9 @@ async function runDailyCallStatsReport(opts = {}) {
     console.log(plainText);
   } else {
     await sendEmail({ htmlBody: html, plainText, subject, to: recipients });
-    console.log(`\n  Sent ${win.title} [${slotId}] to: ${recipients.join(', ')}`);
+    console.log(
+      `\n  Sent ${win.title} [${slotId}${weekendCoverage ? ', weekend coverage' : ''}] to: ${recipients.join(', ')}`
+    );
   }
 
   console.log(`\n${'═'.repeat(52)}`);
