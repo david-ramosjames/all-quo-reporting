@@ -4891,14 +4891,33 @@ function intakeGradingBandBg(band) {
   return '#f6f8fa';
 }
 
+function intakeCallType(grade) {
+  return String(grade && grade.classification && grade.classification.call_type || '')
+    .toLowerCase()
+    .replace(/[-\s]+/g, '_');
+}
+
+/** New-lead interactions we publish grades for (Intake / Leads lines only). */
+function isScoreableNewLeadCallType(callType) {
+  const ct = String(callType || '').toLowerCase().replace(/[-\s]+/g, '_');
+  if (['existing_client', 'known_lead', 'administrative'].includes(ct)) return false;
+  return ['new_lead', 'contract_follow_up', 'referral_or_decline', 'unknown', ''].includes(ct);
+}
+
 function intakeGradeTrack(grade) {
   const raw = String(grade && grade.classification && grade.classification.track || '').toLowerCase().replace(/[-\s]+/g, '_');
   if (raw === 'injury_lead' || raw === 'pi_lead' || raw === 'qualified_lead') return 'injury_lead';
   if (raw === 'other' || raw === 'non_pi' || raw === 'not_a_lead') return 'other';
-  const ct = String(grade && grade.classification && grade.classification.call_type || '').toLowerCase();
+  const ct = intakeCallType(grade);
   const path = String(grade && grade.classification && grade.classification.case_path || '').toLowerCase();
-  if (path === 'declined' || /referral|admin|existing/.test(ct)) return 'other';
-  if (/lead|consult|contract/.test(ct) || path === 'signable' || path === 'undecided') return 'injury_lead';
+  if (['existing_client', 'administrative', 'known_lead'].includes(ct) || /referral|admin|existing/.test(ct)) {
+    return 'other';
+  }
+  if (ct === 'new_lead' || ct === 'contract_follow_up') {
+    return path === 'declined' ? 'other' : 'injury_lead';
+  }
+  if (path === 'declined') return 'other';
+  if (path === 'signable' || path === 'undecided') return 'injury_lead';
   return 'other';
 }
 
@@ -4925,26 +4944,103 @@ function looksLikeQuoUserId(v) {
   return /^US[A-Z0-9]+$/i.test(String(v || '').trim());
 }
 
-/** Who handled the recording: inbound answerer, outbound placer, or Intake line. */
-function resolveIntakeHandler(c, userMap) {
-  const inbound = isIncomingDirection(c.direction);
-  const named = (id) => {
-    if (!id) return null;
-    const name = userMap[id] || id;
-    return { handlerId: id, handlerName: name };
-  };
-  if (inbound) {
-    if (c.answeredBy) return named(c.answeredBy);
-    if (c.userId && /intake/i.test(userMap[c.userId] || '')) return named(c.userId);
-  } else {
-    if (c.initiatedBy) return named(c.initiatedBy);
-    if (c.userId) return named(c.userId);
+/** Quo display names often append "ES 1752" / extension digits — strip for matching & display. */
+function cleanQuoDisplayName(name) {
+  return String(name || '')
+    .replace(/\s+ES\s+\d{3,}\s*$/i, '')
+    .replace(/\s+#?\d{3,5}\s*$/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/** First names / full names used to match agent self-intros in transcripts. */
+const RJL_STAFF_NAME_HINTS = [
+  'Cody Garza', 'Ariel Allen', 'Ryan Toomey', 'Jorge Barros', 'Erin',
+  'Adrian', 'Jocelyn', 'Aibeth', 'Ivette', 'Yvette',
+  'Roman', 'Liz', 'Giselle', 'Samari', 'Sam', 'Santiago Ortiz', 'Santiago',
+  'Jackie', 'Claudia', 'Valerie', 'Valery',
+  'Intake', 'Paralegal',
+];
+
+function staffNamesForMatching(userMap) {
+  const fromQuo = Object.values(userMap || {})
+    .map(cleanQuoDisplayName)
+    .filter((n) => n && !looksLikeQuoUserId(n) && n.length >= 2);
+  const seen = new Set();
+  const out = [];
+  for (const n of [...fromQuo, ...RJL_STAFF_NAME_HINTS]) {
+    const key = n.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(n);
   }
-  if (/intake/i.test(String(c.line || ''))) {
-    if (c.userId) return { handlerId: c.userId, handlerName: userMap[c.userId] || 'Intake Specialist' };
-    return { handlerId: 'intake-line', handlerName: 'Intake Specialist' };
+  return out.sort((a, b) => b.length - a.length);
+}
+
+function escapeRegExp(s) {
+  return String(s).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Prefer the staff name the agent used on the call (vs Quo account label).
+ * Matches intros like "this is Santiago", "hablas con Liz", "mi nombre es Roman".
+ */
+function matchHandlerFromTranscript(transcript, staffNames) {
+  const text = String(transcript || '');
+  if (!text || !staffNames?.length) return null;
+  const head = text.slice(0, 3500);
+  for (const name of staffNames) {
+    if (!name || name.length < 2) continue;
+    const esc = escapeRegExp(name);
+    const intro = new RegExp(
+      `(?:this is|i(?:'m| am)|my name is|speaking(?: with)?|` +
+        `hablas?\\s+con|le\\s+habla|mi\\s+nombre\\s+es|soy)\\s+${esc}\\b` +
+        `|\\b${esc}\\s+(?:speaking|here|con\\s+usted)`,
+      'i'
+    );
+    if (intro.test(head) || intro.test(text)) return cleanQuoDisplayName(name);
+  }
+  for (const name of staffNames) {
+    const parts = String(name).trim().split(/\s+/);
+    if (parts.length < 2) continue;
+    const esc = escapeRegExp(name);
+    if (new RegExp(`\\b${esc}\\b`, 'i').test(head)) return cleanQuoDisplayName(name);
   }
   return null;
+}
+
+function lineFallbackHandlerName(line) {
+  const n = String(line || '').trim();
+  if (/intake/i.test(n)) return 'Intake';
+  if (/lead/i.test(n)) return 'Leads';
+  if (/paralegal/i.test(n)) return n;
+  return n || 'Unknown';
+}
+
+/**
+ * Who handled the recording.
+ * Priority: staff name from transcript (vs staff / Quo user list) → line label (Intake / Leads).
+ * Do not use Quo answeredBy display names — those often look like the contact, not the agent.
+ */
+function resolveIntakeHandler(c, userMap, staffNames) {
+  const inbound = isIncomingDirection(c.direction);
+  let handlerId = null;
+  if (inbound) {
+    handlerId = c.answeredBy || c.userId || null;
+  } else {
+    handlerId = c.initiatedBy || c.userId || null;
+  }
+
+  const names = staffNames || staffNamesForMatching(userMap);
+  const fromTranscript = matchHandlerFromTranscript(c.transcript, names);
+  const fromLine = lineFallbackHandlerName(c.line);
+  const handlerName = fromTranscript || fromLine;
+
+  return {
+    handlerId: handlerId || (fromTranscript ? 'transcript' : 'line'),
+    handlerName,
+    handlerSource: fromTranscript ? 'transcript' : 'line',
+  };
 }
 
 function normalizeIntakeGrade(obj, callId) {
@@ -5141,7 +5237,9 @@ function buildIntakeGradingEmailHtml(dayLabel, windowNote, userSummaries, rows, 
     )}
     <p style="margin:24px 0 0;font-size:12px;color:#667085;line-height:1.55">
       Inboxes included: ${escapeHtml((inboxes || []).join(', ') || 'Leads, Intake')}.
+      Only <strong>new</strong> intake leads are scored.
       Excluded too short / no transcript / Sona: ${excluded.short}.
+      Skipped existing client / known lead: ${excluded.notNewLead || 0}.
       Out of scope or insufficient evidence: ${excluded.unscored}.
       Calls under ${INTAKE_GRADING_MIN_SECONDS}s are not scored.
     </p>
@@ -5206,17 +5304,13 @@ async function runIntakeGradingReport(opts = {}) {
     }),
   ]);
 
-  const excluded = { short: 0, unscored: 0 };
+  const excluded = { short: 0, unscored: 0, notNewLead: 0 };
+  const staffNames = staffNamesForMatching(userMap);
   const candidates = [];
   for (const c of callData || []) {
     if (c.recordType === 'sms') continue;
     if (!isIntakeGradingLine(c.line, lineSet)) continue;
     if (c.aiHandled) {
-      excluded.short += 1;
-      continue;
-    }
-    const handler = resolveIntakeHandler(c, userMap);
-    if (!handler) {
       excluded.short += 1;
       continue;
     }
@@ -5226,14 +5320,12 @@ async function runIntakeGradingReport(opts = {}) {
       excluded.short += 1;
       continue;
     }
-    let handlerName = handler.handlerName;
-    if (looksLikeQuoUserId(handlerName) && /intake/i.test(String(c.line || ''))) {
-      handlerName = 'Intake Specialist';
-    }
+    const handler = resolveIntakeHandler(c, userMap, staffNames);
     candidates.push({
       ...c,
       handlerId: handler.handlerId,
-      handlerName,
+      handlerName: handler.handlerName,
+      handlerSource: handler.handlerSource,
       duration: dur,
     });
   }
@@ -5250,23 +5342,34 @@ async function runIntakeGradingReport(opts = {}) {
     if (isIncomingDirection(c.direction)) inboundN += 1;
     else outboundN += 1;
   }
-  console.log(`  ${toGrade.length} call(s) to grade · inbound ${inboundN} · outbound ${outboundN} · excluded too short/no handler: ${excluded.short}`);
+  console.log(`  ${toGrade.length} call(s) to grade · inbound ${inboundN} · outbound ${outboundN} · excluded too short/Sona: ${excluded.short}`);
   console.log(`  Handlers: ${Object.entries(handlerCounts).map(([n, k]) => `${n}=${k}`).join(' · ') || 'none'}`);
 
-  console.log('\n[2/3] Grading with the RJL intake rubric...');
+  console.log('\n[2/3] Grading with the RJL intake rubric (new leads only)...');
   const graded = [];
   for (let i = 0; i < toGrade.length; i++) {
     const call = toGrade[i];
     process.stdout.write(`  [${i + 1}/${toGrade.length}] ${call.handlerName} ${formatCallDuration(call.duration)} ... `);
     try {
       const grade = await gradeOneIntakeCall(call);
-      if (!grade || grade.grading_status !== 'graded') {
+      if (!grade) {
         excluded.unscored += 1;
-        console.log(grade ? grade.grading_status : 'parse-failed');
+        console.log('parse-failed');
+        continue;
+      }
+      const ct = intakeCallType(grade);
+      if (!isScoreableNewLeadCallType(ct) || grade.grading_status === 'out_of_scope') {
+        excluded.notNewLead += 1;
+        console.log(`skip ${ct || grade.grading_status || 'not-new-lead'}`);
+        continue;
+      }
+      if (grade.grading_status !== 'graded') {
+        excluded.unscored += 1;
+        console.log(grade.grading_status);
         continue;
       }
       graded.push({ ...call, grade });
-      console.log(`${grade.overall_score} ${grade.score_band || ''}`);
+      console.log(`${grade.overall_score} ${grade.score_band || ''} (${call.handlerSource || 'quo'})`);
     } catch (err) {
       excluded.unscored += 1;
       console.log(`error: ${err.message}`);
@@ -5325,6 +5428,7 @@ async function runIntakeGradingReport(opts = {}) {
     }),
     '',
     `Excluded too short / no transcript / Sona: ${excluded.short}`,
+    `Skipped existing client / known lead / not a new intake: ${excluded.notNewLead}`,
     `Out of scope or insufficient evidence: ${excluded.unscored}`,
   ];
   const csvLines = [

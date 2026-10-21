@@ -16,13 +16,18 @@ Accept `call_id`, `transcript`, `transcript_complete`, `call_type`, `language`, 
 
 First classify the call, then pick **exactly one grading track**. Do not mix scorecards.
 
-**Track `injury_lead`** — use only when this is a legitimate personal-injury lead or consult: new/known PI inquiry, contract follow-up, or an undecided/signable injury matter (including third-party work injury that may be PI). Goal: qualify, show firm value, and advance the case (agreement now, same-day attorney review, or a concrete next step).
+**Score only new intake leads** on the Intake / Leads lines. Set `grading_status` to `out_of_scope` (null score) when this is **not** a new-lead interaction:
 
-**Track `other`** — everything else that is not a PI lead: property-damage-only, ordinary workers' compensation, family/criminal/immigration/employment/med-mal/landlord-tenant/contract disputes, vendor or treating-provider message relay, wrong number, existing-client file admin, or a clearly excluded non-PI matter. Goal: identify scope quickly, explain respectfully, offer an approved referral when appropriate, and close cleanly. **Do not** penalize missing a value pitch, “what matters most,” or a contract offer on this track.
+- `existing_client` — already a client; status update, medical/treatment coordination, insurance, settlement, or file admin.
+- `known_lead` — known contact calling back about an **ongoing** matter (treatment, message for case owner, “tell Santiago…”) rather than a new PI inquiry.
+- `administrative` — internal, vendor, wrong number with no new matter, hold-only message relay with no intake attempt.
+- Dead air, hold-only, or attorney already running the call with the agent silent.
 
-Return `out_of_scope` only when there is no intake interaction to judge (dead air, hold-only, attorney already running the call with the agent silent). Grade `other` instead of dropping non-PI or administrative conversations.
+**Track `injury_lead`** — use only for a **new** personal-injury lead or consult: first-time PI inquiry, or `contract_follow_up` chasing an unsigned agreement on a new matter (including third-party work injury that may be PI). Goal: qualify, show firm value, and advance the case (agreement now, same-day attorney review, or a concrete next step). Do **not** use this track for existing-client / known-lead ongoing-case calls.
 
-Also set `call_type` (`new_lead`, `known_lead`, `contract_follow_up`, `referral_or_decline`, `existing_client`, `administrative`, `unknown`) and `case_path` (`signable`, `declined`, `undecided`, `unknown`).
+**Track `other`** — a **new** caller asking for help on a non-PI matter: property-damage-only, ordinary workers' compensation, family/criminal/immigration/employment/med-mal/landlord-tenant/contract disputes, wrong practice area, or a clearly excluded non-PI new inquiry. Goal: identify scope quickly, explain respectfully, offer an approved referral when appropriate, and close cleanly. **Do not** penalize missing a value pitch, “what matters most,” or a contract offer on this track.
+
+Also set `call_type` (`new_lead`, `known_lead`, `contract_follow_up`, `referral_or_decline`, `existing_client`, `administrative`, `unknown`) and `case_path` (`signable`, `declined`, `undecided`, `unknown`). For scoreable new leads prefer `new_lead`, `contract_follow_up`, or `referral_or_decline`.
 
 ## Track A — Injury lead scorecard (100 points)
 

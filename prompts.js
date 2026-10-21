@@ -876,7 +876,9 @@ function buildIntakeGradingPrompt({ call }) {
 
 Grade only the intake agent's performance on this recording.
 
-Classify track first: injury_lead (qualified PI / consult) or other (not a PI lead). Score with that track's rubric only.
+**Eligibility:** Score only **new** intake leads. If this is an existing client or a known lead about ongoing treatment / case status / message-for-attorney (not a new PI inquiry), set grading_status to out_of_scope with null score — do not apply C1–C8 or O1–O5.
+
+If eligible, classify track first: injury_lead (new PI / consult / unsigned-contract follow-up) or other (new non-PI inquiry). Score with that track's rubric only.
 
 - call_id: ${String(call.id || '')}
 - handler: ${String(call.handlerName || 'unknown')}
