@@ -145,31 +145,14 @@ function firstEmailList(...vals) {
 const DEFAULT_STATS_EXCLUDE = 'Extra Number,SA Law Firm,Trucking Chicas';
 const DEFAULT_STATS_INCLUDE_USERS =
   'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Valeria Chang,Andrea Alvarado';
-const LEGACY_STATS_INCLUDE_USERS =
-  'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Valeria Chang';
 const LEGACY_STATS_EXCLUDE = new Set(
   ['RJL Transfers', 'Extra Number', 'SA Law Firm', 'Trucking Chicas', 'RJL Outbound'].map((s) => s.toLowerCase())
 );
 
-function sameNameSet(a, b) {
-  const sa = new Set((a || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean));
-  const sb = new Set((b || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean));
-  if (sa.size !== sb.size) return false;
-  for (const x of sa) if (!sb.has(x)) return false;
-  return true;
-}
-
 function statsIncludeUsersFrom(firmVal, envVal) {
   const raw = firstNonEmpty(firmVal, envVal);
   if (!raw) return parseList(DEFAULT_STATS_INCLUDE_USERS);
-  const list = parseList(raw);
-  if (sameNameSet(list, parseList(LEGACY_STATS_INCLUDE_USERS))) {
-    return parseList(DEFAULT_STATS_INCLUDE_USERS);
-  }
-  if (!list.some((n) => n.toLowerCase() === 'andrea alvarado')) {
-    return [...list, 'Andrea Alvarado'];
-  }
-  return list;
+  return parseList(raw);
 }
 
 function statsExcludeInboxesFrom(firmVal, envVal) {
@@ -663,7 +646,9 @@ module.exports = {
   callStatsSlotRawRecipientText,
   callStatsWeekendRawRecipientText,
   callStatsSlotGoal,
+  parseList,
   parseEmailList,
+  DEFAULT_STATS_INCLUDE_USERS,
   parseAnsweredGoalPct,
   parseMissedGoal: parseAnsweredGoalPct,
   loadFirms,

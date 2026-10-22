@@ -11,8 +11,11 @@
  * Google-gated admin server as the review editor.
  */
 
+const firmStore = require('./firmStore');
+
 const SECRET_KEYS = new Set(['quo_api_key', 'slack_bot_token']);
 const BOOL_KEYS = new Set(['active']);
+const USER_PICK_KEYS = new Set(['stats_include_users']);
 
 /**
  * Editor schema. `type`: text | secret | bool | textarea. DB column names are
@@ -68,8 +71,8 @@ const FIRM_FIELDS = [
     help: 'Lines whose INCOMING calls are left out of volume and the missed-calls headline (typically the auto-forward line). Outbound calls, talk time, and sent messages on these lines still count in the per-user table. Blank = default (RJL Outbound).' },
   { key: 'stats_leads_inboxes', label: 'Call stats — Leads + Intake inboxes', type: 'text', group: 'Yesterday Call Stats',
     help: 'Comma-separated Quo line names for the extra Incoming Call Outcomes table at the bottom (lead-related lines only). Must match the line name exactly. Blank = Leads, Intake.' },
-  { key: 'stats_include_users', label: 'Call stats — users in the per-user table', type: 'text', group: 'Yesterday Call Stats',
-    help: 'Comma-separated names exactly as they appear in Quo. Blank = default team (legal assistants + Intake, including Andrea Alvarado).' },
+  { key: 'stats_include_users', label: 'Call stats — users in the per-user table', type: 'user_picks', group: 'Yesterday Call Stats',
+    help: 'Check who appears in the Call Stats per-user table. Names come from this firm’s Quo workspace — add or remove people here instead of a code change. None checked = the default team list.' },
 
   { key: 'intake_grading_email_to', label: 'Intake grading recipients', type: 'text', group: 'Intake Call Grading',
     help: 'Comma-separated email addresses. Nightly 6:00 PM (local) scores of Leads + Intake calls handled by a person. Blank = skip this send. Does NOT fall back to the default report recipients.' },
@@ -139,6 +142,11 @@ function parseFirmForm(form) {
       patch[f.key] = String(val).toLowerCase() === 'true';
       continue;
     }
+    if (USER_PICK_KEYS.has(f.key) || f.type === 'user_picks') {
+      const vals = raw == null ? [] : Array.isArray(raw) ? raw : [raw];
+      patch[f.key] = vals.map((s) => String(s || '').trim()).filter(Boolean).join(',');
+      continue;
+    }
     const val = (raw == null ? '' : String(raw)).trim();
     if (SECRET_KEYS.has(f.key) && val === '') continue; // keep existing secret
     patch[f.key] = val;
@@ -177,6 +185,10 @@ const STYLE = `
     border:1px solid var(--line); background:#0e2350; color:var(--ink); font:inherit; }
   .field .help { color:#6d7ea6; font-size:.74rem; margin-top:.25rem; }
   .field.bool label { display:inline-flex; align-items:center; gap:.5rem; cursor:pointer; }
+  .userpicks { display:grid; grid-template-columns:repeat(auto-fill,minmax(14rem,1fr)); gap:.35rem .8rem; margin:.45rem 0 .2rem; }
+  .userpicks label { display:flex; align-items:center; gap:.45rem; font-size:.84rem; color:#cdd8ef; cursor:pointer; }
+  .userpicks input { accent-color:#45C7F0; }
+  .userpicks-toolbar { display:flex; gap:.5rem; margin:.35rem 0 .15rem; }
   .actions { display:flex; gap:.7rem; align-items:center; position:sticky; bottom:0; background:#0b1c3ecc;
     backdrop-filter:blur(4px); padding:.8rem 0; border-top:1px solid var(--line); }
   .rowacts { display:flex; gap:.4rem; flex-wrap:wrap; }
@@ -256,7 +268,46 @@ function renderFirmsListPage(firms, opts = {}) {
   `);
 }
 
-function renderFirmField(f, value) {
+function renderUserPicksField(f, value, extras = {}) {
+  const help = f.help ? `<div class="help">${esc(f.help)}</div>` : '';
+  const workspace = extras.workspaceUsers || [];
+  const err = extras.usersError || '';
+  if (!workspace.length) {
+    const note = err
+      ? `Could not load Quo users (${esc(err)}). Enter comma-separated names, or add a Quo API key and reopen.`
+      : 'Add a Quo API key and reopen this page to pick people from the workspace. You can also type comma-separated names.';
+    return `<div class="field">
+      <label>${esc(f.label)}</label>
+      <input type="text" name="${f.key}" value="${esc(value)}" placeholder="Name One, Name Two"/>
+      <div class="help">${note}</div>${help}
+    </div>`;
+  }
+  const saved = firmStore.parseList(value);
+  const selected = new Set(saved.map((s) => s.toLowerCase()));
+  const defaults = new Set(firmStore.parseList(firmStore.DEFAULT_STATS_INCLUDE_USERS).map((s) => s.toLowerCase()));
+  const useDefaults = selected.size === 0;
+  const isChecked = (name) => (useDefaults ? defaults : selected).has(String(name).toLowerCase());
+  const extra = saved.filter((n) => !workspace.some((w) => w.toLowerCase() === n.toLowerCase()));
+  const names = [...extra, ...workspace];
+  const boxes = names.map((name) => {
+    const checked = isChecked(name) ? ' checked' : '';
+    const missing = extra.some((e) => e.toLowerCase() === name.toLowerCase())
+      ? ' <span class="help" style="margin:0">(saved, not in Quo)</span>'
+      : '';
+    return `<label><input type="checkbox" name="${f.key}" value="${esc(name)}"${checked}/> ${esc(name)}${missing}</label>`;
+  }).join('');
+  return `<div class="field" data-userpicks>
+    <label>${esc(f.label)}</label>
+    <div class="userpicks-toolbar">
+      <button type="button" class="btn ghost" data-picks="all">Select all</button>
+      <button type="button" class="btn ghost" data-picks="none">Clear</button>
+    </div>
+    <div class="userpicks">${boxes}</div>${help}
+  </div>`;
+}
+
+function renderFirmField(f, value, extras) {
+  if (f.type === 'user_picks') return renderUserPicksField(f, value, extras);
   const help = f.help ? `<div class="help">${esc(f.help)}</div>` : '';
   if (f.type === 'bool') {
     const checked = value ? ' checked' : '';
@@ -291,7 +342,8 @@ function renderFirmField(f, value) {
 }
 
 function renderFirmEditorPage(firm, opts = {}) {
-  const { email, message, isError } = opts;
+  const { email, message, isError, workspaceUsers, usersError } = opts;
+  const extras = { workspaceUsers, usersError };
   const isNew = !firm || !firm.id;
   const groups = [];
   for (const f of FIRM_FIELDS) if (!groups.includes(f.group)) groups.push(f.group);
@@ -302,7 +354,7 @@ function renderFirmEditorPage(firm, opts = {}) {
         // Secrets never echo their value; they only show the "is set" state.
         const raw = firm ? firm[f.key] : (f.key === 'active' ? true : '');
         const value = SECRET_KEYS.has(f.key) ? raw : (raw == null ? (f.key === 'active' && isNew ? true : '') : raw);
-        return renderFirmField(f, value);
+        return renderFirmField(f, value, extras);
       }).join('');
     return `<fieldset><legend>${esc(g)}</legend>${inner}</fieldset>`;
   }).join('');
@@ -324,6 +376,14 @@ function renderFirmEditorPage(firm, opts = {}) {
     </form>
     <script>
       (function () {
+        document.querySelectorAll('[data-userpicks]').forEach(function (wrap) {
+          wrap.querySelectorAll('button[data-picks]').forEach(function (b) {
+            b.addEventListener('click', function () {
+              var on = b.getAttribute('data-picks') === 'all';
+              wrap.querySelectorAll('input[type=checkbox]').forEach(function (c) { c.checked = on; });
+            });
+          });
+        });
         var btn = document.getElementById('check-domain');
         if (!btn) return;
         var firmId = ${JSON.stringify((firm && firm.id) || '')};

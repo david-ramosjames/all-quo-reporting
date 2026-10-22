@@ -1154,6 +1154,15 @@ async function fetchWorkspaceUserMap(apiKey) {
   return userMap;
 }
 
+/** Sorted display names from the Quo workspace (for the Call Stats user picker). */
+async function listWorkspaceUserNames(apiKey) {
+  const map = await fetchWorkspaceUserMap(apiKey);
+  const names = [...new Set(Object.values(map).map((s) => String(s || '').trim()).filter(Boolean))];
+  return names
+    .filter((n) => !/^US[A-Z0-9]+$/i.test(n))
+    .sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }));
+}
+
 if (require.main === module) main();
 
 module.exports = {
@@ -1164,4 +1173,5 @@ module.exports = {
   lookupContactName,
   lookupContactId,
   fetchWorkspaceUserMap,
+  listWorkspaceUserNames,
 };

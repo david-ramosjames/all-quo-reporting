@@ -10,6 +10,7 @@ const firmStore = require('./firmStore');
 const reviewRequests = require('./reviewRequests');
 const { renderAnalyticsPage } = require('./analyticsPage');
 const { parseFirmForm, renderFirmsListPage, renderFirmEditorPage } = require('./firmsPage');
+const { listWorkspaceUserNames } = require('./fetch_calls');
 const quoSend = require('./quoSend');
 const slackEvents = require('./slackEvents');
 const quoWebhooks = require('./quoWebhooks');
@@ -57,7 +58,14 @@ function parseFormBody(req) {
       const raw = Buffer.concat(chunks).toString('utf8');
       const params = new URLSearchParams(raw);
       const obj = {};
-      for (const [k, v] of params) obj[k] = v;
+      for (const [k, v] of params) {
+        if (Object.prototype.hasOwnProperty.call(obj, k)) {
+          if (!Array.isArray(obj[k])) obj[k] = [obj[k]];
+          obj[k].push(v);
+        } else {
+          obj[k] = v;
+        }
+      }
       resolve(obj);
     });
     req.on('error', reject);
@@ -638,7 +646,19 @@ function startManualTriggerServer(opts) {
           }));
           return;
         }
-        sendHtml(res, 200, renderFirmEditorPage(firm, { email: session.email }));
+        let workspaceUsers = [];
+        let usersError = '';
+        const apiKey = (firm && firm.quo_api_key) || process.env.QUO_API_KEY;
+        if (apiKey) {
+          try {
+            workspaceUsers = await listWorkspaceUserNames(apiKey);
+          } catch (err) {
+            usersError = err.message || 'could not list Quo users';
+          }
+        } else {
+          usersError = 'no Quo API key on this firm';
+        }
+        sendHtml(res, 200, renderFirmEditorPage(firm, { email: session.email, workspaceUsers, usersError }));
         return;
       }
 
