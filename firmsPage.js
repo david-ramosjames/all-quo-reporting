@@ -69,7 +69,7 @@ const FIRM_FIELDS = [
   { key: 'stats_leads_inboxes', label: 'Call stats — Leads + Intake inboxes', type: 'text', group: 'Yesterday Call Stats',
     help: 'Comma-separated Quo line names for the extra Incoming Call Outcomes table at the bottom (lead-related lines only). Must match the line name exactly. Blank = Leads, Intake.' },
   { key: 'stats_include_users', label: 'Call stats — users in the per-user table', type: 'text', group: 'Yesterday Call Stats',
-    help: 'Comma-separated names exactly as they appear in Quo. Blank = default set (the 5 legal assistants + Intake).' },
+    help: 'Comma-separated names exactly as they appear in Quo. Blank = default team (legal assistants + Intake, including Andrea Alvarado).' },
 
   { key: 'intake_grading_email_to', label: 'Intake grading recipients', type: 'text', group: 'Intake Call Grading',
     help: 'Comma-separated email addresses. Nightly 6:00 PM (local) scores of Leads + Intake calls handled by a person. Blank = skip this send. Does NOT fall back to the default report recipients.' },

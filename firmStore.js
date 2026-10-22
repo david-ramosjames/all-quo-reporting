@@ -143,9 +143,34 @@ function firstEmailList(...vals) {
 /** Lines dropped from the report entirely. RJL Outbound is not here — inbound
  *  on that line is ignored separately so outbound + sent messages still count. */
 const DEFAULT_STATS_EXCLUDE = 'Extra Number,SA Law Firm,Trucking Chicas';
+const DEFAULT_STATS_INCLUDE_USERS =
+  'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Valeria Chang,Andrea Alvarado';
+const LEGACY_STATS_INCLUDE_USERS =
+  'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Valeria Chang';
 const LEGACY_STATS_EXCLUDE = new Set(
   ['RJL Transfers', 'Extra Number', 'SA Law Firm', 'Trucking Chicas', 'RJL Outbound'].map((s) => s.toLowerCase())
 );
+
+function sameNameSet(a, b) {
+  const sa = new Set((a || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+  const sb = new Set((b || []).map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+  if (sa.size !== sb.size) return false;
+  for (const x of sa) if (!sb.has(x)) return false;
+  return true;
+}
+
+function statsIncludeUsersFrom(firmVal, envVal) {
+  const raw = firstNonEmpty(firmVal, envVal);
+  if (!raw) return parseList(DEFAULT_STATS_INCLUDE_USERS);
+  const list = parseList(raw);
+  if (sameNameSet(list, parseList(LEGACY_STATS_INCLUDE_USERS))) {
+    return parseList(DEFAULT_STATS_INCLUDE_USERS);
+  }
+  if (!list.some((n) => n.toLowerCase() === 'andrea alvarado')) {
+    return [...list, 'Andrea Alvarado'];
+  }
+  return list;
+}
 
 function statsExcludeInboxesFrom(firmVal, envVal) {
   const raw = firstNonEmpty(firmVal, envVal);
@@ -374,11 +399,7 @@ function reportConfigForFirm(firm) {
     statsLeadsInboxes: firstList(f.stats_leads_inboxes, env.STATS_LEADS_INBOXES, 'Leads,Intake'),
     intakeGradingEmailTo: firstEmailList(f.intake_grading_email_to, env.INTAKE_GRADING_EMAIL_TO),
     intakeGradingTime: firstNonEmpty(f.intake_grading_time, env.INTAKE_GRADING_TIME, '6:00 PM'),
-    statsIncludeUsers: firstList(
-      f.stats_include_users,
-      env.STATS_INCLUDE_USERS,
-      'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Valeria Chang'
-    ),
+    statsIncludeUsers: statsIncludeUsersFrom(f.stats_include_users, env.STATS_INCLUDE_USERS),
     sheets: {
       sheetsId: firstNonEmpty(f.sheets_id, env.GOOGLE_SHEETS_ID),
       sheetsRange: firstNonEmpty(f.sheets_range, env.GOOGLE_SHEETS_RANGE),
