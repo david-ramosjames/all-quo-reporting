@@ -152,10 +152,6 @@ const GOOGLE_WEEKLY_SENTIMENT_DEDUPE = process.env.GOOGLE_WEEKLY_SENTIMENT_DEDUP
 const GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_SHEET_ID = (process.env.GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_SHEET_ID ?? '').trim();
 const GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_RANGE = (process.env.GOOGLE_WEEKLY_NEGATIVE_SENTIMENT_RANGE ?? '').trim();
 
-/** Append-only "All Latest Sentiment" tab — every weekly run appends rollups (one row per client per run). */
-const GOOGLE_LATEST_SENTIMENT_SHEET_ID = (process.env.GOOGLE_LATEST_SENTIMENT_SHEET_ID ?? '').trim();
-const GOOGLE_LATEST_SENTIMENT_RANGE = (process.env.GOOGLE_LATEST_SENTIMENT_RANGE ?? '').trim();
-
 const EMAIL_FROM = process.env.EMAIL_FROM;
 const EMAIL_TO   = process.env.EMAIL_TO?.split(',').map((e) => e.trim()).filter(Boolean) || [];
 const MISSED_CLIENT_CALLS_EMAIL_TO =
@@ -2104,51 +2100,70 @@ function rollupToNegativeSnapshotSheetRow(r, cohortKey, runCreatedAfter, runCrea
   return [cohortCell, ...base];
 }
 
-function latestSentimentSpreadsheetId() {
-  return firmCtx().sheets.latestSentimentId || firmCtx().sheets.negativeSentimentId || firmCtx().sheets.weeklySentimentId;
-}
-
-function latestSentimentRangeInput() {
-  return firmCtx().sheets.latestSentimentRange || 'All Latest Sentiment';
-}
-
 /**
- * Append-only sink: every sentiment run appends one row per analyzed client
- * to the "All Latest Sentiment" tab. Existing rows are never touched.
- * Header is written automatically the first time the tab is empty.
+ * Each weekly run adds one sentiment history row per case in Case Tracker.
+ * The Contact page shows the newest reading, or Unknown when that case has
+ * not been contacted in 30 days.
  */
 async function appendLatestSentimentRows(rollups, createdAfter, createdBefore, rangeLabel) {
-  const spreadsheetId = latestSentimentSpreadsheetId();
-  if (!spreadsheetId) return;
-  const hasOAuth =
-    process.env.GOOGLE_CLIENT_ID &&
-    process.env.GOOGLE_CLIENT_SECRET &&
-    process.env.GOOGLE_REFRESH_TOKEN;
-  if (!hasOAuth) return;
+  const baseUrl = (process.env.CASE_TRACKER_SUPABASE_URL || '').trim().replace(/\/$/, '');
+  const serviceKey = (process.env.CASE_TRACKER_SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  if (!baseUrl || !serviceKey) {
+    console.warn(
+      '  Client sentiment: skipped (set CASE_TRACKER_SUPABASE_URL and CASE_TRACKER_SUPABASE_SERVICE_ROLE_KEY).'
+    );
+    return;
+  }
   if (!rollups?.length) {
-    console.log('  All Latest Sentiment sheet: no rollups to append.');
+    console.log('  Client sentiment: no rollups to save.');
     return;
   }
 
-  const rangeInput = latestSentimentRangeInput();
-  const normalized = normalizeWeeklySentimentSheetRange(rangeInput);
-  const appendAnchor = await resolveAppendAnchorA1(spreadsheetId, normalized);
-  const prefix = appendAnchor.slice(0, Math.max(0, appendAnchor.lastIndexOf('!')));
-  const publishedAtLocal = DateTime.now().setZone(TIMEZONE).toFormat('yyyy-LL-dd HH:mm');
-
-  const top = await fetchSheetData(spreadsheetId, `${prefix}!A1:A1`);
-  if (!top?.length || !top[0]?.[0]) {
-    await updateSheetValues(spreadsheetId, `${prefix}!A1`, [WEEKLY_SENTIMENT_SHEET_HEADER]);
+  const scoredAt = new Date().toISOString();
+  const byCase = new Map();
+  for (const rollup of rollups) {
+    const caseNumber = extractTrailingCaseDigitsFromClientKey(rollup.clientKey);
+    if (!caseNumber) continue;
+    const score = Number(rollup.score);
+    byCase.set(caseNumber, {
+      case_number: caseNumber,
+      client_name: String(rollup.clientKey || '').trim() || null,
+      sentiment: weeklySentimentWord(rollup.holisticSentiment),
+      score: Number.isFinite(score) ? Math.round(score) : null,
+      reason_summary: sheetCellOneLine(stripMarkdownBold(rollup.summary || ''), 2000) || null,
+      scored_at: scoredAt,
+      window_start: createdAfter || null,
+      window_end: createdBefore || null,
+      week_label: rangeLabel || null,
+      event_key: `quo:${caseNumber}:${createdAfter || ''}:${createdBefore || ''}`,
+      source: 'quo',
+      updated_at: scoredAt,
+    });
+  }
+  const rows = [...byCase.values()];
+  if (!rows.length) {
+    console.log('  Client sentiment: no rows had a trailing case number.');
+    return;
   }
 
-  const rows = rollups.map((r) =>
-    rollupToWeeklySheetRow(r, createdAfter, createdBefore, rangeLabel, publishedAtLocal)
-  );
-
-  await appendSheetValues(spreadsheetId, `${prefix}!A1`, rows);
-  console.log(
-    `  All Latest Sentiment sheet: appended ${rows.length} row(s) to "${sheetTabFromRangeA1(appendAnchor) || 'tab'}".`
-  );
+  for (let index = 0; index < rows.length; index += 200) {
+    const chunk = rows.slice(index, index + 200);
+    const response = await fetch(`${baseUrl}/rest/v1/case_client_sentiment?on_conflict=event_key`, {
+      method: 'POST',
+      headers: {
+        apikey: serviceKey,
+        Authorization: `Bearer ${serviceKey}`,
+        'Content-Type': 'application/json',
+        Prefer: 'resolution=merge-duplicates,return=minimal',
+      },
+      body: JSON.stringify(chunk),
+    });
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 300);
+      throw new Error(`Supabase sentiment upsert failed (${response.status}): ${detail}`);
+    }
+  }
+  console.log(`  Client sentiment: saved ${rows.length} case reading(s) to Supabase.`);
 }
 
 async function replaceWeeklyNegativeSentimentSnapshot(emailRollups, createdAfter, createdBefore, rangeLabel) {
