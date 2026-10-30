@@ -2638,13 +2638,161 @@ function isMissedInboundCall(c) {
   // aiHandled = 'ai-agent' on these.) A later human-answered call or an outbound
   // callback still clears the client, since flagging keys off the LATEST call.
   if (c.aiHandled) return true;
-  // A human-completed inbound means the client actually reached a person.
-  if (status === 'completed') return false;
+  // A human-completed / answered inbound means the client actually reached a person.
+  if (status === 'completed' || status === 'answered') return false;
   if (MISSED_INBOUND_STATUSES.has(status)) return true;
   // Fallback: incoming with zero duration treated as missed.
   const dur = Number(c.duration || 0);
   if (status && (!Number.isFinite(dur) || dur <= 0)) return true;
   return false;
+}
+
+/**
+ * Quo list-calls often drops the completed return/transfer legs that Quo Router
+ * (and our webhook ledger) still see. Merge those legs into the missed-call
+ * window so a 2:06 miss is cleared by a 2:08 human complete on the same number.
+ */
+async function enrichMissedCallsFromLedger(callData, window, contactMap = {}) {
+  const rows = Array.isArray(callData) ? [...callData] : [];
+  if (!pg.isEnabled()) return rows;
+  try {
+    await pg.ensureSchema();
+    const ledgerCalls = await pg.listQuoCallsInWindow(window.createdAfter, window.createdBefore);
+    if (!ledgerCalls.length) {
+      console.log('  [missed] webhook ledger: no rows in this window');
+      return rows;
+    }
+    const byId = new Map();
+    for (const c of rows) {
+      if (c && c.id) byId.set(String(c.id), c);
+    }
+    let added = 0;
+    let patched = 0;
+    for (const row of ledgerCalls) {
+      const parts = row.participants && typeof row.participants === 'object' ? row.participants : {};
+      const externals = Array.isArray(parts.external) ? parts.external : [];
+      const inbound = isIncomingDirection(row.direction);
+      const phone = String(
+        inbound ? parts.from || externals[0] || '' : parts.to || externals[0] || ''
+      ).trim();
+      const status = String(row.status || '').toLowerCase();
+      const ts =
+        isoTs(row.completed_at) || isoTs(row.answered_at) || isoTs(row.created_at) || '';
+      const contact = phone ? lookupContactName(contactMap, phone) || '' : '';
+      const contactId = phone ? lookupContactId(contactMap, phone) || '' : '';
+      const line = row.line_name || '';
+      const link =
+        row.phone_number_id && row.conversation_id
+          ? `https://my.openphone.com/inbox/${row.phone_number_id}/c/${row.conversation_id}${
+              row.call_id ? `?at=${row.call_id}` : ''
+            }`
+          : '';
+      const id = row.call_id ? String(row.call_id) : '';
+      const existing = id ? byId.get(id) : null;
+      if (existing) {
+        let changed = false;
+        // Prefer the ledger's resolved status when the API still shows a miss/ring.
+        if (status && status !== String(existing.status || '').toLowerCase()) {
+          if (status === 'completed' || status === 'answered' || !existing.status) {
+            existing.status = row.status;
+            changed = true;
+          }
+        }
+        if (!existing.phone && phone) {
+          existing.phone = phone;
+          changed = true;
+        }
+        if (!existing.contact && contact) {
+          existing.contact = contact;
+          changed = true;
+        }
+        if (!existing.contactId && contactId) {
+          existing.contactId = contactId;
+          changed = true;
+        }
+        if ((!existing.timestamp || existing.timestamp < ts) && ts) {
+          existing.timestamp = ts;
+          changed = true;
+        }
+        if ((Number(row.duration_sec) || 0) > (Number(existing.duration) || 0)) {
+          existing.duration = Number(row.duration_sec) || 0;
+          changed = true;
+        }
+        if (!existing.link && link) {
+          existing.link = link;
+          changed = true;
+        }
+        if (!existing.line && line) {
+          existing.line = line;
+          changed = true;
+        }
+        if (changed) patched += 1;
+        continue;
+      }
+      if (!id && !phone) continue;
+      const mapped = {
+        recordType: 'call',
+        id: id || null,
+        phoneNumberId: row.phone_number_id || '',
+        timestamp: ts,
+        line,
+        phone,
+        contact,
+        contactId,
+        duration: Number(row.duration_sec || 0),
+        summary: '',
+        transcript: '',
+        link,
+        status: row.status || '',
+        direction: row.direction || '',
+        aiHandled: row.ai_handled ? 'ai-agent' : null,
+        answeredBy: row.answered_by || null,
+        initiatedBy: row.initiated_by || null,
+        userId: row.user_id || null,
+        _fromLedger: true,
+      };
+      rows.push(mapped);
+      if (id) byId.set(id, mapped);
+      added += 1;
+    }
+    console.log(
+      `  [missed] webhook ledger: +${added} call(s), patched ${patched} (${ledgerCalls.length} ledger row(s))`
+    );
+  } catch (err) {
+    console.warn(`  [missed] webhook ledger merge skipped: ${err.message}`);
+  }
+  return rows;
+}
+
+/** Merge dial-in groups that share a Quo contact id (transfer legs sometimes lack phone). */
+function mergeCallGroupsByContactId(byPhone) {
+  const cidToKeys = new Map();
+  for (const [key, group] of byPhone) {
+    for (const c of group) {
+      const cid = c && c.contactId ? String(c.contactId) : '';
+      if (!cid) continue;
+      if (!cidToKeys.has(cid)) cidToKeys.set(cid, new Set());
+      cidToKeys.get(cid).add(key);
+    }
+  }
+  for (const keys of cidToKeys.values()) {
+    if (keys.size < 2) continue;
+    const list = [...keys];
+    const primary = list[0];
+    const merged = byPhone.get(primary) || [];
+    const seen = new Set(merged.map((c) => c.id || `${c.timestamp}|${c.line}|${c.status}`));
+    for (let i = 1; i < list.length; i++) {
+      const otherKey = list[i];
+      for (const c of byPhone.get(otherKey) || []) {
+        const id = c.id || `${c.timestamp}|${c.line}|${c.status}`;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        merged.push(c);
+      }
+      byPhone.delete(otherKey);
+    }
+    byPhone.set(primary, merged);
+  }
 }
 
 function classifyMissedReason(c) {
@@ -2675,6 +2823,8 @@ function formatMissedCallTime(iso) {
 
 // Cap on how many client calls we run through the LLM per report run.
 const CALLBACK_MAX_CLASSIFY = parseInt(process.env.MISSED_CALLBACK_MAX_CLASSIFY || '200', 10);
+/** Completion budget for the firm-owes-callback JSON call (reasoning can eat most of a small cap). */
+const OPENAI_CALLBACK_MAX_TOKENS = clampInt(process.env.OPENAI_CALLBACK_MAX_COMPLETION_TOKENS, 1000, 300, 8000);
 
 /** Best classifiable text for a call: full transcript if present, else summary. */
 function callClassifyText(c) {
@@ -2698,11 +2848,16 @@ async function classifyCallbackFromCall(c) {
   const dir = isIncomingDirection(c.direction)
     ? 'inbound (the client called the firm)'
     : 'outbound (the firm called the client)';
+  const alreadyConnected = isConnectedHumanCall(c);
+  const connectedNote = alreadyConnected
+    ? `Connection status: this recording is a call that ALREADY connected the client with a person (${dir}). Answer true ONLY if someone promised an ADDITIONAL return phone call as the immediate next step (e.g. "I'll call you back in 10 minutes", "the attorney will call you this afternoon"). If they only said the team will call later once there is an update, a deeper answer, more information, or when something is ready — answer FALSE. The firm already spoke with them on this call.`
+    : `Connection status: this call did not complete with a person (missed / Sona / no-answer), or that is unclear from metadata.`;
   const label = picked.kind === 'transcript' ? 'Transcript' : 'Call summary (no full transcript available)';
   const prompt = `You are reviewing a single phone call at a personal-injury law firm to decide whether the FIRM still owes THIS PERSON A RETURN PHONE CALL that staff should place now (or very soon) as the next action.
 
 Call direction: ${dir}
 Contact: ${c.contact || '(unknown)'}
+${connectedNote}
 
 Answer true ONLY when the call contains an EXPLICIT, UNMET request or promise that someone will PHONE the client as the next step:
 - The client asked to be called back ("can you call me back", "have the attorney call me"), or
@@ -2712,13 +2867,13 @@ Answer true ONLY when the call contains an EXPLICIT, UNMET request or promise th
 The promise must be a phone call that is already owed. "Call", "contact", "reach out", or "let you know" later does NOT count if it is a status update after some other event.
 
 Be strict — an unfinished task is NOT a callback. Answer false if ANY of these apply:
-- FUTURE / CONTINGENT CONTACT: staff will get back to the client only after receiving more information, documents, a police report, a check, next steps, or similar. Examples that are FALSE: "as soon as I hear a word I'll send you a message", "once we know the next steps I will reach out… probably next week", "the office will contact you once they have the check ready", "as soon as we get that police report I'll let you know", "I'll leave a message so he can verify that information and let you know how long it may take" / "le dejaré el mensaje para que verifique y le deje saber cuánto tiempo se puede tomar".
+- FUTURE / CONTINGENT CONTACT: staff will get back to the client only after receiving more information, documents, a police report, a check, next steps, a deeper answer, or similar. Examples that are FALSE: "as soon as I hear a word I'll send you a message", "once we know the next steps I will reach out… probably next week", "the office will contact you once they have the check ready", "as soon as we get that police report I'll let you know", "I'll leave a message so he can verify that information and let you know how long it may take" / "le dejaré el mensaje para que verifique y le deje saber cuánto tiempo se puede tomar", "lo que puedo hacer es que ellos le llamen de vuelta, en cuanto ellos tengan una respuesta ya más a profundidad", "que me llamen en cuanto puedan / cuando tengan alguna actualización".
 - A later process call (someone will introduce themselves, go over the process, or set up treatment after information arrives) is onboarding, not a callback owed from this conversation.
 - The promised follow-up is a message, text, email, or "I'll let you know" — not a return phone call.
 - The client has ENDED or is ending the relationship: they fired the firm, said they're using another firm, asked to stop being contacted, sent a disengagement/termination letter, or declined to sign paperwork because they're leaving. Never flag these people for a callback, even if loose ends remain.
 - The only thing outstanding is paperwork, a document, records, a signature, an email to send, or other administrative follow-up work. That is internal work, not a phone call the client is waiting on.
 - The FIRM called and asked the CLIENT to call US back — the client owes the callback, not the firm.
-- The firm already spoke with the person on this call and nobody promised a further call.
+- The firm already spoke with the person on this call and nobody promised a further IMMEDIATE call.
 - The other party is NOT a client — a referring attorney, vendor, insurance company, court, or an internal/marketing call.
 
 If you have to infer or assume a callback was implied, the answer is false. Only an explicit near-term return-call request or promise counts. Apply the same rules to Spanish (or any language).
@@ -2730,13 +2885,29 @@ ${picked.text.slice(0, 6000)}
 
 Respond as JSON only: {"firm_owes_callback": true or false, "reason": "<brief, quote the explicit near-term call-back request or promise if true>"}`;
   try {
-    const out = await runChatCompletion(prompt, 300, 'Callback classifier', { jsonObject: true });
+    const out = await runChatCompletion(prompt, OPENAI_CALLBACK_MAX_TOKENS, 'Callback classifier', { jsonObject: true });
     const parsed = JSON.parse(out);
-    return { ok: Boolean(parsed.firm_owes_callback), reason: String(parsed.reason || '') };
+    let ok = Boolean(parsed.firm_owes_callback);
+    const reason = String(parsed.reason || '');
+    // Safety net: a live conversation that only promised a later update is not a chase-list callback.
+    if (ok && alreadyConnected && looksLikeContingentCallbackReason(reason)) {
+      console.log(`    Callback suppressed (contingent follow-up on connected call) — ${c.contact || c.phone || c.id}: ${reason}`);
+      ok = false;
+    }
+    return { ok, reason };
   } catch (err) {
     console.warn(`    Callback classify failed (${err.message}) — treating as NOT a callback.`);
     return { ok: false, reason: 'classifier error' };
   }
+}
+
+/** True when a person on the firm side actually connected with the client on this leg. */
+function isConnectedHumanCall(c) {
+  if (!c) return false;
+  const status = String(c.status || '').toLowerCase();
+  if (status !== 'completed' && status !== 'answered') return false;
+  if (isIncomingDirection(c.direction)) return !c.aiHandled;
+  return true; // outbound completed = we reached them
 }
 
 /**
@@ -2751,9 +2922,20 @@ function isConnectedReturnCall(c, sinceIso) {
   // 2-minute grace so the originating call's own legs don't count as "returned".
   const since = new Date(sinceIso).getTime() + 120 * 1000;
   if (!Number.isFinite(t) || !Number.isFinite(since) || t <= since) return false;
-  const status = String(c.status || '').toLowerCase();
-  if (!isIncomingDirection(c.direction)) return status === 'completed'; // we called, they answered
-  return status === 'completed' && !c.aiHandled; // they called back and reached a person
+  return isConnectedHumanCall(c);
+}
+
+/**
+ * Reasons that are really "call later when we know more" — not a chase-list
+ * callback. Used as a safety net when the model over-flags contingent language
+ * (common in Spanish intakes).
+ */
+function looksLikeContingentCallbackReason(reason) {
+  const s = String(reason || '').toLowerCase();
+  if (!s) return false;
+  return /en cuanto|una vez que|cuando (tengan|haya|salga|puedan)|once (we|they|you)|when (we|they|you) (have|get|know|can)|as soon as .{0,60}(update|respuesta|informaci[oó]n|information|report|check|ready|answer)|m[aá]s a profundidad|alguna actualizaci[oó]n|deeper (answer|response)|more (information|info)|when .+ (update|ready|available)/i.test(
+    s
+  );
 }
 
 function buildMissedClientCallTable(rows, kind = 'missed') {
@@ -2876,32 +3058,46 @@ async function runMissedClientCallReport() {
   console.log('═'.repeat(52));
 
   console.log('\n[1/3] Fetching Quo calls (all lines, all statuses, trailing 24h)...');
-  const { callData } = await runExport({
-    apiKey: firmCtx().quoApiKey,
-    createdAfter,
-    createdBefore,
-    weeklyCommunications: true,
-    includeMessages: false,
-    // Pull transcripts so the LLM can decide whether the firm owes each client a
-    // callback (the client asked us to call back, or we promised to). Missed /
-    // no-answer calls simply have no transcript and fall to the heuristic below.
-    fetchTranscriptForWeekly: true,
-    // Pull every line the firm owns — resolving calls often happen on a
-    // different line (e.g. miss on RJL Outbound, callback via RJL Main Line,
-    // client retry into RJL Transfers). An empty filter = all lines in this
-    // firm's Quo workspace. For the env-only default firm we keep [] (all
-    // lines) exactly as before; a configured firm scopes to its own lines so
-    // firms sharing one Quo key don't cross-contaminate (list ALL of a firm's
-    // lines in its phone-numbers field for accurate resolution).
-    phoneNumbersFilter: firmCtx().synthetic ? [] : firmCtx().quoPhoneNumbers,
-  });
+  const [{ callData }, contactMap] = await Promise.all([
+    runExport({
+      apiKey: firmCtx().quoApiKey,
+      createdAfter,
+      createdBefore,
+      weeklyCommunications: true,
+      includeMessages: false,
+      // Pull transcripts so the LLM can decide whether the firm owes each client a
+      // callback (the client asked us to call back, or we promised to). Missed /
+      // no-answer calls simply have no transcript and fall to the heuristic below.
+      fetchTranscriptForWeekly: true,
+      // Pull every line the firm owns — resolving calls often happen on a
+      // different line (e.g. miss on RJL Outbound, callback via RJL Main Line,
+      // client retry into RJL Transfers). An empty filter = all lines in this
+      // firm's Quo workspace. For the env-only default firm we keep [] (all
+      // lines) exactly as before; a configured firm scopes to its own lines so
+      // firms sharing one Quo key don't cross-contaminate (list ALL of a firm's
+      // lines in its phone-numbers field for accurate resolution).
+      phoneNumbersFilter: firmCtx().synthetic ? [] : firmCtx().quoPhoneNumbers,
+    }),
+    fetchContactMap(firmCtx().quoApiKey).catch((err) => {
+      console.warn(`  Contact map skipped: ${err.message}`);
+      return {};
+    }),
+  ]);
 
   // Group EVERY call in the window by phone last-10 first, so resolving calls
   // (callbacks, transfers, etc.) that may have a different/missing contact
   // label are still grouped with their corresponding miss. Then qualify the
   // group as "client" only if at least one call in it has a client-shaped
   // contact name (CRM name ending in a case number).
-  const allCalls = (callData || []).filter((r) => r.recordType === 'call');
+  //
+  // Also merge Quo webhook ledger legs — list-calls drops many completed
+  // return/transfer calls that Quo Router still posts to Slack.
+  const mergedCalls = await enrichMissedCallsFromLedger(
+    callData || [],
+    { createdAfter, createdBefore },
+    contactMap
+  );
+  const allCalls = mergedCalls.filter((r) => r.recordType === 'call' || !r.recordType);
   console.log(`\n[2/3] ${allCalls.length} call(s) in window (will filter to clients next).`);
 
   /** @type {Map<string, { leadAttorney?: string, paralegal?: string }>} */
@@ -2936,11 +3132,21 @@ async function runMissedClientCallReport() {
   /** @type {Map<string, object[]>} */
   const byPhone = new Map();
   for (const c of allCalls) {
-    const key = last10Digits(c.phone) || last10Digits(c.contact);
+    // Prefer dial-in phone; fall back to contact id so transfer legs that lost
+    // the external number still join the client's timeline.
+    const key =
+      last10Digits(c.phone) ||
+      (c.contactId ? `cid:${c.contactId}` : null) ||
+      last10Digits(c.contact);
     if (!key) continue;
+    if (!c.contact && contactMap && c.phone) {
+      c.contact = lookupContactName(contactMap, c.phone) || c.contact;
+      c.contactId = lookupContactId(contactMap, c.phone) || c.contactId;
+    }
     if (!byPhone.has(key)) byPhone.set(key, []);
     byPhone.get(key).push(c);
   }
+  mergeCallGroupsByContactId(byPhone);
 
   /** @type {{ contact: string, phone: string, missedAtLocal: string, missedAtIso: string, line: string, link: string }[]} */
   const outstanding = [];
@@ -2957,7 +3163,13 @@ async function runMissedClientCallReport() {
     // (client got through) or outbound (we dialed back from any line), there's
     // nothing outstanding — regardless of earlier misses.
     const lastCall = group[group.length - 1];
-    if (!lastCall || !isMissedInboundCall(lastCall)) continue;
+    if (!lastCall) continue;
+    if (isConnectedHumanCall(lastCall)) continue;
+    if (!isMissedInboundCall(lastCall)) continue;
+    // Belt-and-suspenders: a later human connect anywhere in the group clears
+    // the miss even if sort/timestamps on an older miss look "last".
+    const lastTs = String(lastCall.timestamp || '');
+    if (group.some((c) => String(c.timestamp || '') > lastTs && isConnectedHumanCall(c))) continue;
 
     // Prefer the client-formatted contact name (most likely to carry the case
     // number) even if lastCall itself was on a transfer leg without it.
@@ -3014,11 +3226,14 @@ async function runMissedClientCallReport() {
     for (const cand of toClassify) {
       const verdict = await classifyCallbackFromCall(cand.convCall);
       if (!verdict.ok) continue;
-      // Fall off if we've actually reached the client again after this call.
+      // Fall off if we've actually reached the client again after this call
+      // (including when the classifier walked back to an older transcript because
+      // the latest miss/no-answer leg had no text).
       const group = byPhone.get(cand.key) || [];
       const reached = group.some((c) => isConnectedReturnCall(c, cand.convCall.timestamp));
       if (reached) {
         droppedReturned += 1;
+        console.log(`    Callback cleared (later connected call) — ${cand.contact}`);
         continue;
       }
       console.log(`    Callback owed — ${cand.contact}: ${verdict.reason || 'n/a'}`);
