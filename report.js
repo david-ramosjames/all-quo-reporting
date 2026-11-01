@@ -2106,11 +2106,24 @@ function rollupToNegativeSnapshotSheetRow(r, cohortKey, runCreatedAfter, runCrea
  * not been contacted in 30 days.
  */
 async function appendLatestSentimentRows(rollups, createdAfter, createdBefore, rangeLabel) {
-  const baseUrl = (process.env.CASE_TRACKER_SUPABASE_URL || '').trim().replace(/\/$/, '');
-  const serviceKey = (process.env.CASE_TRACKER_SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  const baseUrl = (
+    process.env.CASE_TRACKER_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    ''
+  )
+    .trim()
+    .replace(/\/$/, '');
+  // Prefer new secret key names; keep legacy service_role JWT as fallback.
+  const serviceKey = (
+    process.env.CASE_TRACKER_SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.CASE_TRACKER_SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    ''
+  ).trim();
   if (!baseUrl || !serviceKey) {
     console.warn(
-      '  Client sentiment: skipped (set CASE_TRACKER_SUPABASE_URL and CASE_TRACKER_SUPABASE_SERVICE_ROLE_KEY).'
+      '  Client sentiment: skipped (set CASE_TRACKER_SUPABASE_URL and CASE_TRACKER_SUPABASE_SECRET_KEY).'
     );
     return;
   }
@@ -2131,6 +2144,7 @@ async function appendLatestSentimentRows(rollups, createdAfter, createdBefore, r
       sentiment: weeklySentimentWord(rollup.holisticSentiment),
       score: Number.isFinite(score) ? Math.round(score) : null,
       reason_summary: sheetCellOneLine(stripMarkdownBold(rollup.summary || ''), 2000) || null,
+      evidence_urls: markdownLinksToPlainUrls(rollup.links) || null,
       scored_at: scoredAt,
       window_start: createdAfter || null,
       window_end: createdBefore || null,
