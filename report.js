@@ -2102,8 +2102,9 @@ function rollupToNegativeSnapshotSheetRow(r, cohortKey, runCreatedAfter, runCrea
 
 /**
  * Each weekly run adds one sentiment history row per case in Case Tracker.
- * The Contact page shows the newest reading, or Unknown when that case has
- * not been contacted in 30 days.
+ * One row per Quo contact (clientKey), same grain as the weekly sheet/email.
+ * Case Tracker joins by trailing case digits; multiple contacts may share a case #.
+ * The Contact Sentiment tab shows contact-level rows; Unknown when last interaction is 30+ days.
  */
 async function appendLatestSentimentRows(rollups, createdAfter, createdBefore, rangeLabel) {
   const baseUrl = (
@@ -2133,14 +2134,18 @@ async function appendLatestSentimentRows(rollups, createdAfter, createdBefore, r
   }
 
   const scoredAt = new Date().toISOString();
-  const byCase = new Map();
+  // One row per Quo contact (clientKey) — same grain as the weekly sheet / email.
+  // Trailing case digits are stored for Case Tracker joins but do not collapse contacts.
+  const byContact = new Map();
   for (const rollup of rollups) {
-    const caseNumber = extractTrailingCaseDigitsFromClientKey(rollup.clientKey);
+    const clientKey = String(rollup.clientKey || '').trim();
+    if (!clientKey) continue;
+    const caseNumber = extractTrailingCaseDigitsFromClientKey(clientKey);
     if (!caseNumber) continue;
     const score = Number(rollup.score);
-    byCase.set(caseNumber, {
+    byContact.set(clientKey, {
       case_number: caseNumber,
-      client_name: String(rollup.clientKey || '').trim() || null,
+      client_name: clientKey,
       sentiment: weeklySentimentWord(rollup.holisticSentiment),
       score: Number.isFinite(score) ? Math.round(score) : null,
       reason_summary: sheetCellOneLine(stripMarkdownBold(rollup.summary || ''), 2000) || null,
@@ -2149,12 +2154,12 @@ async function appendLatestSentimentRows(rollups, createdAfter, createdBefore, r
       window_start: createdAfter || null,
       window_end: createdBefore || null,
       week_label: rangeLabel || null,
-      event_key: `quo:${caseNumber}:${createdAfter || ''}:${createdBefore || ''}`,
+      event_key: `quo:${clientKey}:${createdAfter || ''}:${createdBefore || ''}`,
       source: 'quo',
       updated_at: scoredAt,
     });
   }
-  const rows = [...byCase.values()];
+  const rows = [...byContact.values()];
   if (!rows.length) {
     console.log('  Client sentiment: no rows had a trailing case number.');
     return;
