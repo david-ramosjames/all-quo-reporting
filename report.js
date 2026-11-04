@@ -2474,77 +2474,6 @@ function caseTrackerRestConfig() {
   };
 }
 
-/**
- * Case → Slack channel links from Case Tracker (case_slack_channels).
- * Used so the morning needs-response email can deep-link into each case channel.
- */
-async function fetchCaseTrackerSlackChannelMap() {
-  const cfg = caseTrackerRestConfig();
-  /** @type {Map<string, { label: string, url: string }>} */
-  const map = new Map();
-  if (!cfg) {
-    console.warn('  Slack channel map: skipped (Case Tracker Supabase keys not set).');
-    return map;
-  }
-  const workspace = (
-    process.env.SLACK_WORKSPACE_URL ||
-    process.env.CASE_TRACKER_SLACK_WORKSPACE_URL ||
-    process.env.NEXT_PUBLIC_SLACK_WORKSPACE_URL ||
-    ''
-  )
-    .trim()
-    .replace(/\/$/, '');
-
-  let from = 0;
-  for (;;) {
-    const response = await fetch(
-      `${cfg.baseUrl}/rest/v1/case_slack_channels?select=case_number,slack_channel_id,slack_channel_name&order=case_number&offset=${from}&limit=1000`,
-      { headers: cfg.headers }
-    );
-    if (!response.ok) {
-      const detail = (await response.text()).slice(0, 200);
-      console.warn(`  Slack channel map: fetch failed (${response.status}): ${detail}`);
-      break;
-    }
-    const rows = await response.json();
-    if (!Array.isArray(rows) || !rows.length) break;
-    for (const row of rows) {
-      const caseNumber = String(row.case_number || '').trim();
-      if (!caseNumber) continue;
-      const name = String(row.slack_channel_name || '').trim();
-      const label = name ? (name.startsWith('#') ? name : `#${name}`) : '';
-      const id = String(row.slack_channel_id || '').trim();
-      const url = id && workspace ? `${workspace}/archives/${id}` : '';
-      if (!label && !url) continue;
-      map.set(caseNumber, { label: label || 'Slack', url });
-    }
-    if (rows.length < 1000) break;
-    from += rows.length;
-  }
-  console.log(`  Slack channel map: ${map.size} case channel(s) from Case Tracker.`);
-  return map;
-}
-
-function attachSlackLinksToNeedsResponseRows(outstanding, slackMap) {
-  for (const r of outstanding || []) {
-    const caseNumber = extractTrailingCaseDigitsFromClientKey(r.contact);
-    const hit = caseNumber && slackMap ? slackMap.get(caseNumber) : null;
-    r.slackLabel = hit?.label || '';
-    r.slackUrl = hit?.url || '';
-  }
-}
-
-function respondQuoCellHtml(r) {
-  return r.link ? `<a href="${escapeHtml(r.link)}">Quo</a>` : '';
-}
-
-function respondSlackCellHtml(r) {
-  if (r.slackUrl) {
-    return `<a href="${escapeHtml(r.slackUrl)}">${escapeHtml(r.slackLabel || 'Slack')}</a>`;
-  }
-  return escapeHtml(r.slackLabel || '');
-}
-
 async function replaceWeeklyNegativeSentimentSnapshot(emailRollups, createdAfter, createdBefore, rangeLabel) {
   const spreadsheetId = weeklyNegativeSnapshotSpreadsheetId();
   if (!spreadsheetId) return;
@@ -3186,8 +3115,13 @@ function formatMissedCallTime(iso) {
   if (!iso) return '';
   const dt = DateTime.fromISO(String(iso), { zone: 'utc' }).setZone(TIMEZONE);
   if (!dt.isValid) return '';
-  return dt.toFormat("ccc, LLL d 'at' h:mm a") + ` ${TIMEZONE}`;
+  return dt.toFormat("ccc, LLL d 'at' h:mm a");
 }
+
+const CASE_TRACKER_NEEDS_RESPONSE_URL = (
+  process.env.CASE_TRACKER_NEEDS_RESPONSE_URL ||
+  'https://rjl-case-tracker.vercel.app/needs-response'
+).trim().replace(/\/$/, '');
 
 // ── Callback-required detection (from the call transcript, via an LLM) ────────
 // Instead of relying on any external bot/tag, we read each client's most recent
@@ -3447,16 +3381,13 @@ Respond as JSON only: {"needs_staff_response": true or false, "reason": "<brief;
 function buildMissedClientCallTable(rows, kind = 'missed') {
   const header =
     kind === 'callback'
-      ? ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Quo line', 'Quo', 'Slack']
+      ? ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
       : kind === 'sms'
-        ? ['Client', 'Phone', 'Text at', 'Preview', 'Attorney', 'Paralegal', 'Quo line', 'Quo', 'Slack']
-        : ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Quo', 'Slack'];
+        ? ['Client', 'Phone', 'Text at', 'Preview', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
+        : ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Quo'];
   const lines = [header.join(' | '), header.map(() => '---').join(' | ')];
   for (const r of rows) {
     const quo = r.link ? `[Quo](${r.link})` : '';
-    const slack = r.slackUrl
-      ? `[${r.slackLabel || 'Slack'}](${r.slackUrl})`
-      : r.slackLabel || '';
     const cells =
       kind === 'callback'
         ? [
@@ -3468,7 +3399,6 @@ function buildMissedClientCallTable(rows, kind = 'missed') {
             r.paralegal || '',
             r.line || '',
             quo,
-            slack,
           ]
         : kind === 'sms'
           ? [
@@ -3480,122 +3410,193 @@ function buildMissedClientCallTable(rows, kind = 'missed') {
               r.paralegal || '',
               r.line || '',
               quo,
-              slack,
             ]
           : [
               r.contact || '(unknown)',
               r.phone || '',
-              r.callbackRequested ? '📞 Yes' : '',
+              r.callbackRequested ? 'Yes' : '',
               r.missedAtLocal || '',
               r.reason || '',
               r.attorney || '',
               r.paralegal || '',
               r.line || '',
               quo,
-              slack,
             ];
     lines.push(cells.join(' | '));
   }
   return lines.join('\n');
 }
 
-/** HTML for the Missed / Sona Calls table (includes Quo + Slack respond links). */
+function needsResponseQuoBtn(r) {
+  if (!r.link) return '—';
+  return `<a href="${escapeHtml(r.link)}" style="display:inline-block;padding:5px 10px;border-radius:6px;background:#0A1C40;color:#ffffff;font-size:12px;font-weight:700;text-decoration:none">Quo</a>`;
+}
+
+function needsResponseBadge(text, color, bg) {
+  return `<span style="display:inline-block;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:700;color:${color};background:${bg};white-space:nowrap">${escapeHtml(text)}</span>`;
+}
+
+/** HTML for the Missed / Sona Calls table (Quo link only — Slack lives in Case Tracker). */
 function missedTableHtml(rows) {
-  if (!rows.length) return '<p class="empty">No missed / Sona client calls in the last 24 hours. Nice work!</p>';
+  if (!rows.length) {
+    return '<p style="margin:8px 0;color:#667085;font-size:13px;font-style:italic">No missed / Sona client calls in this window.</p>';
+  }
   const headerRow =
-    '<tr><th>Client</th><th>Phone</th><th>Callback?</th><th>Missed at</th><th>Reason</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Quo</th><th>Slack</th></tr>';
+    '<tr style="background:#f9fafb">' +
+    ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
+      .map(
+        (h) =>
+          `<th style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085;border-bottom:1px solid #e4e7ec;text-align:left">${h}</th>`
+      )
+      .join('') +
+    '</tr>';
   const bodyRows = rows
-    .map(
-      (r) =>
-        `<tr${r.callbackRequested ? ' class="callback"' : ''}><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
-        `<td>${escapeHtml(r.phone || '')}</td>` +
-        `<td>${r.callbackRequested ? '<span class="cb">📞 Yes</span>' : ''}</td>` +
-        `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
-        `<td>${escapeHtml(r.reason || '')}</td>` +
-        `<td>${escapeHtml(r.attorney || '')}</td>` +
-        `<td>${escapeHtml(r.paralegal || '')}</td>` +
-        `<td>${escapeHtml(r.line || '')}</td>` +
-        `<td>${respondQuoCellHtml(r)}</td>` +
-        `<td>${respondSlackCellHtml(r)}</td></tr>`
-    )
+    .map((r) => {
+      const border = r.callbackRequested ? '#b54708' : '#e4e7ec';
+      const cb = r.callbackRequested
+        ? needsResponseBadge('Yes', '#b54708', '#fffaeb')
+        : '<span style="color:#98a2b3">—</span>';
+      return `<tr>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;border-left:4px solid ${border};font-weight:600;color:#101828">${escapeHtml(r.contact || '(unknown)')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.phone || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7">${cb}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054;white-space:nowrap">${escapeHtml(r.missedAtLocal || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.reason || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.attorney || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.paralegal || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.line || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7">${needsResponseQuoBtn(r)}</td>
+      </tr>`;
+    })
     .join('');
-  return `<table>${headerRow}${bodyRows}</table>`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e4e7ec;border-radius:10px;overflow:hidden;border-collapse:separate">${headerRow}${bodyRows}</table>`;
 }
 
 /** HTML for the Requested Call Backs table. */
 function callbackTableHtml(rows) {
-  if (!rows.length) return '<p class="empty">No outstanding callback requests. Nice work!</p>';
+  if (!rows.length) {
+    return '<p style="margin:8px 0;color:#667085;font-size:13px;font-style:italic">No outstanding callback requests.</p>';
+  }
   const headerRow =
-    '<tr><th>Client</th><th>Phone</th><th>Requested at</th><th>Why</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Quo</th><th>Slack</th></tr>';
+    '<tr style="background:#f9fafb">' +
+    ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
+      .map(
+        (h) =>
+          `<th style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085;border-bottom:1px solid #e4e7ec;text-align:left">${h}</th>`
+      )
+      .join('') +
+    '</tr>';
   const bodyRows = rows
     .map(
-      (r) =>
-        `<tr class="callback"><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
-        `<td>${escapeHtml(r.phone || '')}</td>` +
-        `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
-        `<td style="font-size:13px;color:#57606a">${escapeHtml(r.callbackWhy || '')}</td>` +
-        `<td>${escapeHtml(r.attorney || '')}</td>` +
-        `<td>${escapeHtml(r.paralegal || '')}</td>` +
-        `<td>${escapeHtml(r.line || '')}</td>` +
-        `<td>${respondQuoCellHtml(r)}</td>` +
-        `<td>${respondSlackCellHtml(r)}</td></tr>`
+      (r) => `<tr>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;border-left:4px solid #175cd3;font-weight:600;color:#101828">${escapeHtml(r.contact || '(unknown)')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.phone || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054;white-space:nowrap">${escapeHtml(r.missedAtLocal || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054;font-size:13px">${escapeHtml(r.callbackWhy || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.attorney || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.paralegal || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.line || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7">${needsResponseQuoBtn(r)}</td>
+      </tr>`
     )
     .join('');
-  return `<table>${headerRow}${bodyRows}</table>`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e4e7ec;border-radius:10px;overflow:hidden;border-collapse:separate">${headerRow}${bodyRows}</table>`;
 }
 
 /** HTML for inbound texts that still need a staff response (call or text). */
 function smsNeedsResponseTableHtml(rows) {
-  if (!rows.length) return '<p class="empty">No client texts still needing a response. Nice work!</p>';
+  if (!rows.length) {
+    return '<p style="margin:8px 0;color:#667085;font-size:13px;font-style:italic">No client texts still needing a response.</p>';
+  }
   const headerRow =
-    '<tr><th>Client</th><th>Phone</th><th>Text at</th><th>Preview</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Quo</th><th>Slack</th></tr>';
+    '<tr style="background:#f9fafb">' +
+    ['Client', 'Phone', 'Text at', 'Preview', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
+      .map(
+        (h) =>
+          `<th style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085;border-bottom:1px solid #e4e7ec;text-align:left">${h}</th>`
+      )
+      .join('') +
+    '</tr>';
   const bodyRows = rows
     .map(
-      (r) =>
-        `<tr><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
-        `<td>${escapeHtml(r.phone || '')}</td>` +
-        `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
-        `<td style="font-size:13px;color:#57606a">${escapeHtml(r.smsPreview || '')}</td>` +
-        `<td>${escapeHtml(r.attorney || '')}</td>` +
-        `<td>${escapeHtml(r.paralegal || '')}</td>` +
-        `<td>${escapeHtml(r.line || '')}</td>` +
-        `<td>${respondQuoCellHtml(r)}</td>` +
-        `<td>${respondSlackCellHtml(r)}</td></tr>`
+      (r) => `<tr>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;border-left:4px solid #067647;font-weight:600;color:#101828">${escapeHtml(r.contact || '(unknown)')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.phone || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054;white-space:nowrap">${escapeHtml(r.missedAtLocal || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054;font-size:13px">${escapeHtml(r.smsPreview || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.attorney || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.paralegal || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.line || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7">${needsResponseQuoBtn(r)}</td>
+      </tr>`
     )
     .join('');
-  return `<table>${headerRow}${bodyRows}</table>`;
+  return `<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border:1px solid #e4e7ec;border-radius:10px;overflow:hidden;border-collapse:separate">${headerRow}${bodyRows}</table>`;
 }
 
 function buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows, smsRows = []) {
-  const css = `
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; background: #ffffff; }
-    h3 { margin: 26px 0 4px; }
-    table { border-collapse: collapse; width: 100%; margin-top: 12px; background: #ffffff; }
-    th, td { border: 1px solid #d0d7de; padding: 8px 10px; text-align: left; vertical-align: top; font-size: 14px; background: #ffffff; }
-    .empty { color: #57606a; font-style: italic; padding: 8px 0; }
-    .cb { font-weight: 600; white-space: nowrap; }
-    .note { color: #57606a; font-size: 13px; margin-top: 6px; }
-  `.trim();
-  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
-    <h2>Client Needs Response — New Today</h2>
-    <p style="margin-top: 4px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
-    <p class="note">Only <strong>new</strong> items are emailed. The full open queue stays in Case Tracker → Needs response until staff send an outbound text, complete a returned call, or mark the row resolved.</p>
+  const total = missedRows.length + callbackRows.length + smsRows.length;
+  const trackerUrl = CASE_TRACKER_NEEDS_RESPONSE_URL;
+  const kpi = (label, value, color, bg) => `
+    <td style="width:25%;padding:4px">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:${bg};border:1px solid #e4e7ec;border-radius:10px">
+        <tr><td style="padding:14px 12px">
+          <div style="font-size:11px;font-weight:700;color:#667085;text-transform:uppercase;letter-spacing:0.04em">${escapeHtml(label)}</div>
+          <div style="font-size:28px;font-weight:800;color:${color};line-height:1.15;margin-top:4px">${value}</div>
+        </td></tr>
+      </table>
+    </td>`;
+  const section = (title, accent, body) => `
+    <h3 style="margin:28px 0 10px;font-size:16px;color:#0A1C40;border-left:4px solid ${accent};padding-left:10px">${escapeHtml(title)}</h3>
+    ${body}`;
 
-    <h3>1) Missed / Sona Calls</h3>
-    ${missedTableHtml(missedRows)}
-
-    <h3>2) Requested Call Backs</h3>
-    ${callbackTableHtml(callbackRows)}
-
-    <h3>3) Texts Needing Response</h3>
-    ${smsNeedsResponseTableHtml(smsRows)}
-
-    <div class="note" style="margin-top: 24px; border-top: 1px solid #d0d7de; padding-top: 12px;">
-      <p><strong>1) Missed / Sona Calls</strong> — client numbers whose most recent call in the window was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person. A number drops off as soon as its latest call is answered by a person or we dial out to them. A 📞 here means this client also asked us to call them back.</p>
-      <p><strong>2) Requested Call Backs</strong> — clients the firm owes a near-term return call: the client asked us to call them back, or a staff member promised to call them as the next step. Later "we'll reach out once we have more information" updates are not listed. (Clients who are also on Missed / Sona appear there, flagged 📞, not here.) Each drops off once we've actually reached the client again.</p>
-      <p><strong>3) Texts Needing Response</strong> — inbound client texts an LLM judges as needing staff action (question, request, concern, update). Simple acknowledgements ("ok", "thanks") are skipped without the model. A later <em>connected human call</em> or outbound text clears them — we do not have to reply by text. Clients already listed above are not duplicated here.</p>
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head>
+<body style="margin:0;padding:0;background:#f2f4f7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;color:#101828">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f2f4f7">
+<tr><td align="center" style="padding:20px 12px">
+<table role="presentation" width="720" cellpadding="0" cellspacing="0" style="max-width:720px;width:100%">
+  <tr><td style="background:#0A1C40;border-radius:12px 12px 0 0;padding:28px 28px 24px">
+    <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:#45C7F0">Client follow-up</div>
+    <div style="font-size:26px;font-weight:800;color:#ffffff;margin-top:6px">Needs Response — New Today</div>
+    <div style="font-size:13px;color:#d0d5dd;margin-top:8px">${escapeHtml(rangeLabel)}</div>
+    <div style="margin-top:16px">
+      <a href="${escapeHtml(trackerUrl)}" style="display:inline-block;padding:10px 16px;border-radius:8px;background:#45C7F0;color:#0A1C40;font-size:13px;font-weight:800;text-decoration:none">Open Needs Response →</a>
     </div>
-  </body></html>`;
+  </td></tr>
+  <tr><td style="background:#ffffff;padding:20px 20px 8px">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        ${kpi('New items', String(total), total ? '#b42318' : '#067647', total ? '#fef3f2' : '#ecfdf3')}
+        ${kpi('Missed / Sona', String(missedRows.length), '#b54708', '#fffaeb')}
+        ${kpi('Callbacks', String(callbackRows.length), '#175cd3', '#eff8ff')}
+        ${kpi('Texts', String(smsRows.length), '#067647', '#ecfdf3')}
+      </tr>
+    </table>
+    <p style="margin:14px 8px 0;font-size:12px;color:#667085;line-height:1.5">
+      Only <strong style="color:#344054">new</strong> items are emailed.
+      The full open queue stays in <a href="${escapeHtml(trackerUrl)}" style="color:#175cd3;font-weight:600">Case Tracker → Needs response</a>
+      (Slack channel links are there) until staff send an outbound text, complete a returned call, or mark the row resolved.
+    </p>
+  </td></tr>
+  <tr><td style="background:#ffffff;padding:8px 20px 20px">
+    ${section('1) Missed / Sona Calls', '#b54708', missedTableHtml(missedRows))}
+    ${section('2) Requested Call Backs', '#175cd3', callbackTableHtml(callbackRows))}
+    ${section('3) Texts Needing Response', '#067647', smsNeedsResponseTableHtml(smsRows))}
+    <div style="margin-top:28px;padding-top:16px;border-top:1px solid #e4e7ec;font-size:12px;color:#667085;line-height:1.55">
+      <p style="margin:0 0 8px"><strong style="color:#344054">Missed / Sona</strong> — latest activity was a miss or Sona/AI-handled call. Clears when a person answers or we dial out.</p>
+      <p style="margin:0 0 8px"><strong style="color:#344054">Callbacks</strong> — firm owes a near-term return call (client asked, or staff promised). Contingent “we’ll update you later” items are not listed.</p>
+      <p style="margin:0"><strong style="color:#344054">Texts</strong> — inbound client texts that need staff action. Clears on a connected human call or outbound text.</p>
+    </div>
+  </td></tr>
+  <tr><td style="background:#0A1C40;border-radius:0 0 12px 12px;padding:14px 28px;font-size:11px;color:#98a2b3">
+    <a href="${escapeHtml(trackerUrl)}" style="color:#45C7F0;font-weight:700;text-decoration:none">Open full Needs Response queue</a>
+    &nbsp;·&nbsp; Ramos James Law · Internal
+  </td></tr>
+</table>
+</td></tr>
+</table>
+</body></html>`;
 }
 
 /**
@@ -3608,11 +3609,11 @@ async function runMissedClientCallReport() {
   const { createdAfter, createdBefore } = getTrailing24HoursRange();
   const a = DateTime.fromISO(createdAfter, { zone: 'utc' }).setZone(TIMEZONE);
   const b = DateTime.fromISO(createdBefore, { zone: 'utc' }).setZone(TIMEZONE);
-  const rangeLabel = `${a.toFormat("LLL d, h:mm a")} – ${b.toFormat("LLL d, h:mm a")} ${TIMEZONE}`;
+  const rangeLabel = `${a.toFormat("LLL d, h:mm a")} – ${b.toFormat("LLL d, h:mm a")}`;
 
   console.log(`\n${'═'.repeat(52)}`);
   console.log('  Client Needs Response Report (trailing 24h)');
-  console.log(`  Window: ${rangeLabel}`);
+  console.log(`  Window: ${rangeLabel} (${TIMEZONE})`);
   console.log('═'.repeat(52));
 
   console.log('\n[1/4] Fetching Quo calls + texts (all lines, trailing 24h)...');
@@ -3959,14 +3960,8 @@ async function runMissedClientCallReport() {
 
   for (const r of outstanding) delete r._groupKey;
 
-  try {
-    const slackMap = await fetchCaseTrackerSlackChannelMap();
-    attachSlackLinksToNeedsResponseRows(emailRows, slackMap);
-  } catch (err) {
-    console.warn(`  Slack channel link attach failed: ${err.message}`);
-  }
-
-  // Email = newly opened Case Tracker items only. Full open queue lives in Case Tracker.
+  // Email = newly opened Case Tracker items only. Full open queue (incl. Slack
+  // channel links) lives on Case Tracker → Needs response.
   const byTime = (x, y) => String(x.missedAtIso).localeCompare(String(y.missedAtIso));
   const missedRows = emailRows.filter((r) => r.kind === 'missed').sort(byTime);
   const callbackRows = emailRows.filter((r) => r.kind === 'callback').sort(byTime);
@@ -3986,7 +3981,7 @@ async function runMissedClientCallReport() {
   const html = buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows, smsRows);
   const plainText =
     `Client Needs Response Report (new items only)\nWindow: ${rangeLabel}\n` +
-    `Full open queue: Case Tracker → Needs response\n\n` +
+    `Full open queue: ${CASE_TRACKER_NEEDS_RESPONSE_URL}\n\n` +
     `1) Missed / Sona Calls (${missedRows.length})\n` +
     (missedRows.length ? `${buildMissedClientCallTable(missedRows, 'missed')}\n` : 'None.\n') +
     `\n2) Requested Call Backs (${callbackRows.length})\n` +
