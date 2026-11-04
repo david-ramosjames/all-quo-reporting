@@ -46,7 +46,7 @@ console.log('══════════════════════�
 console.log(`  Daily lead + CSV : ${SCHEDULE}`);
 console.log(`  Weekly sentiment : ${WEEKLY_SENTIMENT_CRON}`);
 console.log(`  Monthly newsletter : ${MONTHLY_INSIGHTS_CRON}`);
-console.log(`  Missed client calls : ${MISSED_CLIENT_CALLS_CRON}`);
+console.log(`  Needs response      : ${MISSED_CLIENT_CALLS_CRON}`);
 console.log(`  Review intelligence : ${REVIEW_INTELLIGENCE_CRON}`);
 console.log(`  Call stats sends : ${callStatsDefaultsLabel()} (per-firm lists/times override)`);
 console.log(`  Intake grading   : 6:00 PM (per-firm list/time override)`);
@@ -125,11 +125,11 @@ cron.schedule(
   MISSED_CLIENT_CALLS_CRON,
   async () => {
     const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
-    console.log(`\n[${ts}] Cron triggered — missed client call report (trailing 24h)...`);
+    console.log(`\n[${ts}] Cron triggered — client needs-response report (trailing 24h)...`);
     try {
       await runForAllFirms(runMissedClientCallReport);
     } catch (err) {
-      console.error(`[${ts}] Missed client call report failed:`, err.message);
+      console.error(`[${ts}] Client needs-response report failed:`, err.message);
     }
   },
   { timezone: TIMEZONE }
@@ -296,7 +296,7 @@ for (const [label, expr] of [
   ['Daily lead + CSV', SCHEDULE],
   ['Weekly sentiment', WEEKLY_SENTIMENT_CRON],
   ['Monthly newsletter', MONTHLY_INSIGHTS_CRON],
-  ['Missed client calls', MISSED_CLIENT_CALLS_CRON],
+  ['Client needs response', MISSED_CLIENT_CALLS_CRON],
   ['Review intelligence', REVIEW_INTELLIGENCE_CRON],
 ]) {
   const n = nextRun(expr, TIMEZONE);

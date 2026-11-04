@@ -53,11 +53,11 @@ const JOBS = [
     out: 'Email',
   },
   {
-    name: 'Missed Client Call Report',
+    name: 'Client Needs Response Report',
     when: () => cronPhrase(sched('MISSED_CLIENT_CALLS_CRON', '0 7 * * *')),
     what:
-      'Finds client phone numbers whose most recent call in the last 24h was a missed / Sona-handled call that never connected to a person and hasn’t been returned, so staff can call them back.',
-    out: 'Email',
+      'Morning chase list of clients the firm still owes a response: missed / Sona calls, firm-owed callbacks, and inbound texts that need staff action. Email is new items only; Case Tracker keeps the full open queue until an outbound text, a connected return call (2-minute rule), or someone marks Resolved.',
+    out: 'Email (new) + Case Tracker (open queue)',
   },
   {
     name: 'Call Stats',

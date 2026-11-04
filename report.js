@@ -2185,6 +2185,366 @@ async function appendLatestSentimentRows(rollups, createdAfter, createdBefore, r
   console.log(`  Client sentiment: saved ${rows.length} case reading(s) to Supabase.`);
 }
 
+/** Stable Case Tracker key: needs:{phoneLast10|cid|unknown}:{missed|callback|sms} */
+function needsResponseEventKey(r) {
+  const phoneKey = last10Digits(r.phone) || last10Digits(r.contact) || 'unknown';
+  const kindPart = r.kind === 'callback' ? 'callback' : r.kind === 'sms' ? 'sms' : 'missed';
+  return `needs:${phoneKey}:${kindPart}`;
+}
+
+function phoneKeyFromNeedsEventKey(eventKey) {
+  const m = /^needs:([^:]+):(missed|callback|sms)$/.exec(String(eventKey || ''));
+  return m ? m[1] : null;
+}
+
+/**
+ * Staff follow-up that clears an open needs-response item:
+ * outbound text after detected_at, or connected human call with the same
+ * 2-minute grace used for callback returns.
+ */
+function hasStaffResponseSince(group, sinceIso) {
+  if (!sinceIso) return false;
+  const sinceMs = new Date(sinceIso).getTime();
+  if (!Number.isFinite(sinceMs)) return false;
+  for (const ev of group || []) {
+    if (!ev || !ev.timestamp) continue;
+    const t = new Date(ev.timestamp).getTime();
+    if (!Number.isFinite(t)) continue;
+    if (ev.recordType === 'sms') {
+      if (t <= sinceMs) continue;
+      if (!isIncomingDirection(ev.direction)) return true;
+      continue;
+    }
+    // Calls: 2-minute grace so the originating miss/callback leg is not "the return".
+    if (t <= sinceMs + 120 * 1000) continue;
+    if (isConnectedHumanCall(ev)) return true;
+  }
+  return false;
+}
+
+function buildNeedsResponseDbRow(r, rangeLabel, nowIso) {
+  const caseNumber = extractTrailingCaseDigitsFromClientKey(r.contact);
+  if (!caseNumber) return null;
+  let reasonCode = 'other';
+  if (r.kind === 'sms') reasonCode = 'sms';
+  else if (r.kind === 'callback') reasonCode = 'callback';
+  else if (/sona|ai/i.test(String(r.reason || ''))) reasonCode = 'sona';
+  else reasonCode = 'missed_call';
+  const details =
+    r.kind === 'sms'
+      ? sheetCellOneLine(String(r.smsPreview || r.details || r.callbackWhy || ''), 500) || null
+      : sheetCellOneLine(String(r.callbackWhy || r.details || ''), 500) || null;
+  return {
+    case_number: caseNumber,
+    client_name: String(r.contact || '').trim() || caseNumber,
+    phone: r.phone || null,
+    channel: r.kind === 'sms' ? 'sms' : 'call',
+    reason: String(r.reason || reasonCode).trim() || reasonCode,
+    reason_code: reasonCode,
+    status: 'open',
+    detected_at: r.missedAtIso || nowIso,
+    report_window_label: rangeLabel || null,
+    attorney_name: r.attorney || null,
+    paralegal_name: r.paralegal || null,
+    quo_line: r.line || null,
+    evidence_url: r.link || null,
+    details,
+    event_key: needsResponseEventKey(r),
+    source: 'quo-reporting',
+    resolved_at: null,
+    resolved_by: null,
+    updated_at: nowIso,
+  };
+}
+
+/**
+ * Sync Client Needs Response into Case Tracker.
+ * - Keeps open rows until outbound text, connected return call (2-min rule), or manual close.
+ * - Does NOT clear just because an item aged out of the trailing-24h email window.
+ * - Returns only newly opened rows for the morning email.
+ */
+async function syncNeedsResponseToCaseTracker(outstanding, rangeLabel, byPhoneTouch = new Map()) {
+  const baseUrl = (
+    process.env.CASE_TRACKER_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    ''
+  )
+    .trim()
+    .replace(/\/$/, '');
+  const serviceKey = (
+    process.env.CASE_TRACKER_SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.CASE_TRACKER_SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    ''
+  ).trim();
+  if (!baseUrl || !serviceKey) {
+    console.warn(
+      '  Needs response: skipped Case Tracker sync (set CASE_TRACKER_SUPABASE_URL and CASE_TRACKER_SUPABASE_SECRET_KEY).'
+    );
+    return { emailNew: outstanding || [], inserted: 0, autoResolved: 0 };
+  }
+
+  const now = new Date().toISOString();
+  const headers = {
+    apikey: serviceKey,
+    Authorization: `Bearer ${serviceKey}`,
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+  };
+
+  /** @type {{ id: string, event_key: string, phone: string|null, detected_at: string }[]} */
+  const openRows = [];
+  {
+    let from = 0;
+    for (;;) {
+      const openRes = await fetch(
+        `${baseUrl}/rest/v1/case_needs_response?status=eq.open&select=id,event_key,phone,detected_at&order=detected_at&offset=${from}&limit=1000`,
+        { headers }
+      );
+      if (!openRes.ok) {
+        const detail = (await openRes.text()).slice(0, 200);
+        throw new Error(`Needs-response open list failed (${openRes.status}): ${detail}`);
+      }
+      const page = await openRes.json();
+      if (!Array.isArray(page) || !page.length) break;
+      for (const row of page) openRows.push(row);
+      if (page.length < 1000) break;
+      from += page.length;
+    }
+  }
+
+  // Expand clearance map with ledger history back to the oldest open item so
+  // responses that fall outside the trailing-24h detection window still clear.
+  /** @type {Map<string, object[]>} */
+  const clearanceMap = new Map();
+  for (const [key, group] of byPhoneTouch || []) clearanceMap.set(key, [...(group || [])]);
+  if (openRows.length && pg.isEnabled()) {
+    try {
+      const oldestMs = openRows
+        .map((row) => new Date(row.detected_at).getTime())
+        .filter((ms) => Number.isFinite(ms));
+      if (oldestMs.length) {
+        const oldestIso = new Date(Math.min(...oldestMs)).toISOString();
+        await pg.ensureSchema();
+        const [ledgerCalls, ledgerMsgs] = await Promise.all([
+          pg.listQuoCallsInWindow(oldestIso, now),
+          pg.listQuoMessagesInWindow(oldestIso, now),
+        ]);
+        for (const row of ledgerCalls) {
+          const parts = row.participants && typeof row.participants === 'object' ? row.participants : {};
+          const externals = Array.isArray(parts.external) ? parts.external : [];
+          const inbound = isIncomingDirection(row.direction);
+          const phone = String(
+            inbound ? parts.from || externals[0] || '' : parts.to || externals[0] || ''
+          ).trim();
+          const key = last10Digits(phone);
+          if (!key) continue;
+          if (!clearanceMap.has(key)) clearanceMap.set(key, []);
+          clearanceMap.get(key).push({
+            recordType: 'call',
+            timestamp:
+              isoTs(row.completed_at) || isoTs(row.answered_at) || isoTs(row.created_at) || '',
+            direction: row.direction || '',
+            status: row.status || '',
+            aiHandled: row.ai_handled ? 'ai-agent' : null,
+            phone,
+          });
+        }
+        for (const row of ledgerMsgs) {
+          const payload = row.payload_json && typeof row.payload_json === 'object' ? row.payload_json : {};
+          const data = payload.data && typeof payload.data === 'object' ? payload.data : {};
+          const resource = data.resource || data.object || payload.object || {};
+          const from = String(resource.from || '').trim();
+          const to = String(resource.to || '').trim();
+          const inbound = isIncomingDirection(row.direction);
+          const phone = inbound ? from || to : to || from;
+          const key = last10Digits(phone);
+          if (!key) continue;
+          if (!clearanceMap.has(key)) clearanceMap.set(key, []);
+          clearanceMap.get(key).push({
+            recordType: 'sms',
+            timestamp: isoTs(row.created_at) || '',
+            direction: row.direction || '',
+            phone,
+            body: String(resource.text || resource.body || resource.message || '').trim(),
+          });
+        }
+        console.log(
+          `  Needs response clearance: ledger ${ledgerCalls.length} call(s), ${ledgerMsgs.length} text(s) since oldest open.`
+        );
+      }
+    } catch (err) {
+      console.warn(`  Needs response clearance ledger expand skipped: ${err.message}`);
+    }
+  }
+
+  const openByKey = new Map(openRows.map((row) => [String(row.event_key), row]));
+  const resolveIds = [];
+  for (const row of openRows) {
+    const phoneKey =
+      phoneKeyFromNeedsEventKey(row.event_key) || last10Digits(row.phone) || '';
+    const group = phoneKey ? clearanceMap.get(phoneKey) || [] : [];
+    if (!hasStaffResponseSince(group, row.detected_at)) continue;
+    resolveIds.push(row.id);
+    openByKey.delete(String(row.event_key));
+  }
+  for (let index = 0; index < resolveIds.length; index += 50) {
+    const chunk = resolveIds.slice(index, index + 50);
+    const patch = await fetch(
+      `${baseUrl}/rest/v1/case_needs_response?id=in.(${chunk.map(encodeURIComponent).join(',')})`,
+      {
+        method: 'PATCH',
+        headers: { ...headers, Prefer: 'return=minimal' },
+        body: JSON.stringify({
+          status: 'resolved',
+          resolved_at: now,
+          resolved_by: 'auto:responded',
+          updated_at: now,
+        }),
+      }
+    );
+    if (!patch.ok) {
+      const detail = (await patch.text()).slice(0, 200);
+      console.warn(`  Needs response: auto-responded patch failed (${patch.status}): ${detail}`);
+    }
+  }
+  if (resolveIds.length) {
+    console.log(`  Needs response: auto-resolved ${resolveIds.length} after outbound text / returned call.`);
+  }
+
+  /** @type {object[]} */
+  const emailNew = [];
+  /** @type {object[]} */
+  const upserts = [];
+  for (const r of outstanding || []) {
+    const row = buildNeedsResponseDbRow(r, rangeLabel, now);
+    if (!row) continue;
+    if (openByKey.has(row.event_key)) continue; // already on the Case Tracker queue — not new for email
+    upserts.push(row);
+    emailNew.push(r);
+  }
+
+  for (let index = 0; index < upserts.length; index += 200) {
+    const chunk = upserts.slice(index, index + 200);
+    const response = await fetch(`${baseUrl}/rest/v1/case_needs_response?on_conflict=event_key`, {
+      method: 'POST',
+      headers: {
+        ...headers,
+        Prefer: 'resolution=merge-duplicates,return=minimal',
+      },
+      body: JSON.stringify(chunk),
+    });
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 300);
+      throw new Error(`Supabase needs-response upsert failed (${response.status}): ${detail}`);
+    }
+  }
+
+  console.log(
+    `  Needs response: Case Tracker +${upserts.length} new open · email ${emailNew.length} new · still-open queue ${openByKey.size + upserts.length} (after ${resolveIds.length} auto-resolved).`
+  );
+  return { emailNew, inserted: upserts.length, autoResolved: resolveIds.length };
+}
+
+function caseTrackerRestConfig() {
+  const baseUrl = (
+    process.env.CASE_TRACKER_SUPABASE_URL ||
+    process.env.SUPABASE_URL ||
+    ''
+  )
+    .trim()
+    .replace(/\/$/, '');
+  const serviceKey = (
+    process.env.CASE_TRACKER_SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.CASE_TRACKER_SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    ''
+  ).trim();
+  if (!baseUrl || !serviceKey) return null;
+  return {
+    baseUrl,
+    serviceKey,
+    headers: {
+      apikey: serviceKey,
+      Authorization: `Bearer ${serviceKey}`,
+      Accept: 'application/json',
+    },
+  };
+}
+
+/**
+ * Case → Slack channel links from Case Tracker (case_slack_channels).
+ * Used so the morning needs-response email can deep-link into each case channel.
+ */
+async function fetchCaseTrackerSlackChannelMap() {
+  const cfg = caseTrackerRestConfig();
+  /** @type {Map<string, { label: string, url: string }>} */
+  const map = new Map();
+  if (!cfg) {
+    console.warn('  Slack channel map: skipped (Case Tracker Supabase keys not set).');
+    return map;
+  }
+  const workspace = (
+    process.env.SLACK_WORKSPACE_URL ||
+    process.env.CASE_TRACKER_SLACK_WORKSPACE_URL ||
+    process.env.NEXT_PUBLIC_SLACK_WORKSPACE_URL ||
+    ''
+  )
+    .trim()
+    .replace(/\/$/, '');
+
+  let from = 0;
+  for (;;) {
+    const response = await fetch(
+      `${cfg.baseUrl}/rest/v1/case_slack_channels?select=case_number,slack_channel_id,slack_channel_name&order=case_number&offset=${from}&limit=1000`,
+      { headers: cfg.headers }
+    );
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 200);
+      console.warn(`  Slack channel map: fetch failed (${response.status}): ${detail}`);
+      break;
+    }
+    const rows = await response.json();
+    if (!Array.isArray(rows) || !rows.length) break;
+    for (const row of rows) {
+      const caseNumber = String(row.case_number || '').trim();
+      if (!caseNumber) continue;
+      const name = String(row.slack_channel_name || '').trim();
+      const label = name ? (name.startsWith('#') ? name : `#${name}`) : '';
+      const id = String(row.slack_channel_id || '').trim();
+      const url = id && workspace ? `${workspace}/archives/${id}` : '';
+      if (!label && !url) continue;
+      map.set(caseNumber, { label: label || 'Slack', url });
+    }
+    if (rows.length < 1000) break;
+    from += rows.length;
+  }
+  console.log(`  Slack channel map: ${map.size} case channel(s) from Case Tracker.`);
+  return map;
+}
+
+function attachSlackLinksToNeedsResponseRows(outstanding, slackMap) {
+  for (const r of outstanding || []) {
+    const caseNumber = extractTrailingCaseDigitsFromClientKey(r.contact);
+    const hit = caseNumber && slackMap ? slackMap.get(caseNumber) : null;
+    r.slackLabel = hit?.label || '';
+    r.slackUrl = hit?.url || '';
+  }
+}
+
+function respondQuoCellHtml(r) {
+  return r.link ? `<a href="${escapeHtml(r.link)}">Quo</a>` : '';
+}
+
+function respondSlackCellHtml(r) {
+  if (r.slackUrl) {
+    return `<a href="${escapeHtml(r.slackUrl)}">${escapeHtml(r.slackLabel || 'Slack')}</a>`;
+  }
+  return escapeHtml(r.slackLabel || '');
+}
+
 async function replaceWeeklyNegativeSentimentSnapshot(emailRollups, createdAfter, createdBefore, rangeLabel) {
   const spreadsheetId = weeklyNegativeSnapshotSpreadsheetId();
   if (!spreadsheetId) return;
@@ -2842,8 +3202,16 @@ function formatMissedCallTime(iso) {
 
 // Cap on how many client calls we run through the LLM per report run.
 const CALLBACK_MAX_CLASSIFY = parseInt(process.env.MISSED_CALLBACK_MAX_CLASSIFY || '200', 10);
+/** Cap LLM SMS classifications per morning needs-response run. */
+const SMS_MAX_CLASSIFY = parseInt(process.env.MISSED_SMS_MAX_CLASSIFY || '200', 10);
 /** Completion budget for the firm-owes-callback JSON call (reasoning can eat most of a small cap). */
 const OPENAI_CALLBACK_MAX_TOKENS = clampInt(process.env.OPENAI_CALLBACK_MAX_COMPLETION_TOKENS, 1000, 300, 8000);
+const OPENAI_SMS_NEEDS_RESPONSE_MAX_TOKENS = clampInt(
+  process.env.OPENAI_SMS_NEEDS_RESPONSE_MAX_COMPLETION_TOKENS,
+  800,
+  200,
+  4000
+);
 
 /** Best classifiable text for a call: full transcript if present, else summary. */
 function callClassifyText(c) {
@@ -2957,44 +3325,185 @@ function looksLikeContingentCallbackReason(reason) {
   );
 }
 
+/**
+ * Cheap pre-filter: empty / pure acknowledgements never need an LLM call.
+ * Everything else goes to classifySmsNeedsStaffResponse (fails closed).
+ */
+function isObviousNoActionSms(body) {
+  const t = String(body || '').trim();
+  if (!t) return true;
+  return /^(ok|okay|k|kk|thanks|thank you|thx|ty|got it|sounds good|yes|yep|yeah|no|nah|np|yw|👍|🙏|👌|si|sí)([!.,\s]*)$/i.test(
+    t
+  );
+}
+
+/**
+ * Latest inbound SMS not yet cleared by a later connected human call or
+ * outbound text. Skips empty/ack-only bodies. Content judgment is LLM's job.
+ */
+function findLatestUnclearedInboundSms(group) {
+  const sorted = [...(group || [])].sort((x, y) =>
+    String(x.timestamp || '').localeCompare(String(y.timestamp || ''))
+  );
+  let lastInbound = null;
+  for (const ev of sorted) {
+    if (ev.recordType !== 'sms') continue;
+    if (!isIncomingDirection(ev.direction)) continue;
+    if (isObviousNoActionSms(ev.body)) continue;
+    lastInbound = ev;
+  }
+  if (!lastInbound) return null;
+  const since = String(lastInbound.timestamp || '');
+  const cleared = sorted.some((ev) => {
+    if (!ev.timestamp || String(ev.timestamp) <= since) return false;
+    if (ev.recordType === 'sms') return !isIncomingDirection(ev.direction);
+    return isConnectedHumanCall(ev);
+  });
+  return cleared ? null : lastInbound;
+}
+
+/** Short prior thread for SMS classifier context (calls + texts before the candidate). */
+function smsThreadContextForClassify(group, beforeIso, maxItems = 4) {
+  const prior = [...(group || [])]
+    .filter((ev) => ev && ev.timestamp && String(ev.timestamp) < String(beforeIso || ''))
+    .sort((x, y) => String(x.timestamp || '').localeCompare(String(y.timestamp || '')))
+    .slice(-maxItems);
+  if (!prior.length) return '(no earlier touchpoints in this window)';
+  return prior
+    .map((ev) => {
+      const when = formatMissedCallTime(ev.timestamp) || ev.timestamp || '';
+      if (ev.recordType === 'sms') {
+        const dir = isIncomingDirection(ev.direction) ? 'inbound SMS' : 'outbound SMS';
+        let body = String(ev.body || '').replace(/\s+/g, ' ').trim();
+        if (body.length > 220) body = `${body.slice(0, 217)}...`;
+        return `- ${when} · ${dir}: "${body || '(empty)'}"`;
+      }
+      const dir = isIncomingDirection(ev.direction) ? 'inbound call' : 'outbound call';
+      const status = ev.aiHandled ? 'Sona/AI' : ev.status || 'call';
+      return `- ${when} · ${dir} (${status})`;
+    })
+    .join('\n');
+}
+
+/**
+ * LLM: does this inbound client text still need a staff response (call OR text)?
+ * Same spirit as classifyCallbackFromCall — strict, fails closed.
+ * Returns { ok, reason }.
+ */
+async function classifySmsNeedsStaffResponse(sms, group = []) {
+  const body = String(sms?.body || '').trim();
+  if (!body) return { ok: false, reason: 'empty text' };
+  if (isObviousNoActionSms(body)) return { ok: false, reason: 'acknowledgement only' };
+
+  const contact = sms.contact || '(unknown)';
+  const prior = smsThreadContextForClassify(group, sms.timestamp);
+  const prompt = `You are reviewing one inbound SMS from a CLIENT to a personal-injury law firm. Decide whether staff still need to get back to this client (by phone call OR text — either counts).
+
+Contact: ${contact}
+
+Recent thread before this text (oldest → newest):
+${prior}
+
+Inbound client text to judge:
+"""
+${body.slice(0, 2000)}
+"""
+
+Answer true when the text needs a substantive staff response or follow-up now, for example:
+- A question about the case, status, timeline, settlement, treatment, documents, court, or next steps
+- A request to be called, emailed, or updated
+- A concern, complaint, confusion, urgency, or "please help / can someone call me"
+- New information that clearly expects acknowledgment beyond a silent read
+- Anything complex enough that leaving it unanswered would leave the client hanging
+
+Answer false when NO staff response is needed, for example:
+- Pure acknowledgements: ok, thanks, got it, sounds good, yes/no to a prior firm question with nothing further
+- Emoji / reaction-only messages
+- FYI confirmations that do not ask for anything ("I'll be there", "signed it", "dropped it off") unless they also ask a question or request a reply
+- Spam, wrong-number, or non-client vendor noise
+- The client ending / firing the firm or asking to stop contact
+
+Be strict. If unsure whether a reply is really needed, answer false. Apply the same rules to Spanish (or any language).
+
+Respond as JSON only: {"needs_staff_response": true or false, "reason": "<brief; quote the part that needs a reply if true>"}`;
+  try {
+    const out = await runChatCompletion(
+      prompt,
+      OPENAI_SMS_NEEDS_RESPONSE_MAX_TOKENS,
+      'SMS needs-response classifier',
+      { jsonObject: true }
+    );
+    const parsed = JSON.parse(out);
+    return {
+      ok: Boolean(parsed.needs_staff_response),
+      reason: String(parsed.reason || ''),
+    };
+  } catch (err) {
+    console.warn(`    SMS classify failed (${err.message}) — treating as NOT needing response.`);
+    return { ok: false, reason: 'classifier error' };
+  }
+}
+
 function buildMissedClientCallTable(rows, kind = 'missed') {
-  const header = kind === 'callback'
-    ? ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Quo line', 'Link']
-    : ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Link'];
+  const header =
+    kind === 'callback'
+      ? ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Quo line', 'Quo', 'Slack']
+      : kind === 'sms'
+        ? ['Client', 'Phone', 'Text at', 'Preview', 'Attorney', 'Paralegal', 'Quo line', 'Quo', 'Slack']
+        : ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Quo', 'Slack'];
   const lines = [header.join(' | '), header.map(() => '---').join(' | ')];
   for (const r of rows) {
-    const cells = kind === 'callback'
-      ? [
-          r.contact || '(unknown)',
-          r.phone || '',
-          r.missedAtLocal || '',
-          (r.callbackWhy || '').replace(/\|/g, '/'),
-          r.attorney || '',
-          r.paralegal || '',
-          r.line || '',
-          r.link ? `[open](${r.link})` : '',
-        ]
-      : [
-          r.contact || '(unknown)',
-          r.phone || '',
-          r.callbackRequested ? '📞 Yes' : '',
-          r.missedAtLocal || '',
-          r.reason || '',
-          r.attorney || '',
-          r.paralegal || '',
-          r.line || '',
-          r.link ? `[open](${r.link})` : '',
-        ];
+    const quo = r.link ? `[Quo](${r.link})` : '';
+    const slack = r.slackUrl
+      ? `[${r.slackLabel || 'Slack'}](${r.slackUrl})`
+      : r.slackLabel || '';
+    const cells =
+      kind === 'callback'
+        ? [
+            r.contact || '(unknown)',
+            r.phone || '',
+            r.missedAtLocal || '',
+            (r.callbackWhy || '').replace(/\|/g, '/'),
+            r.attorney || '',
+            r.paralegal || '',
+            r.line || '',
+            quo,
+            slack,
+          ]
+        : kind === 'sms'
+          ? [
+              r.contact || '(unknown)',
+              r.phone || '',
+              r.missedAtLocal || '',
+              (r.smsPreview || '').replace(/\|/g, '/'),
+              r.attorney || '',
+              r.paralegal || '',
+              r.line || '',
+              quo,
+              slack,
+            ]
+          : [
+              r.contact || '(unknown)',
+              r.phone || '',
+              r.callbackRequested ? '📞 Yes' : '',
+              r.missedAtLocal || '',
+              r.reason || '',
+              r.attorney || '',
+              r.paralegal || '',
+              r.line || '',
+              quo,
+              slack,
+            ];
     lines.push(cells.join(' | '));
   }
   return lines.join('\n');
 }
 
-/** HTML for the Missed Calls table (9 cols, includes the Callback? flag). */
+/** HTML for the Missed / Sona Calls table (includes Quo + Slack respond links). */
 function missedTableHtml(rows) {
-  if (!rows.length) return '<p class="empty">No missed client calls in the last 24 hours. Nice work!</p>';
+  if (!rows.length) return '<p class="empty">No missed / Sona client calls in the last 24 hours. Nice work!</p>';
   const headerRow =
-    '<tr><th>Client</th><th>Phone</th><th>Callback?</th><th>Missed at</th><th>Reason</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Link</th></tr>';
+    '<tr><th>Client</th><th>Phone</th><th>Callback?</th><th>Missed at</th><th>Reason</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Quo</th><th>Slack</th></tr>';
   const bodyRows = rows
     .map(
       (r) =>
@@ -3006,17 +3515,18 @@ function missedTableHtml(rows) {
         `<td>${escapeHtml(r.attorney || '')}</td>` +
         `<td>${escapeHtml(r.paralegal || '')}</td>` +
         `<td>${escapeHtml(r.line || '')}</td>` +
-        `<td>${r.link ? `<a href="${escapeHtml(r.link)}">open</a>` : ''}</td></tr>`
+        `<td>${respondQuoCellHtml(r)}</td>` +
+        `<td>${respondSlackCellHtml(r)}</td></tr>`
     )
     .join('');
   return `<table>${headerRow}${bodyRows}</table>`;
 }
 
-/** HTML for the Requested Call Backs table (no Callback?/Reason cols — all rows are callbacks). */
+/** HTML for the Requested Call Backs table. */
 function callbackTableHtml(rows) {
   if (!rows.length) return '<p class="empty">No outstanding callback requests. Nice work!</p>';
   const headerRow =
-    '<tr><th>Client</th><th>Phone</th><th>Requested at</th><th>Why</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Link</th></tr>';
+    '<tr><th>Client</th><th>Phone</th><th>Requested at</th><th>Why</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Quo</th><th>Slack</th></tr>';
   const bodyRows = rows
     .map(
       (r) =>
@@ -3027,13 +3537,36 @@ function callbackTableHtml(rows) {
         `<td>${escapeHtml(r.attorney || '')}</td>` +
         `<td>${escapeHtml(r.paralegal || '')}</td>` +
         `<td>${escapeHtml(r.line || '')}</td>` +
-        `<td>${r.link ? `<a href="${escapeHtml(r.link)}">open</a>` : ''}</td></tr>`
+        `<td>${respondQuoCellHtml(r)}</td>` +
+        `<td>${respondSlackCellHtml(r)}</td></tr>`
     )
     .join('');
   return `<table>${headerRow}${bodyRows}</table>`;
 }
 
-function buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows) {
+/** HTML for inbound texts that still need a staff response (call or text). */
+function smsNeedsResponseTableHtml(rows) {
+  if (!rows.length) return '<p class="empty">No client texts still needing a response. Nice work!</p>';
+  const headerRow =
+    '<tr><th>Client</th><th>Phone</th><th>Text at</th><th>Preview</th><th>Attorney</th><th>Paralegal</th><th>Quo line</th><th>Quo</th><th>Slack</th></tr>';
+  const bodyRows = rows
+    .map(
+      (r) =>
+        `<tr><td>${escapeHtml(r.contact || '(unknown)')}</td>` +
+        `<td>${escapeHtml(r.phone || '')}</td>` +
+        `<td>${escapeHtml(r.missedAtLocal || '')}</td>` +
+        `<td style="font-size:13px;color:#57606a">${escapeHtml(r.smsPreview || '')}</td>` +
+        `<td>${escapeHtml(r.attorney || '')}</td>` +
+        `<td>${escapeHtml(r.paralegal || '')}</td>` +
+        `<td>${escapeHtml(r.line || '')}</td>` +
+        `<td>${respondQuoCellHtml(r)}</td>` +
+        `<td>${respondSlackCellHtml(r)}</td></tr>`
+    )
+    .join('');
+  return `<table>${headerRow}${bodyRows}</table>`;
+}
+
+function buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows, smsRows = []) {
   const css = `
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; background: #ffffff; }
     h3 { margin: 26px 0 4px; }
@@ -3044,26 +3577,32 @@ function buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows) {
     .note { color: #57606a; font-size: 13px; margin-top: 6px; }
   `.trim();
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
-    <h2>Missed Client Call Report</h2>
+    <h2>Client Needs Response — New Today</h2>
     <p style="margin-top: 4px;"><strong>Window:</strong> ${escapeHtml(rangeLabel)}</p>
+    <p class="note">Only <strong>new</strong> items are emailed. The full open queue stays in Case Tracker → Needs response until staff send an outbound text, complete a returned call, or mark the row resolved.</p>
 
-    <h3>1) Missed Calls</h3>
+    <h3>1) Missed / Sona Calls</h3>
     ${missedTableHtml(missedRows)}
 
     <h3>2) Requested Call Backs</h3>
     ${callbackTableHtml(callbackRows)}
 
+    <h3>3) Texts Needing Response</h3>
+    ${smsNeedsResponseTableHtml(smsRows)}
+
     <div class="note" style="margin-top: 24px; border-top: 1px solid #d0d7de; padding-top: 12px;">
-      <p><strong>1) Missed Calls</strong> — client numbers whose most recent call in the window was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person. A number drops off as soon as its latest call is answered by a person or we dial out to them. A 📞 here means this client also asked us to call them back.</p>
-      <p><strong>2) Requested Call Backs</strong> — clients the firm owes a near-term return call: the client asked us to call them back, or a staff member promised to call them as the next step. Later "we'll reach out once we have more information" updates (check ready, police report, next steps, someone introducing themselves later) are not listed. (Clients who are also on the Missed Calls list appear there, flagged 📞, not here.) Each drops off once we've actually reached the client again.</p>
+      <p><strong>1) Missed / Sona Calls</strong> — client numbers whose most recent call in the window was a missed call, or a <strong>Sona/AI-handled call</strong> — even a "completed" one, since Sona only gathers info and the client still hasn't reached a person. A number drops off as soon as its latest call is answered by a person or we dial out to them. A 📞 here means this client also asked us to call them back.</p>
+      <p><strong>2) Requested Call Backs</strong> — clients the firm owes a near-term return call: the client asked us to call them back, or a staff member promised to call them as the next step. Later "we'll reach out once we have more information" updates are not listed. (Clients who are also on Missed / Sona appear there, flagged 📞, not here.) Each drops off once we've actually reached the client again.</p>
+      <p><strong>3) Texts Needing Response</strong> — inbound client texts an LLM judges as needing staff action (question, request, concern, update). Simple acknowledgements ("ok", "thanks") are skipped without the model. A later <em>connected human call</em> or outbound text clears them — we do not have to reply by text. Clients already listed above are not duplicated here.</p>
     </div>
   </body></html>`;
 }
 
 /**
- * Trailing 24h. Pulls all calls (including missed) from Quo, filters to
- * client contacts (CRM name ends in a case number), groups by phone, and
- * surfaces clients whose latest activity is an unreturned missed inbound.
+ * Trailing 24h Client Needs Response report.
+ * Pulls calls + SMS from Quo, filters to client contacts (CRM name ends in a
+ * case number), and surfaces clients the firm still owes a response:
+ * missed / Sona calls, firm-owed callbacks, and inbound texts needing action.
  */
 async function runMissedClientCallReport() {
   const { createdAfter, createdBefore } = getTrailing24HoursRange();
@@ -3072,18 +3611,18 @@ async function runMissedClientCallReport() {
   const rangeLabel = `${a.toFormat("LLL d, h:mm a")} – ${b.toFormat("LLL d, h:mm a")} ${TIMEZONE}`;
 
   console.log(`\n${'═'.repeat(52)}`);
-  console.log('  Missed Client Call Report (trailing 24h)');
+  console.log('  Client Needs Response Report (trailing 24h)');
   console.log(`  Window: ${rangeLabel}`);
   console.log('═'.repeat(52));
 
-  console.log('\n[1/3] Fetching Quo calls (all lines, all statuses, trailing 24h)...');
+  console.log('\n[1/4] Fetching Quo calls + texts (all lines, trailing 24h)...');
   const [{ callData }, contactMap] = await Promise.all([
     runExport({
       apiKey: firmCtx().quoApiKey,
       createdAfter,
       createdBefore,
       weeklyCommunications: true,
-      includeMessages: false,
+      includeMessages: true,
       // Pull transcripts so the LLM can decide whether the firm owes each client a
       // callback (the client asked us to call back, or we promised to). Missed /
       // no-answer calls simply have no transcript and fall to the heuristic below.
@@ -3117,7 +3656,10 @@ async function runMissedClientCallReport() {
     contactMap
   );
   const allCalls = mergedCalls.filter((r) => r.recordType === 'call' || !r.recordType);
-  console.log(`\n[2/3] ${allCalls.length} call(s) in window (will filter to clients next).`);
+  const allSms = (callData || []).filter((r) => r.recordType === 'sms');
+  console.log(
+    `\n[2/4] ${allCalls.length} call(s), ${allSms.length} text(s) in window (will filter to clients next).`
+  );
 
   /** @type {Map<string, { leadAttorney?: string, paralegal?: string }>} */
   let rosterMap = new Map();
@@ -3286,7 +3828,96 @@ async function runMissedClientCallReport() {
     console.log(`  Callback-required: ${marked} marked on existing missed rows, ${added} added, ${droppedReturned} already returned.`);
   }
 
-  // Callback-requested clients first, then oldest miss first within each group.
+  // Combined call + SMS timelines (also used to clear open Case Tracker rows).
+  /** @type {Map<string, object[]>} */
+  const byPhoneTouch = new Map();
+  for (const [key, group] of byPhone) byPhoneTouch.set(key, [...group]);
+
+  // Texts needing response — merge SMS into call timelines, skip clients already
+  // listed for missed/callback. Obvious acks skip the LLM; everything else is
+  // classified like call-back transcripts. A later connected call OR outbound
+  // text clears the Case Tracker item (reply does not have to be by text).
+  {
+    console.log('\n[3/4] Checking inbound client texts that still need a staff response...');
+    for (const m of allSms) {
+      if (m.phone && contactMap) {
+        m.contact = m.contact || lookupContactName(contactMap, m.phone) || m.contact;
+        m.contactId = m.contactId || lookupContactId(contactMap, m.phone) || m.contactId;
+      }
+      const key =
+        last10Digits(m.phone) ||
+        (m.contactId ? `cid:${m.contactId}` : null) ||
+        last10Digits(m.contact);
+      if (!key) continue;
+      if (!byPhoneTouch.has(key)) byPhoneTouch.set(key, []);
+      byPhoneTouch.get(key).push(m);
+    }
+    mergeCallGroupsByContactId(byPhoneTouch);
+
+    const outstandingKeys = new Set(outstanding.map((r) => r._groupKey).filter(Boolean));
+    /** @type {{ key: string, contact: string, anchor: object, sms: object, group: object[] }[]} */
+    const smsCandidates = [];
+    for (const [key, group] of byPhoneTouch) {
+      if (outstandingKeys.has(key)) continue;
+      const clientAnchor = group.find((c) => isClientContactName(c.contact));
+      if (!clientAnchor) continue;
+      const sms = findLatestUnclearedInboundSms(group);
+      if (!sms) continue;
+      smsCandidates.push({
+        key,
+        contact: clientAnchor.contact || sms.contact || '',
+        anchor: clientAnchor,
+        sms,
+        group,
+      });
+    }
+
+    const toClassify = smsCandidates.slice(0, SMS_MAX_CLASSIFY);
+    if (smsCandidates.length > toClassify.length) {
+      console.warn(
+        `  SMS check: ${smsCandidates.length} uncleared inbound texts, classifying first ${toClassify.length} (MISSED_SMS_MAX_CLASSIFY).`
+      );
+    } else {
+      console.log(`  SMS check: classifying ${toClassify.length} uncleared inbound text(s)...`);
+    }
+
+    let smsAdded = 0;
+    let smsSkipped = 0;
+    for (const cand of toClassify) {
+      const verdict = await classifySmsNeedsStaffResponse(cand.sms, cand.group);
+      if (!verdict.ok) {
+        smsSkipped += 1;
+        console.log(`    SMS skip — ${cand.contact}: ${verdict.reason || 'n/a'}`);
+        continue;
+      }
+      console.log(`    SMS needs response — ${cand.contact}: ${verdict.reason || 'n/a'}`);
+      const caseId = extractTrailingCaseDigitsFromClientKey(cand.contact);
+      const rosterHit = caseId ? rosterMap.get(caseId) : null;
+      let preview = String(cand.sms.body || '').replace(/\s+/g, ' ').trim();
+      if (preview.length > 160) preview = `${preview.slice(0, 157)}...`;
+      outstanding.push({
+        contact: cand.contact,
+        phone: cand.sms.phone || cand.anchor.phone || '',
+        missedAtLocal: formatMissedCallTime(cand.sms.timestamp),
+        missedAtIso: cand.sms.timestamp || '',
+        reason: 'Inbound text needs response',
+        attorney: rosterHit?.leadAttorney || '',
+        paralegal: rosterHit?.paralegal || '',
+        line: cand.sms.line || '',
+        link: cand.sms.link || cand.anchor.link || '',
+        smsPreview: preview,
+        callbackWhy: verdict.reason || '',
+        details: verdict.reason || '',
+        kind: 'sms',
+        _groupKey: cand.key,
+      });
+      smsAdded += 1;
+      outstandingKeys.add(cand.key);
+    }
+    console.log(`  Texts needing response: ${smsAdded} flagged, ${smsSkipped} skipped by classifier.`);
+  }
+
+  // Callback-requested clients first, then oldest first within each group.
   outstanding.sort((x, y) => {
     if (Boolean(y.callbackRequested) !== Boolean(x.callbackRequested)) {
       return y.callbackRequested ? 1 : -1;
@@ -3294,16 +3925,15 @@ async function runMissedClientCallReport() {
     return String(x.missedAtIso).localeCompare(String(y.missedAtIso));
   });
 
-  // Split into the two tables: missed calls first, requested call backs second.
-  // A client who is BOTH a missed call and owed a callback stays in Missed Calls
-  // (with the 📞 flag) — the callback table is only for clients who aren't missed.
-  const byTime = (x, y) => String(x.missedAtIso).localeCompare(String(y.missedAtIso));
-  const missedRows = outstanding.filter((r) => r.kind !== 'callback').sort(byTime);
-  const callbackRows = outstanding.filter((r) => r.kind === 'callback').sort(byTime);
-
-  console.log(`\n[3/3] Missed calls: ${missedRows.length} · Requested call backs: ${callbackRows.length}`);
+  console.log(`\n[4/4] Window detections: ${outstanding.length} (email will be new-to-Case-Tracker only)`);
   for (const r of outstanding) {
-    console.log(`  - [${r.kind}] ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}${r.callbackRequested ? '  [📞 CALLBACK REQUESTED]' : ''}`);
+    const extra =
+      r.kind === 'sms'
+        ? ` "${(r.smsPreview || '').slice(0, 80)}"`
+        : r.callbackRequested
+          ? '  [📞 CALLBACK REQUESTED]'
+          : '';
+    console.log(`  - [${r.kind}] ${r.contact} (${r.phone}) — ${r.reason} ${r.missedAtLocal}${extra}`);
     // Dump the full call sequence for this dial-in number so false-positives
     // are diagnosable from the Railway logs without re-running.
     const group = r._groupKey ? byPhone.get(r._groupKey) || [] : [];
@@ -3316,22 +3946,53 @@ async function runMissedClientCallReport() {
       const cid = c.contactId ? ` cid=${c.contactId}` : '';
       console.log(`      • ${t} ${dir} status=${status} dur=${dur}${ai}${cid} phone="${c.phone || ''}" line="${c.line || ''}"`);
     }
-    delete r._groupKey;
   }
 
+  /** @type {object[]} */
+  let emailRows = outstanding;
+  try {
+    const syncResult = await syncNeedsResponseToCaseTracker(outstanding, rangeLabel, byPhoneTouch);
+    emailRows = Array.isArray(syncResult?.emailNew) ? syncResult.emailNew : outstanding;
+  } catch (err) {
+    console.warn(`  Needs response Case Tracker sync failed: ${err.message}`);
+  }
+
+  for (const r of outstanding) delete r._groupKey;
+
+  try {
+    const slackMap = await fetchCaseTrackerSlackChannelMap();
+    attachSlackLinksToNeedsResponseRows(emailRows, slackMap);
+  } catch (err) {
+    console.warn(`  Slack channel link attach failed: ${err.message}`);
+  }
+
+  // Email = newly opened Case Tracker items only. Full open queue lives in Case Tracker.
+  const byTime = (x, y) => String(x.missedAtIso).localeCompare(String(y.missedAtIso));
+  const missedRows = emailRows.filter((r) => r.kind === 'missed').sort(byTime);
+  const callbackRows = emailRows.filter((r) => r.kind === 'callback').sort(byTime);
+  const smsRows = emailRows.filter((r) => r.kind === 'sms').sort(byTime);
+
+  console.log(
+    `  Email (new only): Missed/Sona ${missedRows.length} · Callbacks ${callbackRows.length} · Texts ${smsRows.length}`
+  );
+
   const subjectParts = [];
-  if (missedRows.length) subjectParts.push(`${missedRows.length} missed`);
+  if (missedRows.length) subjectParts.push(`${missedRows.length} missed/Sona`);
   if (callbackRows.length) subjectParts.push(`${callbackRows.length} callback${callbackRows.length === 1 ? '' : 's'}`);
+  if (smsRows.length) subjectParts.push(`${smsRows.length} text${smsRows.length === 1 ? '' : 's'}`);
   const subject = subjectParts.length
-    ? `${firmCtx().firmName} — Missed Client Call Report — ${subjectParts.join(', ')}`
-    : `${firmCtx().firmName} — Missed Client Call Report — all clear`;
-  const html = buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows);
+    ? `${firmCtx().firmName} — Client Needs Response (new) — ${subjectParts.join(', ')}`
+    : `${firmCtx().firmName} — Client Needs Response — no new items`;
+  const html = buildMissedClientCallEmailHtml(rangeLabel, missedRows, callbackRows, smsRows);
   const plainText =
-    `Missed Client Call Report\nWindow: ${rangeLabel}\n\n` +
-    `1) Missed Calls (${missedRows.length})\n` +
+    `Client Needs Response Report (new items only)\nWindow: ${rangeLabel}\n` +
+    `Full open queue: Case Tracker → Needs response\n\n` +
+    `1) Missed / Sona Calls (${missedRows.length})\n` +
     (missedRows.length ? `${buildMissedClientCallTable(missedRows, 'missed')}\n` : 'None.\n') +
     `\n2) Requested Call Backs (${callbackRows.length})\n` +
-    (callbackRows.length ? `${buildMissedClientCallTable(callbackRows, 'callback')}\n` : 'None.\n');
+    (callbackRows.length ? `${buildMissedClientCallTable(callbackRows, 'callback')}\n` : 'None.\n') +
+    `\n3) Texts Needing Response (${smsRows.length})\n` +
+    (smsRows.length ? `${buildMissedClientCallTable(smsRows, 'sms')}\n` : 'None.\n');
 
   const recipients = firmCtx().missedEmailTo;
   if (!recipients.length || !EMAIL_CONFIGURED) {
@@ -3339,12 +4000,12 @@ async function runMissedClientCallReport() {
     console.log(plainText);
   } else {
     await sendEmail({ htmlBody: html, plainText, subject, to: recipients });
-    console.log(`\n  Sent missed-client-call report to: ${recipients.join(', ')}`);
+    console.log(`\n  Sent client needs-response report to: ${recipients.join(', ')}`);
   }
 
   console.log(`\n${'═'.repeat(52)}`);
-  console.log('Missed Client Call Report complete.');
-  return { rangeLabel, outstandingCount: outstanding.length, outstanding };
+  console.log('Client Needs Response Report complete.');
+  return { rangeLabel, outstandingCount: outstanding.length, emailCount: emailRows.length, outstanding };
 }
 
 // ── Client Language Report (transcript-based EN/ES/both detection) ────────────
@@ -5732,7 +6393,15 @@ if (require.main === module) {
   let run = runDailyReport;
   if (arg === '--weekly' || arg === 'weekly') run = runWeeklyClientSentimentReport;
   if (arg === '--monthly' || arg === 'monthly') run = runMonthlyNewsletterInsightsReport;
-  if (arg === '--missed' || arg === 'missed') run = runMissedClientCallReport;
+  if (
+    arg === '--missed' ||
+    arg === 'missed' ||
+    arg === '--needs-response' ||
+    arg === 'needs-response' ||
+    arg === 'needs'
+  ) {
+    run = runMissedClientCallReport;
+  }
   if (arg === '--review' || arg === 'review') run = runReviewIntelligenceReport;
   if (arg === '--language' || arg === 'language') run = runClientLanguageReport;
   if (arg === '--marketing' || arg === 'marketing') run = runIntakeMarketingReport;
