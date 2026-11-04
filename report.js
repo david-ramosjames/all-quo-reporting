@@ -2246,6 +2246,7 @@ function buildNeedsResponseDbRow(r, rangeLabel, nowIso) {
     report_window_label: rangeLabel || null,
     attorney_name: r.attorney || null,
     paralegal_name: r.paralegal || null,
+    legal_assistant_name: r.legalAssistant || null,
     quo_line: r.line || null,
     evidence_url: r.link || null,
     details,
@@ -2472,6 +2473,75 @@ function caseTrackerRestConfig() {
       Accept: 'application/json',
     },
   };
+}
+
+/**
+ * Case number → legal assistant name from Case Tracker (DocketFlow assignment).
+ * Same rule as the Needs Response page: first assigned contact whose role is legal_assistant.
+ */
+async function fetchCaseTrackerLegalAssistantByCase() {
+  const cfg = caseTrackerRestConfig();
+  /** @type {Map<string, string>} */
+  const map = new Map();
+  if (!cfg) return map;
+
+  const assistants = new Map();
+  {
+    const response = await fetch(
+      `${cfg.baseUrl}/rest/v1/contacts?role=eq.legal_assistant&select=id,name`,
+      { headers: cfg.headers }
+    );
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 200);
+      throw new Error(`Legal assistant contacts failed (${response.status}): ${detail}`);
+    }
+    const rows = await response.json();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const id = String(row.id || '').trim();
+      const name = String(row.name || '').trim();
+      if (id && name) assistants.set(id, name);
+    }
+  }
+  if (!assistants.size) return map;
+
+  let from = 0;
+  for (;;) {
+    const response = await fetch(
+      `${cfg.baseUrl}/rest/v1/cases?select=case_number,assigned_contact_ids&order=case_number&offset=${from}&limit=1000`,
+      { headers: cfg.headers }
+    );
+    if (!response.ok) {
+      const detail = (await response.text()).slice(0, 200);
+      throw new Error(`Case assignments failed (${response.status}): ${detail}`);
+    }
+    const rows = await response.json();
+    if (!Array.isArray(rows) || !rows.length) break;
+    for (const row of rows) {
+      const ids = Array.isArray(row.assigned_contact_ids) ? row.assigned_contact_ids : [];
+      let name = '';
+      for (const id of ids) {
+        const hit = assistants.get(String(id || '').trim());
+        if (hit) {
+          name = hit;
+          break;
+        }
+      }
+      if (!name) continue;
+      const raw = String(row.case_number || '').trim();
+      const digits = (raw.match(/(\d+)$/) || [])[1] || '';
+      if (digits) map.set(digits, name);
+      const unpadded = digits.replace(/^0+(?=\d)/, '');
+      if (unpadded) map.set(unpadded, name);
+    }
+    if (rows.length < 1000) break;
+    from += rows.length;
+  }
+  return map;
+}
+
+function legalAssistantForCase(caseId, legalAssistantMap) {
+  if (!caseId || !legalAssistantMap?.size) return '';
+  return legalAssistantMap.get(String(caseId)) || '';
 }
 
 async function replaceWeeklyNegativeSentimentSnapshot(emailRollups, createdAfter, createdBefore, rangeLabel) {
@@ -3381,10 +3451,10 @@ Respond as JSON only: {"needs_staff_response": true or false, "reason": "<brief;
 function buildMissedClientCallTable(rows, kind = 'missed') {
   const header =
     kind === 'callback'
-      ? ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
+      ? ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Legal assistant', 'Quo line', 'Quo']
       : kind === 'sms'
-        ? ['Client', 'Phone', 'Text at', 'Preview', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
-        : ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Quo'];
+        ? ['Client', 'Phone', 'Text at', 'Preview', 'Attorney', 'Paralegal', 'Legal assistant', 'Quo line', 'Quo']
+        : ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Legal assistant', 'Quo line', 'Quo'];
   const lines = [header.join(' | '), header.map(() => '---').join(' | ')];
   for (const r of rows) {
     const quo = r.link ? `[Quo](${r.link})` : '';
@@ -3397,6 +3467,7 @@ function buildMissedClientCallTable(rows, kind = 'missed') {
             (r.callbackWhy || '').replace(/\|/g, '/'),
             r.attorney || '',
             r.paralegal || '',
+            r.legalAssistant || '',
             r.line || '',
             quo,
           ]
@@ -3408,6 +3479,7 @@ function buildMissedClientCallTable(rows, kind = 'missed') {
               (r.smsPreview || '').replace(/\|/g, '/'),
               r.attorney || '',
               r.paralegal || '',
+              r.legalAssistant || '',
               r.line || '',
               quo,
             ]
@@ -3419,6 +3491,7 @@ function buildMissedClientCallTable(rows, kind = 'missed') {
               r.reason || '',
               r.attorney || '',
               r.paralegal || '',
+              r.legalAssistant || '',
               r.line || '',
               quo,
             ];
@@ -3443,7 +3516,7 @@ function missedTableHtml(rows) {
   }
   const headerRow =
     '<tr style="background:#f9fafb">' +
-    ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
+    ['Client', 'Phone', 'Callback?', 'Missed at', 'Reason', 'Attorney', 'Paralegal', 'Legal assistant', 'Quo line', 'Quo']
       .map(
         (h) =>
           `<th style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085;border-bottom:1px solid #e4e7ec;text-align:left">${h}</th>`
@@ -3464,6 +3537,7 @@ function missedTableHtml(rows) {
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.reason || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.attorney || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.paralegal || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.legalAssistant || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.line || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7">${needsResponseQuoBtn(r)}</td>
       </tr>`;
@@ -3479,7 +3553,7 @@ function callbackTableHtml(rows) {
   }
   const headerRow =
     '<tr style="background:#f9fafb">' +
-    ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
+    ['Client', 'Phone', 'Requested at', 'Why', 'Attorney', 'Paralegal', 'Legal assistant', 'Quo line', 'Quo']
       .map(
         (h) =>
           `<th style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085;border-bottom:1px solid #e4e7ec;text-align:left">${h}</th>`
@@ -3495,6 +3569,7 @@ function callbackTableHtml(rows) {
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054;font-size:13px">${escapeHtml(r.callbackWhy || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.attorney || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.paralegal || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.legalAssistant || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.line || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7">${needsResponseQuoBtn(r)}</td>
       </tr>`
@@ -3510,7 +3585,7 @@ function smsNeedsResponseTableHtml(rows) {
   }
   const headerRow =
     '<tr style="background:#f9fafb">' +
-    ['Client', 'Phone', 'Text at', 'Preview', 'Attorney', 'Paralegal', 'Quo line', 'Quo']
+    ['Client', 'Phone', 'Text at', 'Preview', 'Attorney', 'Paralegal', 'Legal assistant', 'Quo line', 'Quo']
       .map(
         (h) =>
           `<th style="padding:10px 12px;font-size:11px;text-transform:uppercase;letter-spacing:0.04em;color:#667085;border-bottom:1px solid #e4e7ec;text-align:left">${h}</th>`
@@ -3526,6 +3601,7 @@ function smsNeedsResponseTableHtml(rows) {
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054;font-size:13px">${escapeHtml(r.smsPreview || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.attorney || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.paralegal || '')}</td>
+        <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.legalAssistant || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7;color:#344054">${escapeHtml(r.line || '')}</td>
         <td style="padding:10px 12px;border-bottom:1px solid #f2f4f7">${needsResponseQuoBtn(r)}</td>
       </tr>`
@@ -3687,6 +3763,15 @@ async function runMissedClientCallReport() {
     }
   }
 
+  /** @type {Map<string, string>} */
+  let legalAssistantMap = new Map();
+  try {
+    legalAssistantMap = await fetchCaseTrackerLegalAssistantByCase();
+    console.log(`  Legal assistants: ${legalAssistantMap.size} case assignment(s) from Case Tracker.`);
+  } catch (err) {
+    console.warn(`  Legal assistant lookup failed (report still sends without that column): ${err.message}`);
+  }
+
   // Group every call by the external DIAL-IN number (caller's phone, last 10
   // digits) — regardless of which internal Quo line handled it. We fetch all
   // lines (phoneNumbersFilter: []), so a number's complete activity (misses,
@@ -3746,6 +3831,7 @@ async function runMissedClientCallReport() {
       reason: classifyMissedReason(lastCall),
       attorney: rosterHit?.leadAttorney || '',
       paralegal: rosterHit?.paralegal || '',
+      legalAssistant: legalAssistantForCase(caseId, legalAssistantMap),
       line: lastCall.line || '',
       link: lastCall.link || '',
       kind: 'missed',
@@ -3817,6 +3903,7 @@ async function runMissedClientCallReport() {
         reason: 'Callback requested',
         attorney: rosterHit?.leadAttorney || '',
         paralegal: rosterHit?.paralegal || '',
+        legalAssistant: legalAssistantForCase(caseId, legalAssistantMap),
         line: cand.convCall.line || '',
         link: cand.convCall.link || cand.anchor.link || '',
         callbackRequested: true,
@@ -3904,6 +3991,7 @@ async function runMissedClientCallReport() {
         reason: 'Inbound text needs response',
         attorney: rosterHit?.leadAttorney || '',
         paralegal: rosterHit?.paralegal || '',
+        legalAssistant: legalAssistantForCase(caseId, legalAssistantMap),
         line: cand.sms.line || '',
         link: cand.sms.link || cand.anchor.link || '',
         smsPreview: preview,
