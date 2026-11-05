@@ -56,7 +56,7 @@ const JOBS = [
     name: 'Client Needs Response Report',
     when: () => cronPhrase(sched('MISSED_CLIENT_CALLS_CRON', '0 7 * * *')),
     what:
-      'Morning chase list of clients the firm still owes a response: missed / Sona calls, firm-owed callbacks, and inbound texts that need staff action. Email is new items only; Case Tracker keeps the full open queue until an outbound text, a connected return call (2-minute rule), or someone marks Resolved.',
+      'Morning chase list of clients the firm still owes a response: missed / Sona calls, firm-owed callbacks, and inbound texts that need staff action. Email is new items only. Case Tracker keeps the full open queue until an outbound text, a connected return call (2-minute rule), or someone marks Resolved. Open items also clear live when Quo reports that text or call, with a backstop sweep at 10:00, noon, 2:00, and 4:00.',
     out: 'Email (new) + Case Tracker (open queue)',
   },
   {

@@ -221,6 +221,41 @@ async function persistEvent(evt) {
   return { stored: false, reason: `ignored ${evt.type}` };
 }
 
+/** One activity that might close an open needs-response row. Inbound texts and missed calls do not. */
+function staffResponseTouch(evt, result) {
+  if (!result?.stored) return null;
+  if (result.kind === 'message') {
+    if (evt?.type === 'message.received') return null;
+    const r = evt?.resource || {};
+    const direction = String(r.direction || '');
+    if (/^(incoming|inbound)$/i.test(direction)) return null;
+    const phone = String(r.to || r.from || '').trim();
+    if (!phone) return null;
+    return {
+      recordType: 'sms',
+      timestamp: r.createdAt || new Date().toISOString(),
+      direction: direction || 'outgoing',
+      phone,
+    };
+  }
+  if (result.kind === 'call') {
+    const row = mapCallRow(evt);
+    const inbound = /^(incoming|inbound)$/i.test(String(row.direction || ''));
+    const parts = row.participants || {};
+    const phone = String((inbound ? parts.from : parts.to) || '').trim();
+    if (!phone) return null;
+    return {
+      recordType: 'call',
+      timestamp: row.completed_at || row.answered_at || row.created_at || new Date().toISOString(),
+      direction: row.direction || '',
+      status: row.status || '',
+      aiHandled: row.ai_handled ? 'ai-agent' : null,
+      phone,
+    };
+  }
+  return null;
+}
+
 async function handleRawDelivery(rawBody, headers) {
   if (!pg.isEnabled()) {
     return { status: 503, body: { error: 'DATABASE_URL is not set — webhook ledger needs Railway Postgres' } };
@@ -248,6 +283,16 @@ async function handleRawDelivery(rawBody, headers) {
       `[quo webhook] ${evt.type} ${result.kind === 'call' ? result.callId : result.messageId}` +
         (result.status ? ` ${result.status}` : '')
     );
+    const touch = staffResponseTouch(evt, result);
+    if (touch) {
+      try {
+        const { clearNeedsResponseForTouch } = require('./report');
+        const cleared = await clearNeedsResponseForTouch(touch);
+        if (cleared) console.log(`[quo webhook] cleared ${cleared} open needs-response item(s)`);
+      } catch (err) {
+        console.warn(`[quo webhook] needs-response clear skipped: ${err.message}`);
+      }
+    }
   } else if (result.reason && !String(result.reason).startsWith('ignored')) {
     console.warn(`[quo webhook] ${result.reason}`);
   }

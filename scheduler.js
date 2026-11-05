@@ -6,6 +6,7 @@ const {
   runWeeklyClientSentimentReport,
   runMonthlyNewsletterInsightsReport,
   runMissedClientCallReport,
+  runNeedsResponseClearSweep,
   runReviewIntelligenceReport,
   runClientLanguageReport,
   runIntakeMarketingReport,
@@ -24,6 +25,8 @@ const WEEKLY_SENTIMENT_CRON = process.env.WEEKLY_SENTIMENT_CRON || '0 20 * * 5';
 const MONTHLY_INSIGHTS_CRON = process.env.MONTHLY_INSIGHTS_CRON || '0 1 1 * *';
 // Missed Client Call Report: trailing 24h — clients who haven't been called back yet (default: 7:00 AM local).
 const MISSED_CLIENT_CALLS_CRON = process.env.MISSED_CLIENT_CALLS_CRON || '0 7 * * *';
+// Backstop clear of open needs-response rows. Live clear also runs on Quo webhooks.
+const NEEDS_RESPONSE_CLEAR_CRON = process.env.NEEDS_RESPONSE_CLEAR_CRON || '0 10,12,14,16 * * *';
 // Review Intelligence: trailing 24h — daily Google-review candidates (default: 6:00 PM local).
 const REVIEW_INTELLIGENCE_CRON = process.env.REVIEW_INTELLIGENCE_CRON || '0 18 * * *';
 // Call stats: three sends (morning = prior day; midday + afternoon = today so far).
@@ -47,6 +50,7 @@ console.log(`  Daily lead + CSV : ${SCHEDULE}`);
 console.log(`  Weekly sentiment : ${WEEKLY_SENTIMENT_CRON}`);
 console.log(`  Monthly newsletter : ${MONTHLY_INSIGHTS_CRON}`);
 console.log(`  Needs response      : ${MISSED_CLIENT_CALLS_CRON}`);
+console.log(`  Needs response clear: ${NEEDS_RESPONSE_CLEAR_CRON} (webhooks clear live)`);
 console.log(`  Review intelligence : ${REVIEW_INTELLIGENCE_CRON}`);
 console.log(`  Call stats sends : ${callStatsDefaultsLabel()} (per-firm lists/times override)`);
 console.log(`  Intake grading   : 6:00 PM (per-firm list/time override)`);
@@ -71,6 +75,11 @@ if (!cron.validate(MONTHLY_INSIGHTS_CRON)) {
 
 if (!cron.validate(MISSED_CLIENT_CALLS_CRON)) {
   console.error(`Invalid MISSED_CLIENT_CALLS_CRON: "${MISSED_CLIENT_CALLS_CRON}"`);
+  process.exit(1);
+}
+
+if (!cron.validate(NEEDS_RESPONSE_CLEAR_CRON)) {
+  console.error(`Invalid NEEDS_RESPONSE_CLEAR_CRON: "${NEEDS_RESPONSE_CLEAR_CRON}"`);
   process.exit(1);
 }
 
@@ -130,6 +139,20 @@ cron.schedule(
       await runForAllFirms(runMissedClientCallReport);
     } catch (err) {
       console.error(`[${ts}] Client needs-response report failed:`, err.message);
+    }
+  },
+  { timezone: TIMEZONE }
+);
+
+cron.schedule(
+  NEEDS_RESPONSE_CLEAR_CRON,
+  async () => {
+    const ts = new Date().toLocaleString('en-US', { timeZone: TIMEZONE, timeZoneName: 'short' });
+    console.log(`\n[${ts}] Cron triggered — needs-response clear sweep (open items only)...`);
+    try {
+      await runNeedsResponseClearSweep();
+    } catch (err) {
+      console.error(`[${ts}] Needs-response clear sweep failed:`, err.message);
     }
   },
   { timezone: TIMEZONE }
@@ -297,6 +320,7 @@ for (const [label, expr] of [
   ['Weekly sentiment', WEEKLY_SENTIMENT_CRON],
   ['Monthly newsletter', MONTHLY_INSIGHTS_CRON],
   ['Client needs response', MISSED_CLIENT_CALLS_CRON],
+  ['Needs response clear', NEEDS_RESPONSE_CLEAR_CRON],
   ['Review intelligence', REVIEW_INTELLIGENCE_CRON],
 ]) {
   const n = nextRun(expr, TIMEZONE);

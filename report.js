@@ -2258,128 +2258,142 @@ function buildNeedsResponseDbRow(r, rangeLabel, nowIso) {
   };
 }
 
-/**
- * Sync Client Needs Response into Case Tracker.
- * - Keeps open rows until outbound text, connected return call (2-min rule), or manual close.
- * - Does NOT clear just because an item aged out of the trailing-24h email window.
- * - Returns only newly opened rows for the morning email.
- */
-async function syncNeedsResponseToCaseTracker(outstanding, rangeLabel, byPhoneTouch = new Map()) {
-  const baseUrl = (
-    process.env.CASE_TRACKER_SUPABASE_URL ||
-    process.env.SUPABASE_URL ||
-    ''
-  )
-    .trim()
-    .replace(/\/$/, '');
-  const serviceKey = (
-    process.env.CASE_TRACKER_SUPABASE_SECRET_KEY ||
-    process.env.SUPABASE_SECRET_KEY ||
-    process.env.CASE_TRACKER_SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    ''
-  ).trim();
-  if (!baseUrl || !serviceKey) {
-    console.warn(
-      '  Needs response: skipped Case Tracker sync (set CASE_TRACKER_SUPABASE_URL and CASE_TRACKER_SUPABASE_SECRET_KEY).'
-    );
-    return { emailNew: outstanding || [], inserted: 0, autoResolved: 0 };
-  }
-
-  const now = new Date().toISOString();
-  const headers = {
-    apikey: serviceKey,
-    Authorization: `Bearer ${serviceKey}`,
-    'Content-Type': 'application/json',
-    Accept: 'application/json',
+function caseTrackerWriteConfig() {
+  const cfg = caseTrackerRestConfig();
+  if (!cfg) return null;
+  return {
+    ...cfg,
+    headers: { ...cfg.headers, 'Content-Type': 'application/json' },
   };
+}
 
+/** @returns {Promise<{ id: string, event_key: string, phone: string|null, detected_at: string }[]>} */
+async function listOpenNeedsResponseRows(cfg) {
   /** @type {{ id: string, event_key: string, phone: string|null, detected_at: string }[]} */
   const openRows = [];
-  {
-    let from = 0;
-    for (;;) {
-      const openRes = await fetch(
-        `${baseUrl}/rest/v1/case_needs_response?status=eq.open&select=id,event_key,phone,detected_at&order=detected_at&offset=${from}&limit=1000`,
-        { headers }
-      );
-      if (!openRes.ok) {
-        const detail = (await openRes.text()).slice(0, 200);
-        throw new Error(`Needs-response open list failed (${openRes.status}): ${detail}`);
-      }
-      const page = await openRes.json();
-      if (!Array.isArray(page) || !page.length) break;
-      for (const row of page) openRows.push(row);
-      if (page.length < 1000) break;
-      from += page.length;
+  let from = 0;
+  for (;;) {
+    const openRes = await fetch(
+      `${cfg.baseUrl}/rest/v1/case_needs_response?status=eq.open&select=id,event_key,phone,detected_at&order=detected_at&offset=${from}&limit=1000`,
+      { headers: cfg.headers }
+    );
+    if (!openRes.ok) {
+      const detail = (await openRes.text()).slice(0, 200);
+      throw new Error(`Needs-response open list failed (${openRes.status}): ${detail}`);
     }
+    const page = await openRes.json();
+    if (!Array.isArray(page) || !page.length) break;
+    for (const row of page) openRows.push(row);
+    if (page.length < 1000) break;
+    from += page.length;
   }
+  return openRows;
+}
 
-  // Expand clearance map with ledger history back to the oldest open item so
-  // responses that fall outside the trailing-24h detection window still clear.
+/**
+ * Touches that can clear an open item, keyed by phone last-10.
+ * Starts from the morning window, then adds the Quo ledger back to the oldest open row.
+ */
+async function clearanceMapForOpenRows(openRows, byPhoneTouch, nowIso) {
   /** @type {Map<string, object[]>} */
   const clearanceMap = new Map();
   for (const [key, group] of byPhoneTouch || []) clearanceMap.set(key, [...(group || [])]);
-  if (openRows.length && pg.isEnabled()) {
-    try {
-      const oldestMs = openRows
-        .map((row) => new Date(row.detected_at).getTime())
-        .filter((ms) => Number.isFinite(ms));
-      if (oldestMs.length) {
-        const oldestIso = new Date(Math.min(...oldestMs)).toISOString();
-        await pg.ensureSchema();
-        const [ledgerCalls, ledgerMsgs] = await Promise.all([
-          pg.listQuoCallsInWindow(oldestIso, now),
-          pg.listQuoMessagesInWindow(oldestIso, now),
-        ]);
-        for (const row of ledgerCalls) {
-          const parts = row.participants && typeof row.participants === 'object' ? row.participants : {};
-          const externals = Array.isArray(parts.external) ? parts.external : [];
-          const inbound = isIncomingDirection(row.direction);
-          const phone = String(
-            inbound ? parts.from || externals[0] || '' : parts.to || externals[0] || ''
-          ).trim();
-          const key = last10Digits(phone);
-          if (!key) continue;
-          if (!clearanceMap.has(key)) clearanceMap.set(key, []);
-          clearanceMap.get(key).push({
-            recordType: 'call',
-            timestamp:
-              isoTs(row.completed_at) || isoTs(row.answered_at) || isoTs(row.created_at) || '',
-            direction: row.direction || '',
-            status: row.status || '',
-            aiHandled: row.ai_handled ? 'ai-agent' : null,
-            phone,
-          });
-        }
-        for (const row of ledgerMsgs) {
-          const payload = row.payload_json && typeof row.payload_json === 'object' ? row.payload_json : {};
-          const data = payload.data && typeof payload.data === 'object' ? payload.data : {};
-          const resource = data.resource || data.object || payload.object || {};
-          const from = String(resource.from || '').trim();
-          const to = String(resource.to || '').trim();
-          const inbound = isIncomingDirection(row.direction);
-          const phone = inbound ? from || to : to || from;
-          const key = last10Digits(phone);
-          if (!key) continue;
-          if (!clearanceMap.has(key)) clearanceMap.set(key, []);
-          clearanceMap.get(key).push({
-            recordType: 'sms',
-            timestamp: isoTs(row.created_at) || '',
-            direction: row.direction || '',
-            phone,
-            body: String(resource.text || resource.body || resource.message || '').trim(),
-          });
-        }
-        console.log(
-          `  Needs response clearance: ledger ${ledgerCalls.length} call(s), ${ledgerMsgs.length} text(s) since oldest open.`
-        );
+  if (!openRows.length || !pg.isEnabled()) return clearanceMap;
+  try {
+    const oldestMs = openRows
+      .map((row) => new Date(row.detected_at).getTime())
+      .filter((ms) => Number.isFinite(ms));
+    if (!oldestMs.length) return clearanceMap;
+    const oldestIso = new Date(Math.min(...oldestMs)).toISOString();
+    await pg.ensureSchema();
+    const [ledgerCalls, ledgerMsgs] = await Promise.all([
+      pg.listQuoCallsInWindow(oldestIso, nowIso),
+      pg.listQuoMessagesInWindow(oldestIso, nowIso),
+    ]);
+    for (const row of ledgerCalls) {
+      const parts = row.participants && typeof row.participants === 'object' ? row.participants : {};
+      const externals = Array.isArray(parts.external) ? parts.external : [];
+      const inbound = isIncomingDirection(row.direction);
+      const phone = String(
+        inbound ? parts.from || externals[0] || '' : parts.to || externals[0] || ''
+      ).trim();
+      const key = last10Digits(phone);
+      if (!key) continue;
+      if (!clearanceMap.has(key)) clearanceMap.set(key, []);
+      clearanceMap.get(key).push({
+        recordType: 'call',
+        timestamp:
+          isoTs(row.completed_at) || isoTs(row.answered_at) || isoTs(row.created_at) || '',
+        direction: row.direction || '',
+        status: row.status || '',
+        aiHandled: row.ai_handled ? 'ai-agent' : null,
+        phone,
+      });
+    }
+    for (const row of ledgerMsgs) {
+      const payload = row.payload_json && typeof row.payload_json === 'object' ? row.payload_json : {};
+      const data = payload.data && typeof payload.data === 'object' ? payload.data : {};
+      const resource = data.resource || data.object || payload.object || {};
+      const from = String(resource.from || '').trim();
+      const to = String(resource.to || '').trim();
+      const inbound = isIncomingDirection(row.direction);
+      const phone = inbound ? from || to : to || from;
+      const key = last10Digits(phone);
+      if (!key) continue;
+      if (!clearanceMap.has(key)) clearanceMap.set(key, []);
+      clearanceMap.get(key).push({
+        recordType: 'sms',
+        timestamp: isoTs(row.created_at) || '',
+        direction: row.direction || '',
+        phone,
+        body: String(resource.text || resource.body || resource.message || '').trim(),
+      });
+    }
+    console.log(
+      `  Needs response clearance: ledger ${ledgerCalls.length} call(s), ${ledgerMsgs.length} text(s) since oldest open.`
+    );
+  } catch (err) {
+    console.warn(`  Needs response clearance ledger expand skipped: ${err.message}`);
+  }
+  return clearanceMap;
+}
+
+async function patchNeedsResponseResolved(cfg, ids, nowIso) {
+  for (let index = 0; index < ids.length; index += 50) {
+    const chunk = ids.slice(index, index + 50);
+    const patch = await fetch(
+      `${cfg.baseUrl}/rest/v1/case_needs_response?status=eq.open&id=in.(${chunk.map(encodeURIComponent).join(',')})`,
+      {
+        method: 'PATCH',
+        headers: { ...cfg.headers, Prefer: 'return=minimal' },
+        body: JSON.stringify({
+          status: 'resolved',
+          resolved_at: nowIso,
+          resolved_by: 'auto:responded',
+          updated_at: nowIso,
+        }),
       }
-    } catch (err) {
-      console.warn(`  Needs response clearance ledger expand skipped: ${err.message}`);
+    );
+    if (!patch.ok) {
+      const detail = (await patch.text()).slice(0, 200);
+      console.warn(`  Needs response: auto-responded patch failed (${patch.status}): ${detail}`);
     }
   }
+}
 
+/**
+ * Mark open needs-response rows resolved when the ledger (plus any extra touches)
+ * shows an outbound text or a connected human call after the item was detected.
+ * Does not add new rows and does not send email.
+ */
+async function resolveRespondedNeedsResponse(byPhoneTouch = new Map()) {
+  const cfg = caseTrackerWriteConfig();
+  const now = new Date().toISOString();
+  if (!cfg) {
+    return { skipped: true, resolveIds: [], openByKey: new Map(), now, cfg: null };
+  }
+  const openRows = await listOpenNeedsResponseRows(cfg);
+  const clearanceMap = await clearanceMapForOpenRows(openRows, byPhoneTouch, now);
   const openByKey = new Map(openRows.map((row) => [String(row.event_key), row]));
   const resolveIds = [];
   for (const row of openRows) {
@@ -2390,30 +2404,77 @@ async function syncNeedsResponseToCaseTracker(outstanding, rangeLabel, byPhoneTo
     resolveIds.push(row.id);
     openByKey.delete(String(row.event_key));
   }
-  for (let index = 0; index < resolveIds.length; index += 50) {
-    const chunk = resolveIds.slice(index, index + 50);
-    const patch = await fetch(
-      `${baseUrl}/rest/v1/case_needs_response?id=in.(${chunk.map(encodeURIComponent).join(',')})`,
-      {
-        method: 'PATCH',
-        headers: { ...headers, Prefer: 'return=minimal' },
-        body: JSON.stringify({
-          status: 'resolved',
-          resolved_at: now,
-          resolved_by: 'auto:responded',
-          updated_at: now,
-        }),
-      }
-    );
-    if (!patch.ok) {
-      const detail = (await patch.text()).slice(0, 200);
-      console.warn(`  Needs response: auto-responded patch failed (${patch.status}): ${detail}`);
-    }
-  }
   if (resolveIds.length) {
+    await patchNeedsResponseResolved(cfg, resolveIds, now);
     console.log(`  Needs response: auto-resolved ${resolveIds.length} after outbound text / returned call.`);
   }
+  return { skipped: false, resolveIds, openByKey, now, cfg };
+}
 
+/**
+ * Live clear for one Quo webhook: outbound text, or a connected human call.
+ * Same rules as the sweep (outbound SMS any time after detected_at; call needs the 2-minute grace).
+ */
+async function clearNeedsResponseForTouch(touch) {
+  if (!touch?.phone || !touch?.timestamp) return 0;
+  if (touch.recordType === 'sms') {
+    if (isIncomingDirection(touch.direction)) return 0;
+  } else if (touch.recordType === 'call') {
+    if (!isConnectedHumanCall(touch)) return 0;
+  } else {
+    return 0;
+  }
+  const phoneKey = last10Digits(touch.phone);
+  if (!phoneKey) return 0;
+  const cfg = caseTrackerWriteConfig();
+  if (!cfg) return 0;
+  const openRows = await listOpenNeedsResponseRows(cfg);
+  const now = new Date().toISOString();
+  const resolveIds = [];
+  for (const row of openRows) {
+    const rowKey = phoneKeyFromNeedsEventKey(row.event_key) || last10Digits(row.phone) || '';
+    if (rowKey !== phoneKey) continue;
+    if (!hasStaffResponseSince([touch], row.detected_at)) continue;
+    resolveIds.push(row.id);
+  }
+  if (!resolveIds.length) return 0;
+  await patchNeedsResponseResolved(cfg, resolveIds, now);
+  console.log(`  Needs response: live-cleared ${resolveIds.length} for ${phoneKey}.`);
+  return resolveIds.length;
+}
+
+/** Daytime backstop: open queue vs ledger only. No LLM, no new items, no email. */
+async function runNeedsResponseClearSweep() {
+  console.log('Needs response clear sweep — open items vs call/text activity.');
+  const result = await resolveRespondedNeedsResponse(new Map());
+  if (result.skipped) {
+    console.warn(
+      '  Needs response clear sweep skipped (set CASE_TRACKER_SUPABASE_URL and CASE_TRACKER_SUPABASE_SECRET_KEY).'
+    );
+    return result;
+  }
+  console.log(
+    `  Needs response clear sweep done: auto-resolved ${result.resolveIds.length}, still open ${result.openByKey.size}.`
+  );
+  return result;
+}
+
+/**
+ * Sync Client Needs Response into Case Tracker.
+ * - Keeps open rows until outbound text, connected return call (2-min rule), or manual close.
+ * - Does NOT clear just because an item aged out of the trailing-24h email window.
+ * - Returns only newly opened rows for the morning email.
+ */
+async function syncNeedsResponseToCaseTracker(outstanding, rangeLabel, byPhoneTouch = new Map()) {
+  const cleared = await resolveRespondedNeedsResponse(byPhoneTouch);
+  if (cleared.skipped || !cleared.cfg) {
+    console.warn(
+      '  Needs response: skipped Case Tracker sync (set CASE_TRACKER_SUPABASE_URL and CASE_TRACKER_SUPABASE_SECRET_KEY).'
+    );
+    return { emailNew: outstanding || [], inserted: 0, autoResolved: 0 };
+  }
+
+  const { now, cfg, openByKey, resolveIds } = cleared;
   /** @type {object[]} */
   const emailNew = [];
   /** @type {object[]} */
@@ -2428,10 +2489,10 @@ async function syncNeedsResponseToCaseTracker(outstanding, rangeLabel, byPhoneTo
 
   for (let index = 0; index < upserts.length; index += 200) {
     const chunk = upserts.slice(index, index + 200);
-    const response = await fetch(`${baseUrl}/rest/v1/case_needs_response?on_conflict=event_key`, {
+    const response = await fetch(`${cfg.baseUrl}/rest/v1/case_needs_response?on_conflict=event_key`, {
       method: 'POST',
       headers: {
-        ...headers,
+        ...cfg.headers,
         Prefer: 'resolution=merge-duplicates,return=minimal',
       },
       body: JSON.stringify(chunk),
@@ -6490,17 +6551,24 @@ if (require.main === module) {
   if (arg === '--marketing' || arg === 'marketing') run = runIntakeMarketingReport;
   if (arg === '--callstats' || arg === 'callstats') run = runDailyCallStatsReport;
   if (arg === '--intake-grading' || arg === 'intake-grading' || arg === 'grading') run = runIntakeGradingReport;
-  // Optional: `node report.js daily --firm <id>` scopes to one firm; otherwise all active firms.
-  const firmFlag = process.argv.indexOf('--firm');
-  const firmId = firmFlag !== -1 ? process.argv[firmFlag + 1] : undefined;
-  const slotFlag = process.argv.indexOf('--slot');
-  const slotFromFlag = slotFlag !== -1 ? process.argv[slotFlag + 1] : undefined;
-  const slotFromPos = ['morning', 'midday', 'afternoon'].includes(process.argv[3]) ? process.argv[3] : undefined;
-  const slot = slotFromFlag || slotFromPos;
-  runForAllFirms(run, { ...(firmId ? { firmId } : {}), ...(slot ? { slot } : {}) }).catch((err) => {
-    console.error('\nError:', err.response?.data || err.message);
-    process.exit(1);
-  });
+  if (arg === '--clear-needs' || arg === 'clear-needs') {
+    runNeedsResponseClearSweep().catch((err) => {
+      console.error('\nError:', err.response?.data || err.message);
+      process.exit(1);
+    });
+  } else {
+    // Optional: `node report.js daily --firm <id>` scopes to one firm; otherwise all active firms.
+    const firmFlag = process.argv.indexOf('--firm');
+    const firmId = firmFlag !== -1 ? process.argv[firmFlag + 1] : undefined;
+    const slotFlag = process.argv.indexOf('--slot');
+    const slotFromFlag = slotFlag !== -1 ? process.argv[slotFlag + 1] : undefined;
+    const slotFromPos = ['morning', 'midday', 'afternoon'].includes(process.argv[3]) ? process.argv[3] : undefined;
+    const slot = slotFromFlag || slotFromPos;
+    runForAllFirms(run, { ...(firmId ? { firmId } : {}), ...(slot ? { slot } : {}) }).catch((err) => {
+      console.error('\nError:', err.response?.data || err.message);
+      process.exit(1);
+    });
+  }
 }
 
 module.exports = {
@@ -6508,6 +6576,8 @@ module.exports = {
   runWeeklyClientSentimentReport,
   runMonthlyNewsletterInsightsReport,
   runMissedClientCallReport,
+  runNeedsResponseClearSweep,
+  clearNeedsResponseForTouch,
   runReviewIntelligenceReport,
   runClientLanguageReport,
   runIntakeMarketingReport,

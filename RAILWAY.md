@@ -35,7 +35,8 @@ In the service → **Variables**, add every key from your local `.env` (copy fro
 | `CRON_SCHEDULE`            | `0 7 * * *`       | Daily — **07:00** each day (intake & lead report + yesterday CSV) |
 | `WEEKLY_SENTIMENT_CRON`    | `0 20 * * 5`      | Weekly — **20:00 Fridays** (`5` = Friday; 7-day sentiment) |
 | `MONTHLY_INSIGHTS_CRON`    | `0 1 1 * *`       | Monthly — **01:00 on day 1** (30-day newsletter theme email) |
-| `MISSED_CLIENT_CALLS_CRON` | `0 7 * * *`       | Daily — **07:00** (unreturned missed client calls email)   |
+| `MISSED_CLIENT_CALLS_CRON` | `0 7 * * *`       | Daily — **07:00** (client needs-response email; also clears answered items) |
+| `NEEDS_RESPONSE_CLEAR_CRON` | `0 10,12,14,16 * * *` | Backstop clear of open needs-response rows (10:00, noon, 2:00, 4:00). Live clear also runs on Quo webhooks. |
 | `REVIEW_INTELLIGENCE_CRON` | `0 18 * * *`      | Daily — **18:00** (Google-review candidates → Slack)       |
 | `REVIEW_SLACK_CHANNEL`     | `review-opportunities` | Slack channel for the daily review report (bot must be a member) |
 | `GOOGLE_REVIEW_OPPORTUNITIES_SHEET_ID` | (sheet id) | Backend `review_opportunities` table tab (optional; Slack still posts without it) |
