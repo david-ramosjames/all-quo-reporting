@@ -56,7 +56,7 @@ const JOBS = [
     name: 'Client Needs Response Report',
     when: () => cronPhrase(sched('MISSED_CLIENT_CALLS_CRON', '0 7 * * *')),
     what:
-      'Morning chase list of clients the firm still owes a response: missed / Sona calls, firm-owed callbacks, and inbound texts that need staff action. Email is new items only. Case Tracker keeps the full open queue until an outbound text, a connected return call (2-minute rule), or someone marks Resolved. Open items also clear live when Quo reports that text or call, with a backstop sweep at 10:00, noon, 2:00, and 4:00.',
+      'Morning chase list of clients the firm still owes a response: missed / Sona calls, firm-owed callbacks, and inbound texts that need staff action. Email is new items only. Case Tracker keeps the full open queue until an outbound text, a connected return call (2-minute rule), or someone marks Resolved. A connected call to another contact on the same case number counts as that return. Open items also clear live when Quo reports that text or call, with a backstop sweep at 10:00, noon, 2:00, and 4:00.',
     out: 'Email (new) + Case Tracker (open queue)',
   },
   {
@@ -91,7 +91,7 @@ const FAQ = [
   },
   {
     q: 'Where do Yesterday Call Stats get their numbers?',
-    a: 'Quo POSTs each <code>call.completed</code> (and sent texts) to <code>/webhooks/quo</code>. Answered vs missed vs forwarded is read from the payload (<code>answeredAt</code>, <code>forwardedTo</code>), not from separate event types — the current Quo webhook UI only offers <code>call.completed</code>. Those events are stored in Railway Postgres (<code>quo_calls</code>, <code>quo_messages</code>) so the email can count one real customer event instead of paging the public list-calls API, which drops auto-forward and transfer legs. History from before the webhook was turned on is not backfilled.',
+    a: 'Quo POSTs each <code>call.completed</code> (and sent texts) to <code>/webhooks/quo</code>. Answered vs missed vs forwarded is read from the payload (<code>answeredAt</code>, <code>forwardedTo</code>), not from separate event types — the current Quo webhook UI only offers <code>call.completed</code>. Those events are stored in Railway Postgres (<code>quo_calls</code>, <code>quo_messages</code>) so the email can count one real customer event instead of paging the public list-calls API, which drops auto-forward and transfer legs. History from before the webhook was turned on can be hydrated with <code>node backfillLedger.js</code> (default floor July 1, 2026 Central).',
   },
   {
     q: 'How does Review Intelligence decide who to recommend?',

@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@slack/web-api": "^7.15.0",
+    "@supabase/supabase-js": "^2.119.0",
     "axios": "^1.7.9",
     "dotenv": "^16.4.7",
     "googleapis": "^171.4.0",

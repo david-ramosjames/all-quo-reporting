@@ -96,6 +96,12 @@ const TIMEZONE        = process.env.TIMEZONE || 'America/Chicago';
 const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN;
 const SLACK_CHANNEL   = process.env.SLACK_CHANNEL || 'lead-calls';
 
+// quo-router phone-staff "available missed call" counts (optional)
+const QUO_ROUTER_URL = (process.env.QUO_ROUTER_URL || '').replace(/\/+$/, '');
+const QUO_ROUTER_FIRM_ID = process.env.QUO_ROUTER_FIRM_ID || 'ramosjames';
+const QUO_ROUTER_REPORT_TOKEN =
+  process.env.QUO_ROUTER_REPORT_TOKEN || process.env.REPORT_API_TOKEN || '';
+
 // ── Review Intelligence V1 (daily Google-review candidate detection) ──────────
 const clampInt = (raw, def, lo, hi) => {
   const n = parseInt(raw ?? '', 10);
@@ -2149,7 +2155,9 @@ async function appendLatestSentimentRows(rollups, createdAfter, createdBefore, r
       sentiment: weeklySentimentWord(rollup.holisticSentiment),
       score: Number.isFinite(score) ? Math.round(score) : null,
       reason_summary: sheetCellOneLine(stripMarkdownBold(rollup.summary || ''), 2000) || null,
-      evidence_urls: markdownLinksToPlainUrls(rollup.links) || null,
+      // Keep markdown labels (dates) so Case Tracker can show "V1 Oct 30" and
+      // later rewrite the Quo href to the Slack router post in the case channel.
+      evidence_urls: rollup.links && rollup.links !== '—' ? String(rollup.links) : null,
       scored_at: scoredAt,
       window_start: createdAfter || null,
       window_end: createdBefore || null,
@@ -2200,8 +2208,29 @@ function phoneKeyFromNeedsEventKey(eventKey) {
 /**
  * Staff follow-up that clears an open needs-response item:
  * outbound text after detected_at, or connected human call with the same
- * 2-minute grace used for callback returns.
+ * 2-minute grace used for callback returns. A connected call to another
+ * Quo contact on the same case number counts too (co-clients share a case).
  */
+function laterConnectedCall(events, sinceIso) {
+  return (events || []).some(
+    (ev) => ev && ev.recordType !== 'sms' && isConnectedReturnCall(ev, sinceIso)
+  );
+}
+
+/** Calls for every client contact whose name ends in this case number. */
+function callsForCaseNumber(byPhone, caseNumber) {
+  const wanted = String(caseNumber || '').trim();
+  if (!wanted) return [];
+  const events = [];
+  for (const group of byPhone.values()) {
+    const anchor = (group || []).find((c) => isClientContactName(c.contact));
+    const found = anchor ? extractTrailingCaseDigitsFromClientKey(anchor.contact) : null;
+    if (found !== wanted) continue;
+    events.push(...group);
+  }
+  return events;
+}
+
 function hasStaffResponseSince(group, sinceIso) {
   if (!sinceIso) return false;
   const sinceMs = new Date(sinceIso).getTime();
@@ -2267,14 +2296,14 @@ function caseTrackerWriteConfig() {
   };
 }
 
-/** @returns {Promise<{ id: string, event_key: string, phone: string|null, detected_at: string }[]>} */
+/** @returns {Promise<{ id: string, event_key: string, phone: string|null, case_number: string|null, detected_at: string }[]>} */
 async function listOpenNeedsResponseRows(cfg) {
-  /** @type {{ id: string, event_key: string, phone: string|null, detected_at: string }[]} */
+  /** @type {{ id: string, event_key: string, phone: string|null, case_number: string|null, detected_at: string }[]} */
   const openRows = [];
   let from = 0;
   for (;;) {
     const openRes = await fetch(
-      `${cfg.baseUrl}/rest/v1/case_needs_response?status=eq.open&select=id,event_key,phone,detected_at&order=detected_at&offset=${from}&limit=1000`,
+      `${cfg.baseUrl}/rest/v1/case_needs_response?status=eq.open&select=id,event_key,phone,case_number,detected_at&order=detected_at&offset=${from}&limit=1000`,
       { headers: cfg.headers }
     );
     if (!openRes.ok) {
@@ -2358,6 +2387,68 @@ async function clearanceMapForOpenRows(openRows, byPhoneTouch, nowIso) {
   return clearanceMap;
 }
 
+/**
+ * Phone last-10 ↔ case number from Quo directory contacts (name ends in the
+ * case number) plus the tracker's client phone. Used so a call to one
+ * co-client can clear an open item on another phone for the same case.
+ */
+async function fetchCasePhoneIndex(cfg) {
+  /** @type {Map<string, Set<string>>} */
+  const phonesByCase = new Map();
+  /** @type {Map<string, Set<string>>} */
+  const casesByPhone = new Map();
+  const add = (caseNumber, phone) => {
+    const cn = String(caseNumber || '').trim();
+    const key = last10Digits(phone);
+    if (!cn || !key) return;
+    if (!phonesByCase.has(cn)) phonesByCase.set(cn, new Set());
+    phonesByCase.get(cn).add(key);
+    if (!casesByPhone.has(key)) casesByPhone.set(key, new Set());
+    casesByPhone.get(key).add(cn);
+  };
+  const pages = async (url, onRow) => {
+    let from = 0;
+    for (;;) {
+      const response = await fetch(`${url}&offset=${from}&limit=1000`, { headers: cfg.headers });
+      if (!response.ok) {
+        const detail = (await response.text()).slice(0, 200);
+        throw new Error(`Case phone index failed (${response.status}): ${detail}`);
+      }
+      const rows = await response.json();
+      if (!Array.isArray(rows) || !rows.length) break;
+      for (const row of rows) onRow(row);
+      if (rows.length < 1000) break;
+      from += rows.length;
+    }
+  };
+  try {
+    await pages(
+      `${cfg.baseUrl}/rest/v1/case_quo_contacts?select=phone,display_name&order=id`,
+      (row) => add(extractTrailingCaseDigitsFromClientKey(row.display_name), row.phone)
+    );
+    await pages(
+      `${cfg.baseUrl}/rest/v1/case_tracker_entries?select=case_number,client_phone&order=case_number`,
+      (row) => add(row.case_number, row.client_phone)
+    );
+  } catch (err) {
+    console.warn(`  Needs response case-phone index skipped: ${err.message}`);
+  }
+  return { phonesByCase, casesByPhone };
+}
+
+function siblingCaseCalls(clearanceMap, phonesByCase, caseNumber, ownPhoneKey) {
+  const keys = phonesByCase.get(String(caseNumber || '').trim());
+  if (!keys) return [];
+  const events = [];
+  for (const key of keys) {
+    if (key === ownPhoneKey) continue;
+    for (const ev of clearanceMap.get(key) || []) {
+      if (ev && ev.recordType !== 'sms') events.push(ev);
+    }
+  }
+  return events;
+}
+
 async function patchNeedsResponseResolved(cfg, ids, nowIso) {
   for (let index = 0; index < ids.length; index += 50) {
     const chunk = ids.slice(index, index + 50);
@@ -2394,13 +2485,19 @@ async function resolveRespondedNeedsResponse(byPhoneTouch = new Map()) {
   }
   const openRows = await listOpenNeedsResponseRows(cfg);
   const clearanceMap = await clearanceMapForOpenRows(openRows, byPhoneTouch, now);
+  const { phonesByCase } = await fetchCasePhoneIndex(cfg);
   const openByKey = new Map(openRows.map((row) => [String(row.event_key), row]));
   const resolveIds = [];
   for (const row of openRows) {
     const phoneKey =
       phoneKeyFromNeedsEventKey(row.event_key) || last10Digits(row.phone) || '';
     const group = phoneKey ? clearanceMap.get(phoneKey) || [] : [];
-    if (!hasStaffResponseSince(group, row.detected_at)) continue;
+    const clearedOnPhone = hasStaffResponseSince(group, row.detected_at);
+    const clearedOnCase = laterConnectedCall(
+      siblingCaseCalls(clearanceMap, phonesByCase, row.case_number, phoneKey),
+      row.detected_at
+    );
+    if (!clearedOnPhone && !clearedOnCase) continue;
     resolveIds.push(row.id);
     openByKey.delete(String(row.event_key));
   }
@@ -2429,12 +2526,25 @@ async function clearNeedsResponseForTouch(touch) {
   const cfg = caseTrackerWriteConfig();
   if (!cfg) return 0;
   const openRows = await listOpenNeedsResponseRows(cfg);
+  const caseNumbers =
+    touch.recordType === 'call'
+      ? (await fetchCasePhoneIndex(cfg)).casesByPhone.get(phoneKey) || new Set()
+      : new Set();
   const now = new Date().toISOString();
   const resolveIds = [];
   for (const row of openRows) {
     const rowKey = phoneKeyFromNeedsEventKey(row.event_key) || last10Digits(row.phone) || '';
-    if (rowKey !== phoneKey) continue;
-    if (!hasStaffResponseSince([touch], row.detected_at)) continue;
+    const samePhone = rowKey === phoneKey;
+    const sameCase =
+      touch.recordType === 'call' &&
+      row.case_number &&
+      caseNumbers.has(String(row.case_number).trim());
+    if (!samePhone && !sameCase) continue;
+    if (samePhone) {
+      if (!hasStaffResponseSince([touch], row.detected_at)) continue;
+    } else if (!isConnectedReturnCall(touch, row.detected_at)) {
+      continue;
+    }
     resolveIds.push(row.id);
   }
   if (!resolveIds.length) return 0;
@@ -3883,6 +3993,8 @@ async function runMissedClientCallReport() {
     // number) even if lastCall itself was on a transfer leg without it.
     const displayContact = clientAnchor.contact || lastCall.contact || '';
     const caseId = extractTrailingCaseDigitsFromClientKey(displayContact);
+    // A later connected call to another person on this case (co-client) also clears the miss.
+    if (laterConnectedCall(callsForCaseNumber(byPhone, caseId), lastCall.timestamp)) continue;
     const rosterHit = caseId ? rosterMap.get(caseId) : null;
     outstanding.push({
       contact: displayContact,
@@ -3939,10 +4051,12 @@ async function runMissedClientCallReport() {
       // (including when the classifier walked back to an older transcript because
       // the latest miss/no-answer leg had no text).
       const group = byPhone.get(cand.key) || [];
-      const reached = group.some((c) => isConnectedReturnCall(c, cand.convCall.timestamp));
+      const caseId = extractTrailingCaseDigitsFromClientKey(cand.contact);
+      const caseCalls = callsForCaseNumber(byPhone, caseId);
+      const reached = laterConnectedCall(caseCalls.length ? caseCalls : group, cand.convCall.timestamp);
       if (reached) {
         droppedReturned += 1;
-        console.log(`    Callback cleared (later connected call) — ${cand.contact}`);
+        console.log(`    Callback cleared (later connected call on this case) — ${cand.contact}`);
         continue;
       }
       console.log(`    Callback owed — ${cand.contact}: ${verdict.reason || 'n/a'}`);
@@ -3954,7 +4068,6 @@ async function runMissedClientCallReport() {
         continue;
       }
       // New standalone "callback required" row (client isn't a missed-inbound).
-      const caseId = extractTrailingCaseDigitsFromClientKey(cand.contact);
       const rosterHit = caseId ? rosterMap.get(caseId) : null;
       outstanding.push({
         contact: cand.contact,
@@ -4012,6 +4125,8 @@ async function runMissedClientCallReport() {
       if (!clientAnchor) continue;
       const sms = findLatestUnclearedInboundSms(group);
       if (!sms) continue;
+      const caseId = extractTrailingCaseDigitsFromClientKey(clientAnchor.contact);
+      if (laterConnectedCall(callsForCaseNumber(byPhone, caseId), sms.timestamp)) continue;
       smsCandidates.push({
         key,
         contact: clientAnchor.contact || sms.contact || '',
@@ -5310,6 +5425,114 @@ function pctChangeLabel(cur, prev) {
   return `${pct > 0 ? '▲' : '▼'}${Math.abs(pct)}%`;
 }
 
+/** Fetch per-person available-missed counts from quo-router for a time window. */
+async function fetchAvailabilityMisses(createdAfter, createdBefore) {
+  if (!QUO_ROUTER_URL || !QUO_ROUTER_REPORT_TOKEN) return null;
+  const url = new URL(
+    `${QUO_ROUTER_URL}/api/reports/${encodeURIComponent(QUO_ROUTER_FIRM_ID)}/availability-misses`
+  );
+  if (createdAfter) url.searchParams.set('createdAfter', createdAfter);
+  if (createdBefore) url.searchParams.set('createdBefore', createdBefore);
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${QUO_ROUTER_REPORT_TOKEN}` },
+  });
+  if (!res.ok) {
+    const body = await res.text().catch(() => '');
+    throw new Error(`quo-router availability-misses ${res.status}: ${body.slice(0, 200)}`);
+  }
+  return res.json();
+}
+
+function personNameKey(name) {
+  return String(name || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+/**
+ * Map quo-router byUser counts onto Call Stats user rows by display name.
+ * Tries full-name match, then unique first-name match.
+ */
+function availabilityCountByUserName(byUser) {
+  const map = new Map(); // lowercased full name → count
+  const first = new Map(); // first name → [{ full, count }]
+  for (const u of byUser || []) {
+    const full = personNameKey(u.name || u.slackUserId);
+    if (!full) continue;
+    const count = Number(u.count) || 0;
+    map.set(full, (map.get(full) || 0) + count);
+    const fn = full.split(/\s+/)[0];
+    if (!first.has(fn)) first.set(fn, []);
+    first.get(fn).push({ full, count });
+  }
+  return { map, first };
+}
+
+function lookupAvailabilityCount(name, index) {
+  if (!index) return 0;
+  const full = personNameKey(name);
+  if (index.map.has(full)) return index.map.get(full);
+  const fn = full.split(/\s+/)[0];
+  const candidates = index.first.get(fn) || [];
+  if (candidates.length === 1) return candidates[0].count;
+  return 0;
+}
+
+/** Attach availableMissed (+ prev) onto userRows; append phone-staff-only people. */
+function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
+  const curIdx = availabilityCountByUserName(curMisses?.byUser);
+  const prevIdx = availabilityCountByUserName(prevMisses?.byUser);
+  const usedKeys = new Set();
+  for (const row of userRows) {
+    row.availableMissed = lookupAvailabilityCount(row.name, curIdx);
+    row.prev.availableMissed = lookupAvailabilityCount(row.name, prevIdx);
+    usedKeys.add(personNameKey(row.name));
+    const fn = personNameKey(row.name).split(/\s+/)[0];
+    const hit = (curIdx.first.get(fn) || []).find((c) => c.count === row.availableMissed);
+    if (hit) usedKeys.add(hit.full);
+  }
+  // People who were available on a miss but had no Quo answered/outbound activity.
+  for (const u of curMisses?.byUser || []) {
+    const full = personNameKey(u.name || u.slackUserId);
+    if (!full || usedKeys.has(full)) continue;
+    const fn = full.split(/\s+/)[0];
+    if ([...usedKeys].some((k) => k.split(/\s+/)[0] === fn && lookupAvailabilityCount(k, curIdx) > 0)) {
+      continue;
+    }
+    usedKeys.add(full);
+    userRows.push({
+      name: u.name || u.slackUserId,
+      total: 0,
+      outgoing: 0,
+      answered: 0,
+      seconds: 0,
+      messages: 0,
+      availableMissed: Number(u.count) || 0,
+      prev: {
+        total: 0,
+        outgoing: 0,
+        answered: 0,
+        seconds: 0,
+        messages: 0,
+        availableMissed: lookupAvailabilityCount(u.name || u.slackUserId, prevIdx),
+      },
+    });
+  }
+  userRows.sort(
+    (a, b) =>
+      b.answered - a.answered ||
+      b.availableMissed - a.availableMissed ||
+      b.total - a.total
+  );
+  return {
+    userRows,
+    totalAvailableMissed: Number(curMisses?.availableButDidNotAnswerCount) || 0,
+    prevTotalAvailableMissed: Number(prevMisses?.availableButDidNotAnswerCount) || 0,
+    eventsWithAvailableStaff: Number(curMisses?.eventsWithAvailableStaff) || 0,
+  };
+}
+
 /** Aggregate raw call/message records into outcome + per-user tallies. */
 function aggregateCallStats({ calls, messages, volumeExcludeLines, ignoreIncomingLines }) {
   // Auto-forward line (RJL Outbound): omit INCOMING only. Outbound calls, talk
@@ -5469,6 +5692,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
 
   const cell = (cur, prev, cls = '') =>
     `<td class="num${cls}">${cur}<div class="chg">${escapeHtml(pctChangeLabel(cur, prev))}</div></td>`;
+  const showAvail = meta.availabilityConfigured === true;
   const userBody = userRows.length
     ? userRows
         .map(
@@ -5477,14 +5701,15 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
             cell(u.total, u.prev.total) +
             cell(u.outgoing, u.prev.outgoing) +
             cell(u.answered, u.prev.answered, ' hi') +
+            (showAvail ? cell(u.availableMissed || 0, u.prev?.availableMissed || 0) : '') +
             `<td class="num">${escapeHtml(formatCallDuration(u.seconds))}<div class="chg">${escapeHtml(pctChangeLabel(u.seconds, u.prev.seconds))}</div></td>` +
             cell(u.messages, u.prev.messages) +
             `</tr>`
         )
         .join('')
-    : '<tr><td colspan="6" class="note">No matching users with activity.</td></tr>';
+    : `<tr><td colspan="${showAvail ? 7 : 6}" class="note">No matching users with activity.</td></tr>`;
   const userTable = `<table>
-    <tr><th>User</th><th class="num">Total calls</th><th class="num">Outgoing</th><th class="num hi">Answered</th><th class="num">Time on calls</th><th class="num">Sent messages</th></tr>
+    <tr><th>User</th><th class="num">Total calls</th><th class="num">Outgoing</th><th class="num hi">Answered</th>${showAvail ? '<th class="num">Available missed</th>' : ''}<th class="num">Time on calls</th><th class="num">Sent messages</th></tr>
     ${userBody}
   </table>`;
 
@@ -5507,6 +5732,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
       <div style="font-size:13px;color:${missedColor};font-weight:600;margin-top:2px">Goal: ${goal}%+ answered by user &mdash; ${pct == null ? 'no incoming' : (metGoal ? 'on target ✓' : 'below goal')}</div>
       <div style="font-size:13px;color:#57606a;margin-top:10px;padding-top:8px;border-top:1px solid #d0d7de">Missed calls (Missed + Voicemail + Answered by agent + Agent abandoned): <strong>${missed.cur}</strong>${missed.prev != null ? ` <span class="chg">· last wk ${missed.prev}</span>` : ''}</div>
       ${missed.known != null ? `<div style="font-size:13px;color:#57606a;margin-top:4px">Of these: <strong>${missed.known}</strong> known contacts · <strong>${missed.unknown}</strong> not in contacts${missed.prevKnown != null ? ` <span class="chg">· last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts</span>` : ''}</div>` : ''}
+      ${showAvail && meta.totalAvailableMissed != null ? `<div style="font-size:13px;color:#57606a;margin-top:8px;padding-top:8px;border-top:1px solid #d0d7de">Available missed calls (on shift, free, should have answered): <strong>${meta.totalAvailableMissed}</strong>${meta.prevTotalAvailableMissed != null ? ` <span class="chg">· last wk ${meta.prevTotalAvailableMissed}</span>` : ''}${meta.eventsWithAvailableStaff != null ? ` · across <strong>${meta.eventsWithAvailableStaff}</strong> missed/Sona event(s)` : ''}</div>` : ''}
     </div>`;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
@@ -5518,7 +5744,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     <h3>Incoming Call Outcomes</h3>
     ${outcomeTable}
 
-    <h3>By User <span style="font-weight:400;font-size:13px;color:#57606a">— sorted by Answered calls</span></h3>
+    <h3>By User <span style="font-weight:400;font-size:13px;color:#57606a">— sorted by Answered calls${showAvail ? '; Available missed = times they were free and on shift when a call was missed' : ''}</span></h3>
     ${userTable}
 
     ${leadsOutcomeTable}
@@ -5827,6 +6053,28 @@ async function runDailyCallStatsReport(opts = {}) {
   // Answered is the number the team is coached on, so lead with it.
   userRows.sort((a, b) => b.answered - a.answered || b.total - a.total);
 
+  let curMisses = null;
+  let prevMisses = null;
+  let availabilityConfigured = Boolean(QUO_ROUTER_URL && QUO_ROUTER_REPORT_TOKEN);
+  if (availabilityConfigured) {
+    try {
+      console.log('\n[2b/3] Fetching available-missed counts from quo-router...');
+      curMisses = await fetchAvailabilityMisses(cur.createdAfter, cur.createdBefore);
+      prevMisses = await fetchAvailabilityMisses(prev.createdAfter, prev.createdBefore);
+      console.log(
+        `  Available missed (person×event): ${curMisses?.availableButDidNotAnswerCount ?? 0}` +
+          ` across ${curMisses?.eventsWithAvailableStaff ?? 0} event(s)` +
+          ` (last wk ${prevMisses?.availableButDidNotAnswerCount ?? 0})`
+      );
+    } catch (err) {
+      console.warn(`  [stats] quo-router availability skipped: ${err.message}`);
+      availabilityConfigured = false;
+    }
+  } else {
+    console.log('\n[2b/3] Skipping available-missed counts (set QUO_ROUTER_URL + QUO_ROUTER_REPORT_TOKEN)');
+  }
+  const availMerged = mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses);
+
   const missed = {
     cur: missedCallsTotal(curAgg),
     prev: missedCallsTotal(prevAgg),
@@ -5848,6 +6096,11 @@ async function runDailyCallStatsReport(opts = {}) {
   if (contactLookupOk) {
     console.log(`  Of these: ${missed.known} known contacts · ${missed.unknown} not in contacts (last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts)`);
   }
+  if (availabilityConfigured) {
+    console.log(
+      `  Available missed calls: ${availMerged.totalAvailableMissed} (last wk ${availMerged.prevTotalAvailableMissed})`
+    );
+  }
   const leadsAnsweredN = answeredByUserCount(curLeadsAgg);
   const leadsInN = curLeadsAgg.totalIncoming || 0;
   console.log(`  Incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming}) · users in table: ${userRows.length}`);
@@ -5856,7 +6109,11 @@ async function runDailyCallStatsReport(opts = {}) {
     if (curAgg.outcomes[b]) console.log(`   ${b}: ${curAgg.outcomes[b]}`);
   }
   for (const u of userRows) {
-    console.log(`   - ${u.name}: total ${u.total}, out ${u.outgoing}, answered ${u.answered}, ${formatCallDuration(u.seconds)}, msgs ${u.messages}`);
+    console.log(
+      `   - ${u.name}: total ${u.total}, out ${u.outgoing}, answered ${u.answered}` +
+        (availabilityConfigured ? `, available missed ${u.availableMissed || 0}` : '') +
+        `, ${formatCallDuration(u.seconds)}, msgs ${u.messages}`
+    );
   }
 
   const ignoreIncomingSet = new Set(ignoreIncomingLines.map((s) => String(s).trim().toLowerCase()));
@@ -5869,6 +6126,10 @@ async function runDailyCallStatsReport(opts = {}) {
     leadsLines,
     leadsCur: curLeadsAgg,
     leadsPrev: prevLeadsAgg,
+    availabilityConfigured,
+    totalAvailableMissed: availabilityConfigured ? availMerged.totalAvailableMissed : null,
+    prevTotalAvailableMissed: availabilityConfigured ? availMerged.prevTotalAvailableMissed : null,
+    eventsWithAvailableStaff: availabilityConfigured ? availMerged.eventsWithAvailableStaff : null,
   };
   const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed, win);
   const plainLines = [
@@ -5879,6 +6140,11 @@ async function runDailyCallStatsReport(opts = {}) {
     ...(missed.known != null
       ? [`  Of these: ${missed.known} known contacts · ${missed.unknown} not in contacts (last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts)`]
       : []),
+    ...(availabilityConfigured
+      ? [
+          `  Available missed calls: ${availMerged.totalAvailableMissed} (last wk ${availMerged.prevTotalAvailableMissed}) across ${availMerged.eventsWithAvailableStaff} event(s)`,
+        ]
+      : []),
     '',
     'Incoming Call Outcomes:',
     ...CALL_OUTCOME_ORDER.filter((b) => curAgg.outcomes[b] || prevAgg.outcomes[b]).map((b) => {
@@ -5888,9 +6154,12 @@ async function runDailyCallStatsReport(opts = {}) {
     }),
     `  Total incoming: ${curAgg.totalIncoming} (last wk ${prevAgg.totalIncoming})`,
     '',
-    'By User — sorted by ANSWERED (answered / total / outgoing / time / sent msgs):',
+    'By User — sorted by ANSWERED (answered / available missed / total / outgoing / time / sent msgs):',
     ...userRows.map(
-      (u) => `  ${u.name}: answered ${u.answered} · ${u.total} total / ${u.outgoing} out / ${formatCallDuration(u.seconds)} / ${u.messages} msgs`
+      (u) =>
+        `  ${u.name}: answered ${u.answered}` +
+        (availabilityConfigured ? ` · available missed ${u.availableMissed || 0}` : '') +
+        ` · ${u.total} total / ${u.outgoing} out / ${formatCallDuration(u.seconds)} / ${u.messages} msgs`
     ),
     '',
     `Incoming Call Outcomes — ${leadsLines.join(' + ') || 'Leads + Intake'}:`,
