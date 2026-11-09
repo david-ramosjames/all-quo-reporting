@@ -5492,7 +5492,8 @@ function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
     const hit = (curIdx.first.get(fn) || []).find((c) => c.count === row.availableMissed);
     if (hit) usedKeys.add(hit.full);
   }
-  // People who were available on a miss but had no Quo answered/outbound activity.
+  // Topic-duty / available-miss people with no Quo answered/outbound activity.
+  // Includes on-duty roster users even when their available-missed count is 0.
   for (const u of curMisses?.byUser || []) {
     const full = personNameKey(u.name || u.slackUserId);
     if (!full || usedKeys.has(full)) continue;
@@ -5732,7 +5733,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
       <div style="font-size:13px;color:${missedColor};font-weight:600;margin-top:2px">Goal: ${goal}%+ answered by user &mdash; ${pct == null ? 'no incoming' : (metGoal ? 'on target ✓' : 'below goal')}</div>
       <div style="font-size:13px;color:#57606a;margin-top:10px;padding-top:8px;border-top:1px solid #d0d7de">Missed calls (Missed + Voicemail + Answered by agent + Agent abandoned): <strong>${missed.cur}</strong>${missed.prev != null ? ` <span class="chg">· last wk ${missed.prev}</span>` : ''}</div>
       ${missed.known != null ? `<div style="font-size:13px;color:#57606a;margin-top:4px">Of these: <strong>${missed.known}</strong> known contacts · <strong>${missed.unknown}</strong> not in contacts${missed.prevKnown != null ? ` <span class="chg">· last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts</span>` : ''}</div>` : ''}
-      ${showAvail && meta.totalAvailableMissed != null ? `<div style="font-size:13px;color:#57606a;margin-top:8px;padding-top:8px;border-top:1px solid #d0d7de">Available missed calls (on shift, free, should have answered): <strong>${meta.totalAvailableMissed}</strong>${meta.prevTotalAvailableMissed != null ? ` <span class="chg">· last wk ${meta.prevTotalAvailableMissed}</span>` : ''}${meta.eventsWithAvailableStaff != null ? ` · across <strong>${meta.eventsWithAvailableStaff}</strong> missed/Sona event(s)` : ''}</div>` : ''}
+      ${showAvail && meta.totalAvailableMissed != null ? `<div style="font-size:13px;color:#57606a;margin-top:8px;padding-top:8px;border-top:1px solid #d0d7de">Available missed calls (on that day's Slack topic Inbound/LAs, active, free): <strong>${meta.totalAvailableMissed}</strong>${meta.prevTotalAvailableMissed != null ? ` <span class="chg">· last wk ${meta.prevTotalAvailableMissed}</span>` : ''}${meta.eventsWithAvailableStaff != null ? ` · across <strong>${meta.eventsWithAvailableStaff}</strong> missed/Sona event(s)` : ''}</div>` : ''}
     </div>`;
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
@@ -5744,7 +5745,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     <h3>Incoming Call Outcomes</h3>
     ${outcomeTable}
 
-    <h3>By User <span style="font-weight:400;font-size:13px;color:#57606a">— sorted by Answered calls${showAvail ? '; Available missed = times they were free and on shift when a call was missed' : ''}</span></h3>
+    <h3>By User <span style="font-weight:400;font-size:13px;color:#57606a">— sorted by Answered calls${showAvail ? '; Available missed = on topic duty (Inbound/LAs), Slack-active, free when a call was missed' : ''}</span></h3>
     ${userTable}
 
     ${leadsOutcomeTable}
