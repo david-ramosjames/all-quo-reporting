@@ -5510,6 +5510,7 @@ function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
       seconds: 0,
       messages: 0,
       availableMissed: Number(u.count) || 0,
+      onDuty: Boolean(u.onDuty),
       prev: {
         total: 0,
         outgoing: 0,
@@ -5520,17 +5521,38 @@ function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
       },
     });
   }
+  for (const row of userRows) {
+    if (row.onDuty != null) continue;
+    const full = personNameKey(row.name);
+    const hit = (curMisses?.byUser || []).find((u) => personNameKey(u.name || u.slackUserId) === full);
+    row.onDuty = Boolean(hit?.onDuty);
+  }
   userRows.sort(
     (a, b) =>
       b.answered - a.answered ||
       b.availableMissed - a.availableMissed ||
       b.total - a.total
   );
+  const prevByName = new Map(
+    (prevMisses?.byUser || []).map((u) => [personNameKey(u.name || u.slackUserId), Number(u.count) || 0])
+  );
+  const availabilityByUser = [...userRows]
+    .filter((u) => (u.availableMissed || 0) > 0 || (u.prev?.availableMissed || 0) > 0 || u.onDuty)
+    .map((u) => ({
+      name: u.name,
+      count: Number(u.availableMissed) || 0,
+      prev: Number(u.prev?.availableMissed) || prevByName.get(personNameKey(u.name)) || 0,
+      onDuty: Boolean(u.onDuty),
+    }))
+    .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
   return {
     userRows,
     totalAvailableMissed: Number(curMisses?.availableButDidNotAnswerCount) || 0,
     prevTotalAvailableMissed: Number(prevMisses?.availableButDidNotAnswerCount) || 0,
     eventsWithAvailableStaff: Number(curMisses?.eventsWithAvailableStaff) || 0,
+    eventCount: Number(curMisses?.eventCount) || 0,
+    availabilityByUser,
   };
 }
 
@@ -5733,14 +5755,37 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
       <div style="font-size:13px;color:${missedColor};font-weight:600;margin-top:2px">Goal: ${goal}%+ answered by user &mdash; ${pct == null ? 'no incoming' : (metGoal ? 'on target ✓' : 'below goal')}</div>
       <div style="font-size:13px;color:#57606a;margin-top:10px;padding-top:8px;border-top:1px solid #d0d7de">Missed calls (Missed + Voicemail + Answered by agent + Agent abandoned): <strong>${missed.cur}</strong>${missed.prev != null ? ` <span class="chg">· last wk ${missed.prev}</span>` : ''}</div>
       ${missed.known != null ? `<div style="font-size:13px;color:#57606a;margin-top:4px">Of these: <strong>${missed.known}</strong> known contacts · <strong>${missed.unknown}</strong> not in contacts${missed.prevKnown != null ? ` <span class="chg">· last wk ${missed.prevKnown} known / ${missed.prevUnknown} not in contacts</span>` : ''}</div>` : ''}
-      ${showAvail && meta.totalAvailableMissed != null ? `<div style="font-size:13px;color:#57606a;margin-top:8px;padding-top:8px;border-top:1px solid #d0d7de">Available missed calls (on that day's Slack topic Inbound/LAs, active, free): <strong>${meta.totalAvailableMissed}</strong>${meta.prevTotalAvailableMissed != null ? ` <span class="chg">· last wk ${meta.prevTotalAvailableMissed}</span>` : ''}${meta.eventsWithAvailableStaff != null ? ` · across <strong>${meta.eventsWithAvailableStaff}</strong> missed/Sona event(s)` : ''}</div>` : ''}
+      ${showAvail && meta.totalAvailableMissed != null ? `<div style="font-size:13px;color:#57606a;margin-top:8px;padding-top:8px;border-top:1px solid #d0d7de">Available missed calls (on that day's Slack topic Inbound/LAs, active, free): <strong>${meta.totalAvailableMissed}</strong>${meta.prevTotalAvailableMissed != null ? ` <span class="chg">· last wk ${meta.prevTotalAvailableMissed}</span>` : ''}${meta.eventsWithAvailableStaff != null ? ` · across <strong>${meta.eventsWithAvailableStaff}</strong> missed/Sona event(s)` : ''}${meta.eventCount != null ? ` · <strong>${meta.eventCount}</strong> missed/Sona event(s) total` : ''}</div>` : ''}
     </div>`;
+
+  const availRows = Array.isArray(meta.availabilityByUser) ? meta.availabilityByUser : [];
+  const availBody = availRows.length
+    ? availRows
+        .map(
+          (u) =>
+            `<tr><td>${escapeHtml(u.name)}${u.onDuty ? '' : ' <span class="chg">(not on topic)</span>'}</td>` +
+            cell(u.count || 0, u.prev || 0) +
+            `</tr>`
+        )
+        .join('')
+    : '<tr><td colspan="2" class="note">No available-but-did-not-answer counts in this window.</td></tr>';
+  const availSection = showAvail
+    ? `<h3>Available but did not answer <span style="font-weight:400;font-size:13px;color:#57606a">— on Inbound/LAs topic, Slack-active, free when a missed or Sona call happened (person × event)</span></h3>
+    <table>
+      <tr><th>Person</th><th class="num">Available missed</th></tr>
+      ${availBody}
+      <tr class="total"><td>Total (person × event)</td><td class="num">${meta.totalAvailableMissed || 0}<div class="chg">${escapeHtml(pctChangeLabel(meta.totalAvailableMissed || 0, meta.prevTotalAvailableMissed || 0))}</div></td></tr>
+    </table>
+    <p class="note" style="margin-top:6px">${meta.eventsWithAvailableStaff || 0} of ${meta.eventCount || 0} missed/Sona event(s) had at least one available person.</p>`
+    : '';
 
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
     <h2>${escapeHtml(view.title || 'Yesterday Call Stats')}</h2>
     <p style="margin:2px 0 0;color:#57606a;font-size:13px">${escapeHtml(view.subtitle || `${dayLabel} · vs same weekday last week`)}</p>
 
     ${missedCallout}
+
+    ${availSection}
 
     <h3>Incoming Call Outcomes</h3>
     ${outcomeTable}
@@ -6131,6 +6176,8 @@ async function runDailyCallStatsReport(opts = {}) {
     totalAvailableMissed: availabilityConfigured ? availMerged.totalAvailableMissed : null,
     prevTotalAvailableMissed: availabilityConfigured ? availMerged.prevTotalAvailableMissed : null,
     eventsWithAvailableStaff: availabilityConfigured ? availMerged.eventsWithAvailableStaff : null,
+    eventCount: availabilityConfigured ? availMerged.eventCount : null,
+    availabilityByUser: availabilityConfigured ? availMerged.availabilityByUser : [],
   };
   const html = buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, missed, win);
   const plainLines = [
@@ -6143,7 +6190,11 @@ async function runDailyCallStatsReport(opts = {}) {
       : []),
     ...(availabilityConfigured
       ? [
-          `  Available missed calls: ${availMerged.totalAvailableMissed} (last wk ${availMerged.prevTotalAvailableMissed}) across ${availMerged.eventsWithAvailableStaff} event(s)`,
+          `  Available missed calls: ${availMerged.totalAvailableMissed} (last wk ${availMerged.prevTotalAvailableMissed}) across ${availMerged.eventsWithAvailableStaff} of ${availMerged.eventCount} missed/Sona event(s)`,
+          '  Available but did not answer (by person):',
+          ...(availMerged.availabilityByUser || []).map(
+            (u) => `    ${u.name}: ${u.count} (last wk ${u.prev || 0})`
+          ),
         ]
       : []),
     '',
