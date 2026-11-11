@@ -144,7 +144,7 @@ function firstEmailList(...vals) {
  *  on that line is ignored separately so outbound + sent messages still count. */
 const DEFAULT_STATS_EXCLUDE = 'Extra Number,SA Law Firm,Trucking Chicas';
 const DEFAULT_STATS_INCLUDE_USERS =
-  'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Valeria Chang,Andrea Alvarado';
+  'Jissela Calix,Stephany Guerra,Liz Abad-Cruz,Intake Specialist,Valeria Flores,Claudia Chang,Andrea Alvarado';
 const LEGACY_STATS_EXCLUDE = new Set(
   ['RJL Transfers', 'Extra Number', 'SA Law Firm', 'Trucking Chicas', 'RJL Outbound'].map((s) => s.toLowerCase())
 );

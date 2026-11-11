@@ -14,7 +14,7 @@ KEY STAFF:
 - Attorneys: Cody Garza, Ariel Allen, Ryan Toomey, Jorge Barros, Erin
 - Paralegals: Adrian, Jocelyn, Aibeth, Ivette/Yvette
 - Intake: Roman, Liz, Giselle, Sam/Samari
-- Legal Assistants: Jackie, Claudia, Valerie/Valery
+- Legal Assistants: Jackie, Claudia Chang (Quo: Valeria Chang), Valeria Flores
 
 REFERRAL NUMBERS: Central Texas Lawyer Referral (512-472-8303), Texas Lawyer Referral (512-474-0007)
 

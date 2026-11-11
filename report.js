@@ -5451,17 +5451,71 @@ function personNameKey(name) {
 }
 
 /**
+ * Same person, different labels (Slack vs Quo). First key is the report display name.
+ * Do not put bare "valeria" here — that collides with Valeria Flores.
+ */
+const AVAILABILITY_PERSON_ALIASES = [
+  ['claudia chang', 'claudia', 'valeria chang'],
+];
+
+function availabilityCanonicalName(name) {
+  const key = personNameKey(name);
+  if (!key) return '';
+  for (const group of AVAILABILITY_PERSON_ALIASES) {
+    if (group.includes(key)) return group[0];
+  }
+  return key;
+}
+
+function availabilityDisplayName(canonicalKey, fallbackName) {
+  if (canonicalKey === 'claudia chang') return 'Claudia Chang';
+  return fallbackName || canonicalKey;
+}
+
+/**
+ * Collapse Slack/Quo nicknames for the same person before matching Call Stats rows.
+ * Duplicate Phone Staff rows for one person use max(count) so one miss is not doubled.
+ */
+function consolidateAvailabilityByUser(byUser) {
+  const byCanonical = new Map();
+  for (const u of byUser || []) {
+    const canonical = availabilityCanonicalName(u.name || u.slackUserId);
+    if (!canonical) continue;
+    const count = Number(u.count) || 0;
+    const prev = byCanonical.get(canonical);
+    if (!prev) {
+      byCanonical.set(canonical, {
+        slackUserId: u.slackUserId,
+        name: availabilityDisplayName(canonical, u.name || u.slackUserId),
+        count,
+        onDuty: Boolean(u.onDuty),
+      });
+      continue;
+    }
+    prev.count = Math.max(prev.count, count);
+    prev.onDuty = prev.onDuty || Boolean(u.onDuty);
+    if (canonical === 'claudia chang') prev.name = 'Claudia Chang';
+  }
+  return [...byCanonical.values()];
+}
+
+/**
  * Map quo-router byUser counts onto Call Stats user rows by display name.
  * Tries full-name match, then unique first-name match.
  */
 function availabilityCountByUserName(byUser) {
   const map = new Map(); // lowercased full name → count
   const first = new Map(); // first name → [{ full, count }]
-  for (const u of byUser || []) {
+  for (const u of consolidateAvailabilityByUser(byUser)) {
     const full = personNameKey(u.name || u.slackUserId);
     if (!full) continue;
     const count = Number(u.count) || 0;
-    map.set(full, (map.get(full) || 0) + count);
+    map.set(full, count);
+    for (const group of AVAILABILITY_PERSON_ALIASES) {
+      if (group[0] === full) {
+        for (const alias of group) map.set(alias, count);
+      }
+    }
     const fn = full.split(/\s+/)[0];
     if (!first.has(fn)) first.set(fn, []);
     first.get(fn).push({ full, count });
@@ -5471,8 +5525,10 @@ function availabilityCountByUserName(byUser) {
 
 function lookupAvailabilityCount(name, index) {
   if (!index) return 0;
-  const full = personNameKey(name);
+  const full = availabilityCanonicalName(name) || personNameKey(name);
   if (index.map.has(full)) return index.map.get(full);
+  const raw = personNameKey(name);
+  if (raw && index.map.has(raw)) return index.map.get(raw);
   const fn = full.split(/\s+/)[0];
   const candidates = index.first.get(fn) || [];
   if (candidates.length === 1) return candidates[0].count;
@@ -5481,29 +5537,44 @@ function lookupAvailabilityCount(name, index) {
 
 /** Attach availableMissed (+ prev) onto userRows; append phone-staff-only people. */
 function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
-  const curIdx = availabilityCountByUserName(curMisses?.byUser);
-  const prevIdx = availabilityCountByUserName(prevMisses?.byUser);
+  const curUsers = consolidateAvailabilityByUser(curMisses?.byUser);
+  const prevUsers = consolidateAvailabilityByUser(prevMisses?.byUser);
+  const curIdx = availabilityCountByUserName(curUsers);
+  const prevIdx = availabilityCountByUserName(prevUsers);
   const usedKeys = new Set();
+  const markUsed = (name) => {
+    const canonical = availabilityCanonicalName(name);
+    usedKeys.add(canonical);
+    for (const group of AVAILABILITY_PERSON_ALIASES) {
+      if (group[0] === canonical) {
+        for (const alias of group) usedKeys.add(alias);
+      }
+    }
+  };
   for (const row of userRows) {
     row.availableMissed = lookupAvailabilityCount(row.name, curIdx);
     row.prev.availableMissed = lookupAvailabilityCount(row.name, prevIdx);
-    usedKeys.add(personNameKey(row.name));
+    markUsed(row.name);
     const fn = personNameKey(row.name).split(/\s+/)[0];
     const hit = (curIdx.first.get(fn) || []).find((c) => c.count === row.availableMissed);
-    if (hit) usedKeys.add(hit.full);
+    if (hit) markUsed(hit.full);
+    // Quo seat "Valeria Chang" → show the name she goes by on the Available Missed table.
+    if (availabilityCanonicalName(row.name) === 'claudia chang') {
+      row.name = 'Claudia Chang';
+    }
   }
   // Topic-duty / available-miss people with no Quo answered/outbound activity.
   // Includes on-duty roster users even when their available-missed count is 0.
-  for (const u of curMisses?.byUser || []) {
-    const full = personNameKey(u.name || u.slackUserId);
+  for (const u of curUsers) {
+    const full = availabilityCanonicalName(u.name || u.slackUserId);
     if (!full || usedKeys.has(full)) continue;
     const fn = full.split(/\s+/)[0];
     if ([...usedKeys].some((k) => k.split(/\s+/)[0] === fn && lookupAvailabilityCount(k, curIdx) > 0)) {
       continue;
     }
-    usedKeys.add(full);
+    markUsed(full);
     userRows.push({
-      name: u.name || u.slackUserId,
+      name: availabilityDisplayName(full, u.name || u.slackUserId),
       total: 0,
       outgoing: 0,
       answered: 0,
@@ -5523,8 +5594,8 @@ function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
   }
   for (const row of userRows) {
     if (row.onDuty != null) continue;
-    const full = personNameKey(row.name);
-    const hit = (curMisses?.byUser || []).find((u) => personNameKey(u.name || u.slackUserId) === full);
+    const full = availabilityCanonicalName(row.name);
+    const hit = curUsers.find((u) => availabilityCanonicalName(u.name || u.slackUserId) === full);
     row.onDuty = Boolean(hit?.onDuty);
   }
   userRows.sort(
@@ -5534,14 +5605,14 @@ function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
       b.total - a.total
   );
   const prevByName = new Map(
-    (prevMisses?.byUser || []).map((u) => [personNameKey(u.name || u.slackUserId), Number(u.count) || 0])
+    prevUsers.map((u) => [availabilityCanonicalName(u.name || u.slackUserId), Number(u.count) || 0])
   );
   const availabilityByUser = [...userRows]
     .filter((u) => (u.availableMissed || 0) > 0 || (u.prev?.availableMissed || 0) > 0 || u.onDuty)
     .map((u) => ({
       name: u.name,
       count: Number(u.availableMissed) || 0,
-      prev: Number(u.prev?.availableMissed) || prevByName.get(personNameKey(u.name)) || 0,
+      prev: Number(u.prev?.availableMissed) || prevByName.get(availabilityCanonicalName(u.name)) || 0,
       onDuty: Boolean(u.onDuty),
     }))
     .sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
@@ -6333,7 +6404,7 @@ const RJL_STAFF_NAME_HINTS = [
   'Cody Garza', 'Ariel Allen', 'Ryan Toomey', 'Jorge Barros', 'Erin',
   'Adrian', 'Jocelyn', 'Aibeth', 'Ivette', 'Yvette',
   'Roman', 'Liz', 'Giselle', 'Samari', 'Sam', 'Santiago Ortiz', 'Santiago',
-  'Jackie', 'Claudia', 'Valerie', 'Valery',
+  'Jackie', 'Claudia', 'Claudia Chang', 'Valeria', 'Valeria Chang', 'Valeria Flores', 'Valerie', 'Valery',
   'Intake', 'Paralegal',
 ];
 
