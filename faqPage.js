@@ -90,6 +90,14 @@ const FAQ = [
     )}. It reads client communications from Quo (phone calls + SMS), the #lead-calls Slack channel, and Google Sheets, then uses AI to produce daily/weekly/monthly reports and — new in V1 — to spot clients who are great candidates for a Google review. It also hosts the branded review page clients see.`,
   },
   {
+    q: 'Do RJL Transfers / internal transfer legs count on Call Stats emails?',
+    a: 'No for incoming volume and the missed KPI. Defaults ignore incoming on <strong>RJL Transfers</strong> and <strong>RJL Outbound</strong> (edit under Firms → Yesterday Call Stats). Quo Router also skips Slack posts when both From and To are firm lines (e.g. Main → Transfers).',
+  },
+  {
+    q: 'Where are Call Stats inbox rules edited?',
+    a: 'Open <code>/review/firms</code> → Edit firm → <strong>Yesterday Call Stats</strong>: exclude entirely, transfer lines, and ignore INCOMING. Placeholders show the defaults (Transfers + Outbound).',
+  },
+  {
     q: 'Where do Yesterday Call Stats get their numbers?',
     a: 'Quo POSTs each <code>call.completed</code> (and sent texts) to <code>/webhooks/quo</code>. Answered vs missed vs forwarded is read from the payload (<code>answeredAt</code>, <code>forwardedTo</code>), not from separate event types — the current Quo webhook UI only offers <code>call.completed</code>. Those events are stored in Railway Postgres (<code>quo_calls</code>, <code>quo_messages</code>) so the email can count one real customer event instead of paging the public list-calls API, which drops auto-forward and transfer legs. History from before the webhook was turned on can be hydrated with <code>node backfillLedger.js</code> (default floor July 1, 2026 Central).',
   },

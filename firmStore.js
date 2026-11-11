@@ -170,6 +170,26 @@ function statsExcludeInboxesFrom(firmVal, envVal) {
   return list;
 }
 
+const DEFAULT_STATS_IGNORE_INCOMING = 'RJL Outbound,RJL Transfers';
+const DEFAULT_STATS_TRANSFER_INBOXES = 'RJL Transfers';
+
+/** Blank or legacy “Outbound only” → also ignore Transfers inbound. */
+function statsIgnoreIncomingFrom(firmVal, envVal) {
+  const raw = firstNonEmpty(firmVal, envVal);
+  if (!raw) return parseList(DEFAULT_STATS_IGNORE_INCOMING);
+  const list = parseList(raw);
+  if (list.length === 1 && list[0].toLowerCase() === 'rjl outbound') {
+    return parseList(DEFAULT_STATS_IGNORE_INCOMING);
+  }
+  return list;
+}
+
+function statsTransferInboxesFrom(firmVal, envVal) {
+  const raw = firstNonEmpty(firmVal, envVal);
+  if (!raw) return parseList(DEFAULT_STATS_TRANSFER_INBOXES);
+  return parseList(raw);
+}
+
 /** Morning send time from CALL_STATS_CRON (`30 7 * * *` → 7:30), else 7:30. */
 function morningTimeFromCron() {
   const parts = String(process.env.CALL_STATS_CRON || '').trim().split(/\s+/);
@@ -370,14 +390,15 @@ function reportConfigForFirm(firm) {
     // for incoming (Leads, RJL Main Line, RGV Number, RJL Transfers, Intake).
     // RJL Outbound stays in the fetch so outbound + sent messages count.
     statsExcludeInboxes: statsExcludeInboxesFrom(f.stats_exclude_inboxes, env.STATS_EXCLUDE_INBOXES),
-    // Optional: lines counted toward who ANSWERED but not toward incoming
-    // volume. Empty by default — move a line here (and out of the exclude list)
-    // to credit staff for transferred calls without double-counting volume.
-    statsTransferInboxes: firstList(f.stats_transfer_inboxes, env.STATS_TRANSFER_INBOXES),
-    // Auto-forward line: inbound is a duplicate of the line that actually rang,
-    // so it stays out of incoming volume / missed KPI. Outbound calls, talk
-    // time, and sent messages on these lines still count in the per-user table.
-    statsIgnoreIncomingInboxes: firstList(f.stats_ignore_incoming_inboxes, env.STATS_IGNORE_INCOMING_INBOXES, 'RJL Outbound'),
+    // Default RJL Transfers: out of incoming volume. Prefer ignore-incoming
+    // below when the leg should not count for answered either.
+    statsTransferInboxes: statsTransferInboxesFrom(f.stats_transfer_inboxes, env.STATS_TRANSFER_INBOXES),
+    // Auto-forward + Transfers: inbound left out of volume, missed KPI, and
+    // per-user answered. Outbound / talk time / sent texts still count.
+    statsIgnoreIncomingInboxes: statsIgnoreIncomingFrom(
+      f.stats_ignore_incoming_inboxes,
+      env.STATS_IGNORE_INCOMING_INBOXES,
+    ),
     // Secondary outcomes table at the bottom of Call Stats (lead-related inboxes).
     statsLeadsInboxes: firstList(f.stats_leads_inboxes, env.STATS_LEADS_INBOXES, 'Leads,Intake'),
     intakeGradingEmailTo: firstEmailList(f.intake_grading_email_to, env.INTAKE_GRADING_EMAIL_TO),
