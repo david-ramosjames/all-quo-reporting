@@ -28,6 +28,7 @@ const pg = require('./pgStore');
 const reviewRequests = require('./reviewRequests');
 const quoSend = require('./quoSend');
 const { aggregateLanguages, detectLanguage } = require('./languageDetect');
+const { isObviousNoActionSms, isAutoReplyOutboundSms } = require('./smsHelpers');
 const {
   getLeadPipelineText,
   fetchSheetData,
@@ -2241,7 +2242,8 @@ function hasStaffResponseSince(group, sinceIso) {
     if (!Number.isFinite(t)) continue;
     if (ev.recordType === 'sms') {
       if (t <= sinceMs) continue;
-      if (!isIncomingDirection(ev.direction)) return true;
+      // Canned auto-replies are not a human follow-up.
+      if (isStaffClearingOutboundSms(ev)) return true;
       continue;
     }
     // Calls: 2-minute grace so the originating miss/callback leg is not "the return".
@@ -3500,21 +3502,16 @@ function looksLikeContingentCallbackReason(reason) {
   );
 }
 
-/**
- * Cheap pre-filter: empty / pure acknowledgements never need an LLM call.
- * Everything else goes to classifySmsNeedsStaffResponse (fails closed).
- */
-function isObviousNoActionSms(body) {
-  const t = String(body || '').trim();
-  if (!t) return true;
-  return /^(ok|okay|k|kk|thanks|thank you|thx|ty|got it|sounds good|yes|yep|yeah|no|nah|np|yw|👍|🙏|👌|si|sí)([!.,\s]*)$/i.test(
-    t
-  );
+/** Outbound SMS that counts as staff clearing a needs-response item. */
+function isStaffClearingOutboundSms(ev) {
+  if (!ev || ev.recordType !== 'sms') return false;
+  if (isIncomingDirection(ev.direction)) return false;
+  return !isAutoReplyOutboundSms(ev.body);
 }
 
 /**
  * Latest inbound SMS not yet cleared by a later connected human call or
- * outbound text. Skips empty/ack-only bodies. Content judgment is LLM's job.
+ * real staff outbound text (auto-replies ignored). Skips empty/ack/greeting bodies.
  */
 function findLatestUnclearedInboundSms(group) {
   const sorted = [...(group || [])].sort((x, y) =>
@@ -3531,7 +3528,7 @@ function findLatestUnclearedInboundSms(group) {
   const since = String(lastInbound.timestamp || '');
   const cleared = sorted.some((ev) => {
     if (!ev.timestamp || String(ev.timestamp) <= since) return false;
-    if (ev.recordType === 'sms') return !isIncomingDirection(ev.direction);
+    if (ev.recordType === 'sms') return isStaffClearingOutboundSms(ev);
     return isConnectedHumanCall(ev);
   });
   return cleared ? null : lastInbound;
@@ -4096,9 +4093,9 @@ async function runMissedClientCallReport() {
   for (const [key, group] of byPhone) byPhoneTouch.set(key, [...group]);
 
   // Texts needing response — merge SMS into call timelines, skip clients already
-  // listed for missed/callback. Obvious acks skip the LLM; everything else is
-  // classified like call-back transcripts. A later connected call OR outbound
-  // text clears the Case Tracker item (reply does not have to be by text).
+  // listed for missed/callback. Obvious acks/greetings skip the LLM; everything
+  // else is classified like call-back transcripts. A later connected call OR
+  // real staff outbound text clears the item (canned auto-replies do not).
   {
     console.log('\n[3/4] Checking inbound client texts that still need a staff response...');
     for (const m of allSms) {
@@ -5451,12 +5448,21 @@ function personNameKey(name) {
 }
 
 /**
- * Same person, different labels (Slack vs Quo). First key is the report display name.
+ * Same person, different labels (Slack vs Quo seat). First key is the report display name.
  * Do not put bare "valeria" here — that collides with Valeria Flores.
  */
 const AVAILABILITY_PERSON_ALIASES = [
   ['claudia chang', 'claudia', 'valeria chang'],
+  // Shared Quo logins used for answered/outbound; Slack phone-staff uses the person name.
+  ['jackie', 'legal assistant'],
+  ['roman', 'intake specialist'],
 ];
+
+const AVAILABILITY_DISPLAY_NAMES = {
+  'claudia chang': 'Claudia Chang',
+  jackie: 'Jackie',
+  roman: 'Roman',
+};
 
 function availabilityCanonicalName(name) {
   const key = personNameKey(name);
@@ -5468,7 +5474,7 @@ function availabilityCanonicalName(name) {
 }
 
 function availabilityDisplayName(canonicalKey, fallbackName) {
-  if (canonicalKey === 'claudia chang') return 'Claudia Chang';
+  if (AVAILABILITY_DISPLAY_NAMES[canonicalKey]) return AVAILABILITY_DISPLAY_NAMES[canonicalKey];
   return fallbackName || canonicalKey;
 }
 
@@ -5494,7 +5500,7 @@ function consolidateAvailabilityByUser(byUser) {
     }
     prev.count = Math.max(prev.count, count);
     prev.onDuty = prev.onDuty || Boolean(u.onDuty);
-    if (canonical === 'claudia chang') prev.name = 'Claudia Chang';
+    prev.name = availabilityDisplayName(canonical, prev.name);
   }
   return [...byCanonical.values()];
 }
@@ -5558,10 +5564,43 @@ function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
     const fn = personNameKey(row.name).split(/\s+/)[0];
     const hit = (curIdx.first.get(fn) || []).find((c) => c.count === row.availableMissed);
     if (hit) markUsed(hit.full);
-    // Quo seat "Valeria Chang" → show the name she goes by on the Available Missed table.
-    if (availabilityCanonicalName(row.name) === 'claudia chang') {
-      row.name = 'Claudia Chang';
+    // Quo seat labels → person names (Valeria Chang, Legal Assistant, Intake Specialist).
+    const canonical = availabilityCanonicalName(row.name);
+    if (AVAILABILITY_DISPLAY_NAMES[canonical]) {
+      row.name = AVAILABILITY_DISPLAY_NAMES[canonical];
     }
+  }
+  // If Quo had both a seat login and a person login, collapse to one By User row.
+  {
+    const byCanonical = new Map();
+    const merged = [];
+    for (const row of userRows) {
+      const key = availabilityCanonicalName(row.name);
+      const prev = byCanonical.get(key);
+      if (!prev) {
+        byCanonical.set(key, row);
+        merged.push(row);
+        continue;
+      }
+      prev.total += row.total || 0;
+      prev.outgoing += row.outgoing || 0;
+      prev.answered += row.answered || 0;
+      prev.seconds += row.seconds || 0;
+      prev.messages += row.messages || 0;
+      prev.availableMissed = Math.max(prev.availableMissed || 0, row.availableMissed || 0);
+      prev.onDuty = Boolean(prev.onDuty || row.onDuty);
+      if (prev.prev && row.prev) {
+        prev.prev.total += row.prev.total || 0;
+        prev.prev.outgoing += row.prev.outgoing || 0;
+        prev.prev.answered += row.prev.answered || 0;
+        prev.prev.seconds += row.prev.seconds || 0;
+        prev.prev.messages += row.prev.messages || 0;
+        prev.prev.availableMissed = Math.max(prev.prev.availableMissed || 0, row.prev.availableMissed || 0);
+      }
+      if (AVAILABILITY_DISPLAY_NAMES[key]) prev.name = AVAILABILITY_DISPLAY_NAMES[key];
+    }
+    userRows.length = 0;
+    userRows.push(...merged);
   }
   // Topic-duty / available-miss people with no Quo answered/outbound activity.
   // Includes on-duty roster users even when their available-missed count is 0.

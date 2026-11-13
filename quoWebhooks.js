@@ -229,6 +229,10 @@ function staffResponseTouch(evt, result) {
     const r = evt?.resource || {};
     const direction = String(r.direction || '');
     if (/^(incoming|inbound)$/i.test(direction)) return null;
+    const body = String(r.text || r.body || r.message || r.content || '').trim();
+    // Canned bilingual intake auto-reply is not a real staff follow-up.
+    const { isAutoReplyOutboundSms } = require('./smsHelpers');
+    if (isAutoReplyOutboundSms(body)) return null;
     const phone = String(r.to || r.from || '').trim();
     if (!phone) return null;
     return {
@@ -236,6 +240,7 @@ function staffResponseTouch(evt, result) {
       timestamp: r.createdAt || new Date().toISOString(),
       direction: direction || 'outgoing',
       phone,
+      body,
     };
   }
   if (result.kind === 'call') {
