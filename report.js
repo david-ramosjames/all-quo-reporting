@@ -5637,6 +5637,20 @@ function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
     const hit = curUsers.find((u) => availabilityCanonicalName(u.name || u.slackUserId) === full);
     row.onDuty = Boolean(hit?.onDuty);
   }
+  // Drop last-week ghosts (e.g. Intake/Roman on a Saturday with no calls today).
+  // Keep anyone with current Quo activity or a current available-missed count.
+  const activeRows = userRows.filter(
+    (u) =>
+      (Number(u.total) || 0) > 0 ||
+      (Number(u.answered) || 0) > 0 ||
+      (Number(u.outgoing) || 0) > 0 ||
+      (Number(u.messages) || 0) > 0 ||
+      (Number(u.seconds) || 0) > 0 ||
+      (Number(u.availableMissed) || 0) > 0
+  );
+  userRows.length = 0;
+  userRows.push(...activeRows);
+
   userRows.sort(
     (a, b) =>
       b.answered - a.answered ||
@@ -5647,7 +5661,7 @@ function mergeAvailabilityIntoUserRows(userRows, curMisses, prevMisses) {
     prevUsers.map((u) => [availabilityCanonicalName(u.name || u.slackUserId), Number(u.count) || 0])
   );
   const availabilityByUser = [...userRows]
-    .filter((u) => (u.availableMissed || 0) > 0 || (u.prev?.availableMissed || 0) > 0 || u.onDuty)
+    .filter((u) => (u.availableMissed || 0) > 0 || (u.prev?.availableMissed || 0) > 0)
     .map((u) => ({
       name: u.name,
       count: Number(u.availableMissed) || 0,
