@@ -67,6 +67,13 @@ const JOBS = [
     out: 'Email',
   },
   {
+    name: 'Call Handlers (manual)',
+    when: () => 'On demand from the admin trigger page (or <code>node report.js handlers</code>)',
+    what:
+      'Past 24 hours (or 12/48/72) of every call with who handled it — inbound from Quo answeredBy, outbound from the dialer. Use this when staff say they were already on a call during a miss. Emails the Call Stats morning list with a CSV of each call.',
+    out: 'Email + CSV',
+  },
+  {
     name: 'Intake Call Grading',
     when: () => 'Daily · 6:00 PM (today so far)',
     what:

@@ -11,6 +11,7 @@ const {
   runClientLanguageReport,
   runIntakeMarketingReport,
   runDailyCallStatsReport,
+  runCallHandlersReport,
   runIntakeGradingReport,
   runForAllFirms,
 } = require('./report');
@@ -384,6 +385,7 @@ if (process.env.DISABLE_MANUAL_TRIGGER_UI === 'true' || process.env.DISABLE_MANU
       language: (opts) => runForAllFirms(runClientLanguageReport, opts),
       marketing: (opts) => runForAllFirms(runIntakeMarketingReport, opts),
       callstats: (opts) => runForAllFirms(runDailyCallStatsReport, opts),
+      handlers: (opts) => runForAllFirms(runCallHandlersReport, opts),
       grading: (opts) => runForAllFirms(runIntakeGradingReport, opts),
     },
   });

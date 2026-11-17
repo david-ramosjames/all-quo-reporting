@@ -16,10 +16,10 @@ const slackEvents = require('./slackEvents');
 const quoWebhooks = require('./quoWebhooks');
 
 /**
- * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review' | 'language' | 'marketing' | 'callstats' | 'grading'} JobId
+ * @typedef {'daily' | 'weekly' | 'monthly' | 'missed' | 'review' | 'language' | 'marketing' | 'callstats' | 'handlers' | 'grading'} JobId
  */
 
-const JOB_IDS = ['daily', 'weekly', 'monthly', 'missed', 'review', 'language', 'marketing', 'callstats', 'grading'];
+const JOB_IDS = ['daily', 'weekly', 'monthly', 'missed', 'review', 'language', 'marketing', 'callstats', 'handlers', 'grading'];
 
 function readRawBody(req) {
   return new Promise((resolve, reject) => {
@@ -227,6 +227,16 @@ function buildIndexHtml(message, email) {
         </select>
       </div>
       <button type="button" data-job="callstats">Run Call Stats (uses the send selected above; Sat/Sun coverage uses the weekend list)</button>
+      <div class="field">
+        <label for="handlers-hours">Call handlers window</label>
+        <select id="handlers-hours">
+          <option value="24" selected>Past 24 hours</option>
+          <option value="12">Past 12 hours</option>
+          <option value="48">Past 48 hours</option>
+          <option value="72">Past 72 hours</option>
+        </select>
+      </div>
+      <button type="button" data-job="handlers">Run Call Handlers (every call + who handled it → email + CSV)</button>
       <button type="button" data-job="grading">Run Intake Call Grading (today so far · Leads + Intake · rubric scores → email)</button>
     </div>
     <p class="hint">Firms &amp; per-firm config: <a href="/review/firms" style="color:#60a5fa">/review/firms</a> · Review landing page: <a href="/review" style="color:#60a5fa">/review</a> · edit copy at <a href="/review/edit" style="color:#60a5fa">/review/edit</a> · what does this all do? <a href="/faq" style="color:#60a5fa">/faq</a></p>
@@ -292,6 +302,9 @@ function buildIndexHtml(message, email) {
     }
     if (job === 'callstats') {
       options.slot = document.getElementById('callstats-slot').value || 'morning';
+    }
+    if (job === 'handlers') {
+      options.hours = parseInt(document.getElementById('handlers-hours').value, 10) || 24;
     }
     clearPoll();
     setStatus('Starting…');
@@ -969,6 +982,14 @@ function startManualTriggerServer(opts) {
             return;
           }
           options.slot = slot;
+        }
+        if (job === 'handlers') {
+          const hours = parseInt(rawOptions.hours, 10);
+          if (!Number.isFinite(hours) || hours < 1 || hours > 168) {
+            sendJson(res, 400, { error: 'options.hours must be an integer between 1 and 168' });
+            return;
+          }
+          options.hours = hours;
         }
         setImmediate(() => {
           runInBackground(job, options).catch((e) => console.error('[manual trigger] unhandled', e));

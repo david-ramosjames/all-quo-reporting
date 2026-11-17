@@ -5802,6 +5802,53 @@ function statsCallerPhone(c) {
   return parts[0] || '';
 }
 
+/** External party on either direction (caller for inbound, dialed for outbound). */
+function statsOtherPartyPhone(c) {
+  if (!c) return '';
+  if (isIncomingDirection(c.direction)) return statsCallerPhone(c) || c.from || '';
+  if (c.to) return c.to;
+  const parts = Array.isArray(c.participants) ? c.participants : [];
+  const phoneish = parts.find((p) => typeof p === 'string' && /\d{7,}/.test(p));
+  return phoneish || (typeof parts[0] === 'string' ? parts[0] : '') || '';
+}
+
+/**
+ * Who was on this call for ops accountability (Quo IDs → workspace names).
+ * Inbound: answeredBy (or Sona). Outbound: initiatedBy || userId (dialer).
+ */
+function resolveStatsCallHandler(c, userMap = {}) {
+  const inbound = isIncomingDirection(c?.direction);
+  if (inbound) {
+    if (c.aiHandled) return { id: null, name: 'Sona', kind: 'sona' };
+    if (c.answeredBy) {
+      const raw = userMap[c.answeredBy] || c.answeredBy;
+      const canonical = availabilityCanonicalName(raw);
+      return {
+        id: c.answeredBy,
+        name: availabilityDisplayName(canonical, raw),
+        kind: 'answered',
+      };
+    }
+    const outcome = callOutcomeBucket(c);
+    if (outcome === 'Forwarded') return { id: null, name: '—', kind: 'forwarded' };
+    return { id: null, name: '—', kind: 'unanswered' };
+  }
+  const id = c.initiatedBy || c.userId || null;
+  if (!id) return { id: null, name: '—', kind: 'unknown' };
+  const raw = userMap[id] || id;
+  const canonical = availabilityCanonicalName(raw);
+  return { id, name: availabilityDisplayName(canonical, raw), kind: 'dialed' };
+}
+
+function statsCallQuoLink(c) {
+  if (!c?.phoneNumberId) return '';
+  if (c.conversationId) {
+    const at = c.id ? `?at=${encodeURIComponent(c.id)}` : '';
+    return `https://my.openphone.com/inbox/${c.phoneNumberId}/c/${c.conversationId}${at}`;
+  }
+  return `https://my.openphone.com/inbox/${c.phoneNumberId}`;
+}
+
 function tagStatsCallsKnownContact(calls, contactMap) {
   for (const c of calls || []) {
     const phone = statsCallerPhone(c);
@@ -5950,6 +5997,7 @@ function statsCallFromLedger(row, lineById) {
   return {
     id: row.call_id,
     phoneNumberId: pnId,
+    conversationId: row.conversation_id || null,
     lineName: row.line_name || lineById[pnId] || '',
     participants: externals.length ? externals : (parts.workspace || []),
     answeredBy: row.answered_by || null,
@@ -6010,6 +6058,18 @@ async function enrichStatsFromLedger(data, window, excludeLineNames) {
         }
         if (!existing.callerPhone && mapped.callerPhone) {
           existing.callerPhone = mapped.callerPhone;
+          changed = true;
+        }
+        if (!existing.conversationId && mapped.conversationId) {
+          existing.conversationId = mapped.conversationId;
+          changed = true;
+        }
+        if (!existing.from && mapped.from) {
+          existing.from = mapped.from;
+          changed = true;
+        }
+        if (!existing.to && mapped.to) {
+          existing.to = mapped.to;
           changed = true;
         }
         if (changed) patched += 1;
@@ -6362,6 +6422,223 @@ async function runDailyCallStatsReport(opts = {}) {
 
   console.log(`\n${'═'.repeat(52)}`);
   console.log(`${win.title} complete.`);
+}
+
+/**
+ * Trailing N hours of every call with who handled it — for accountability when
+ * staff say they were already on a call during a miss.
+ */
+function buildCallHandlersEmailHtml({ firmName, windowLabel, rows, summary }) {
+  const css = `
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; color: #111; background: #ffffff; }
+    h2 { margin: 0 0 4px; } h3 { margin: 22px 0 6px; }
+    table { border-collapse: collapse; width: 100%; margin-top: 10px; background: #ffffff; }
+    th, td { border: 1px solid #d0d7de; padding: 6px 8px; text-align: left; font-size: 13px; background: #ffffff; vertical-align: top; }
+    td.num, th.num { text-align: right; white-space: nowrap; }
+    .note { color: #57606a; font-size: 12px; margin-top: 8px; }
+    .muted { color: #57606a; }
+    .in { color: #0550ae; } .out { color: #8250df; }
+    a { color: #0969da; }
+  `;
+  const byHandler = (summary.byHandler || [])
+    .map((h) => `<tr><td>${escapeHtml(h.name)}</td><td class="num">${h.answered}</td><td class="num">${h.outbound}</td><td class="num">${h.total}</td><td class="num">${escapeHtml(formatCallDuration(h.seconds))}</td></tr>`)
+    .join('');
+  const callRows = (rows || [])
+    .map((r) => {
+      const dirClass = r.inbound ? 'in' : 'out';
+      const link = r.quoLink
+        ? `<a href="${escapeHtml(r.quoLink)}">Open</a>`
+        : '<span class="muted">—</span>';
+      return `<tr>
+        <td>${escapeHtml(r.whenLabel)}</td>
+        <td class="${dirClass}">${escapeHtml(r.directionLabel)}</td>
+        <td>${escapeHtml(r.lineName || '—')}</td>
+        <td>${escapeHtml(r.otherParty || '—')}</td>
+        <td>${escapeHtml(r.outcome || r.status || '—')}</td>
+        <td class="num">${escapeHtml(formatCallDuration(r.duration))}</td>
+        <td><strong>${escapeHtml(r.handlerName || '—')}</strong>${r.handlerKind === 'unanswered' || r.handlerKind === 'forwarded' ? ` <span class="muted">(${escapeHtml(r.handlerKind)})</span>` : ''}</td>
+        <td>${link}</td>
+      </tr>`;
+    })
+    .join('');
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>${css}</style></head><body>
+    <h2>${escapeHtml(firmName)} — Call handlers (past ${escapeHtml(String(summary.hours || 24))}h)</h2>
+    <p class="note">${escapeHtml(windowLabel)} · ${rows.length} call(s)</p>
+    <p class="note">Inbound handler = Quo <code>answeredBy</code>. Outbound handler = dialer (<code>initiatedBy</code> / <code>userId</code>). Empty handler usually means forwarded, missed, or Quo never named who picked up.</p>
+
+    <h3>By person</h3>
+    <table>
+      <tr><th>Person</th><th class="num">Answered</th><th class="num">Outbound</th><th class="num">Total</th><th class="num">Talk time</th></tr>
+      ${byHandler || '<tr><td colspan="5" class="note">No attributed handlers in this window.</td></tr>'}
+    </table>
+
+    <h3>Every call</h3>
+    <table>
+      <tr><th>When (${escapeHtml(TIMEZONE)})</th><th>Dir</th><th>Line</th><th>Other party</th><th>Outcome</th><th class="num">Dur</th><th>Handled by</th><th>Quo</th></tr>
+      ${callRows || '<tr><td colspan="8" class="note">No calls in this window.</td></tr>'}
+    </table>
+  </body></html>`;
+}
+
+async function runCallHandlersReport(opts = {}) {
+  const hours = Math.max(1, Math.min(168, Math.floor(Number(opts.hours) || 24)));
+  const now = DateTime.now().setZone(TIMEZONE);
+  const start = now.minus({ hours });
+  const cur = {
+    createdAfter: start.toUTC().toISO(),
+    createdBefore: now.toUTC().toISO(),
+  };
+  const windowLabel = `${start.toFormat('ccc LLL d, h:mm a')} – ${now.toFormat('ccc LLL d, h:mm a')} ${TIMEZONE}`;
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log(`  Call Handlers — past ${hours}h`);
+  console.log(`  ${windowLabel}`);
+  console.log('═'.repeat(52));
+
+  const excludeLineNames = firmCtx().statsExcludeInboxes;
+  const apiKey = firmCtx().quoApiKey;
+  console.log(`\n[1/2] Fetching calls (excluding inboxes: ${excludeLineNames.join(', ') || 'none'})...`);
+  const data = await enrichStatsFromLedger(
+    await fetchDailyCallStats({ apiKey, ...cur, excludeLineNames }),
+    cur,
+    excludeLineNames
+  );
+  console.log(`  ${data.calls.length} call(s) across ${(data.includedLines || []).length} inbox(es).`);
+
+  const userMap = { ...(data.userMap || {}) };
+  const ignoreIncomingLines = firmCtx().statsIgnoreIncomingInboxes;
+  const ignoreIn = new Set(ignoreIncomingLines.map((s) => String(s).trim().toLowerCase()).filter(Boolean));
+
+  const rows = [];
+  for (const c of data.calls || []) {
+    const inbound = isIncomingDirection(c.direction);
+    if (inbound && ignoreIn.has(String(c.lineName || '').trim().toLowerCase())) continue;
+    const when = DateTime.fromISO(String(c.createdAt || ''), { zone: 'utc' });
+    const whenLabel = when.isValid
+      ? when.setZone(TIMEZONE).toFormat('LLL d, h:mm a')
+      : String(c.createdAt || '—');
+    const handler = resolveStatsCallHandler(c, userMap);
+    const outcome = inbound ? callOutcomeBucket(c) : (String(c.status || '').toLowerCase() || 'outbound');
+    rows.push({
+      id: c.id || '',
+      whenIso: c.createdAt || '',
+      whenLabel,
+      inbound,
+      directionLabel: inbound ? 'In' : 'Out',
+      lineName: c.lineName || '',
+      otherParty: statsOtherPartyPhone(c),
+      status: c.status || '',
+      outcome,
+      duration: Number(c.duration || 0),
+      handlerName: handler.name,
+      handlerId: handler.id,
+      handlerKind: handler.kind,
+      quoLink: statsCallQuoLink(c),
+      sortTs: when.isValid ? when.toMillis() : 0,
+    });
+  }
+  rows.sort((a, b) => b.sortTs - a.sortTs);
+
+  /** @type {Map<string, { name: string, answered: number, outbound: number, total: number, seconds: number }>} */
+  const byHandler = new Map();
+  for (const r of rows) {
+    if (!r.handlerId && (r.handlerKind === 'unanswered' || r.handlerKind === 'forwarded' || r.handlerKind === 'unknown')) {
+      continue;
+    }
+    const key = r.handlerName || '—';
+    if (!byHandler.has(key)) {
+      byHandler.set(key, { name: key, answered: 0, outbound: 0, total: 0, seconds: 0 });
+    }
+    const u = byHandler.get(key);
+    u.total += 1;
+    u.seconds += r.duration;
+    if (r.inbound && r.handlerKind === 'answered') u.answered += 1;
+    else if (r.inbound && r.handlerKind === 'sona') u.answered += 1;
+    else if (!r.inbound) u.outbound += 1;
+  }
+  const byHandlerList = [...byHandler.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name));
+
+  console.log('\n[2/2] By person:');
+  for (const h of byHandlerList) {
+    console.log(
+      `  ${h.name}: answered ${h.answered} · out ${h.outbound} · total ${h.total} · ${formatCallDuration(h.seconds)}`
+    );
+  }
+  console.log(`\n  ${rows.length} call row(s) in detail list.`);
+
+  const summary = { hours, byHandler: byHandlerList };
+  const html = buildCallHandlersEmailHtml({
+    firmName: firmCtx().firmName,
+    windowLabel,
+    rows,
+    summary,
+  });
+  const plainLines = [
+    `${firmCtx().firmName} — Call handlers (past ${hours}h)`,
+    windowLabel,
+    '',
+    'By person:',
+    ...byHandlerList.map(
+      (h) => `  ${h.name}: answered ${h.answered} · out ${h.outbound} · total ${h.total} · ${formatCallDuration(h.seconds)}`
+    ),
+    '',
+    'Every call:',
+    ...rows.map(
+      (r) =>
+        `  ${r.whenLabel} | ${r.directionLabel} | ${r.lineName || '—'} | ${r.otherParty || '—'} | ${r.outcome} | ${formatCallDuration(r.duration)} | ${r.handlerName}`
+    ),
+  ];
+  const plainText = plainLines.join('\n');
+
+  const csvLines = [
+    ['when_local', 'direction', 'line', 'other_party', 'outcome', 'duration_sec', 'handled_by', 'handler_kind', 'call_id', 'quo_link'].join(','),
+    ...rows.map((r) =>
+      [
+        r.whenLabel,
+        r.directionLabel,
+        r.lineName,
+        r.otherParty,
+        r.outcome,
+        r.duration,
+        r.handlerName,
+        r.handlerKind,
+        r.id,
+        r.quoLink,
+      ]
+        .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
+        .join(',')
+    ),
+  ];
+  const csvName = path.join(
+    process.cwd(),
+    `call-handlers-${now.toFormat('yyyy-LL-dd-HHmm')}.csv`
+  );
+  fs.writeFileSync(csvName, csvLines.join('\n'), 'utf8');
+  console.log(`  Wrote ${csvName}`);
+
+  const morningTo = firmStore.callStatsSlotRecipients(firmCtx(), 'morning') || [];
+  const recipients = morningTo.length
+    ? morningTo
+    : (firmCtx().emailTo?.length ? firmCtx().emailTo : EMAIL_TO);
+  const subject = `${firmCtx().firmName} — Call handlers (past ${hours}h) — ${now.toFormat('LLL d, h:mm a')}`;
+
+  if (!recipients.length || !EMAIL_CONFIGURED) {
+    console.log('\n  Email not configured — printing report:\n');
+    console.log(plainText);
+  } else {
+    await sendEmail({
+      htmlBody: html,
+      plainText,
+      subject,
+      to: recipients,
+      attachments: [{ filename: path.basename(csvName), path: csvName }],
+    });
+    console.log(`\n  Sent call handlers report to: ${recipients.join(', ')}`);
+  }
+
+  console.log(`\n${'═'.repeat(52)}`);
+  console.log('Call Handlers report complete.');
+  return { csvName, rows, byHandler: byHandlerList };
 }
 
 function intakeGradingBand(score) {
@@ -6995,6 +7272,9 @@ if (require.main === module) {
   if (arg === '--language' || arg === 'language') run = runClientLanguageReport;
   if (arg === '--marketing' || arg === 'marketing') run = runIntakeMarketingReport;
   if (arg === '--callstats' || arg === 'callstats') run = runDailyCallStatsReport;
+  if (arg === '--handlers' || arg === 'handlers' || arg === '--call-handlers' || arg === 'call-handlers') {
+    run = runCallHandlersReport;
+  }
   if (arg === '--intake-grading' || arg === 'intake-grading' || arg === 'grading') run = runIntakeGradingReport;
   if (arg === '--clear-needs' || arg === 'clear-needs') {
     runNeedsResponseClearSweep().catch((err) => {
@@ -7009,7 +7289,13 @@ if (require.main === module) {
     const slotFromFlag = slotFlag !== -1 ? process.argv[slotFlag + 1] : undefined;
     const slotFromPos = ['morning', 'midday', 'afternoon'].includes(process.argv[3]) ? process.argv[3] : undefined;
     const slot = slotFromFlag || slotFromPos;
-    runForAllFirms(run, { ...(firmId ? { firmId } : {}), ...(slot ? { slot } : {}) }).catch((err) => {
+    const hoursFlag = process.argv.indexOf('--hours');
+    const hoursFromFlag = hoursFlag !== -1 ? process.argv[hoursFlag + 1] : undefined;
+    runForAllFirms(run, {
+      ...(firmId ? { firmId } : {}),
+      ...(slot ? { slot } : {}),
+      ...(hoursFromFlag ? { hours: hoursFromFlag } : {}),
+    }).catch((err) => {
       console.error('\nError:', err.response?.data || err.message);
       process.exit(1);
     });
@@ -7027,9 +7313,12 @@ module.exports = {
   runClientLanguageReport,
   runIntakeMarketingReport,
   runDailyCallStatsReport,
+  runCallHandlersReport,
   runIntakeGradingReport,
   aggregateCallStats,
   buildCallStatsEmailHtml,
+  buildCallHandlersEmailHtml,
   buildIntakeGradingEmailHtml,
+  resolveStatsCallHandler,
   runForAllFirms,
 };
