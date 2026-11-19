@@ -5934,7 +5934,7 @@ function buildCallStatsEmailHtml(dayLabel, curAgg, prevAgg, userRows, meta, miss
     ? availRows
         .map(
           (u) =>
-            `<tr><td>${escapeHtml(u.name)}${u.onDuty ? '' : ' <span class="chg">(not on topic)</span>'}</td>` +
+            `<tr><td>${escapeHtml(u.name)}</td>` +
             cell(u.count || 0, u.prev || 0) +
             `</tr>`
         )
